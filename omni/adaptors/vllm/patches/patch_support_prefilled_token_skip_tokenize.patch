@@ -194,7 +194,7 @@ index dbb6a62c4..ebec8fcce 100644
 +                request.append_output_token_ids(request.sampling_params.extra_args['kv_transfer_params']['prefilled_token'])
 +        
          # due to no speculative trans from prefill node, push one manually
-         if self.vllm_config.speculative_config is not None:
+         if self.vllm_config.speculative_config is not None and (self.vllm_config.kv_transfer_config is None or self.vllm_config.kv_transfer_config.kv_role != "kv_both")::
              request.spec_token_ids.extend([0] * self.vllm_config.speculative_config.num_speculative_tokens)
 diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
 index 16165b52e..39a43006b 100644
