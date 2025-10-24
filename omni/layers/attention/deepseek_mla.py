@@ -90,7 +90,7 @@ class Indexer(nn.Module):
         self.q_lora_rank: int = config.q_lora_rank
 
         self.actual_seq_lengths = {}
-        for batch_size in model_extra_config.operator_opt_config.decode_gear_list:
+        for batch_size in model_extra_config.task_config.decode_gear_list:
             # TODO 当前支持int32，后续需要去掉
             self.actual_seq_lengths[batch_size] = torch.tensor(list(range(1, batch_size + 1)), dtype=torch.int32, device=current_platform.device_type)
 

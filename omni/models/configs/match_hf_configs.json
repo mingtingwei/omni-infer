@@ -10,6 +10,17 @@
         "n_shared_experts": 1,
         "moe_intermediate_size": 2048
     },
+    "deepseek_v32":{
+        "model_type": "deepseek_v32",
+        "hidden_size": 7168,
+        "num_attention_heads": 128,
+        "max_position_embeddings": 163840,
+        "vocab_size": 129280,
+        "intermediate_size": 18432,
+        "n_routed_experts": 256,
+        "n_shared_experts": 1,
+        "moe_intermediate_size": 2048
+    },
     "qwen3-235B":{
         "model_type": "qwen3_moe",
         "hidden_size": 4096,
