@@ -3,10 +3,17 @@
         "model": {
             "validator_type": "supported"
         },
-        "messages": {
-            "validator_type": "supported",
-            "unsupported_subfield": ["messages.content.text", "messages.content.type", "messages.content.refusal"]
-        },
+        "messages": [
+            {
+                "validator_type": "supported",
+                "unsupported_subfield": ["messages.content.text", "messages.content.type", "messages.content.refusal"]
+            },
+            {
+                "validator_type": "nested_value",
+                "subfield": ["messages.role"],
+                "target_value": ["developer", "system", "user", "assistant", "function", "tool"]
+            }
+        ],
         "stream": {
             "validator_type": "supported"
         },

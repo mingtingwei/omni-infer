@@ -1,7 +1,8 @@
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Type, Union
+from typing import Any, Optional, Type, Union, Tuple, Callable
+from collections import defaultdict
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -32,42 +33,84 @@ class BaseValidator(ABC):
         pass
 
 
-class SupportedValidator(BaseValidator):
+class NestedBaseValidator(BaseValidator):
+    def __init__(
+        self,
+        param_name: str,
+        error_msg: Optional[str] = None,
+        subfields: list[str] = [],
+        checker: Callable[[str, Any], Tuple[Optional[str], Optional[Any]]] | None = None
+    ):
+        super(NestedBaseValidator, self).__init__(param_name, error_msg)
+        self.subfields = subfields
+        self.checker = checker
+    
+    def validate(self, value):
+        return self.check_field(value, self.param_name)
+    
+    def check_field(self, value, param_name: str) -> Optional[str]:
+        if param_name in self.subfields:
+            if self.checker:
+                err_str, _ = self.checker(param_name, value)
+                if err_str:
+                    return err_str
+        if isinstance(value, dict):
+            return self.check_dict_subfield(value, param_name)
+        if isinstance(value, list):
+            return self.check_list_subfield(value, param_name)
+        return None
+    
+    def check_dict_subfield(self, value, cur_param: str) -> Optional[str]:
+        for name, val in list(value.items()):
+            sub_cur_param = f'{cur_param}.{name}'
+            if sub_cur_param in self.subfields:
+                if self.checker:
+                    err_str, new_val = self.checker(sub_cur_param, value)
+                    if err_str:
+                        return err_str
+                    if new_val is not None:
+                        value = new_val
+            elif isinstance(val, (list, dict)):
+                err_str = self.check_field(val, sub_cur_param)
+                if err_str:
+                    return err_str
+        return None
+    
+    def check_list_subfield(self, value, cur_param: str) -> Optional[str]:
+        for val in value:
+            if isinstance(val, dict):
+                err_str = self.check_dict_subfield(val, cur_param)
+                if err_str:
+                    return err_str
+        return None
+
+
+class SupportedValidator(NestedBaseValidator):
     def __init__(
             self,
             param_name: str,
             error_msg: Optional[str] = None,
             unsupported_subfield: list = []
     ):
-        super().__init__(param_name, error_msg)
-        self.unsupported_subfield = unsupported_subfield
+        def checker(param_name: str, value: Any):
+            value.pop(param_name.split('.')[-1])
+            return None, value
+        super().__init__(param_name, error_msg, unsupported_subfield, checker)
 
-    def check_field(self, value: Any, curr_field: str = ""):
-        if isinstance(value, dict):
-            return self.check_subfield_dict(value, curr_field)
-        if isinstance(value, list):
-            return self.check_subfield_list(value, curr_field)
-        return None
 
-    def check_subfield_dict(self, value: Any, curr_field: str):
-        for param_name, val in list(value.items()):
-            curr_subfield = f"{curr_field}.{param_name}"
-            if curr_subfield in self.unsupported_subfield:
-                value.pop(param_name)
-            elif isinstance(val, (dict, list)):
-                self.check_field(val, curr_subfield)
-        return None
-    
-    def check_subfield_list(self, value: Any, curr_field: str):
-        for val in value:
-            if isinstance(val, dict):
-                self.check_subfield_dict(val, curr_field)
-        return None
-
-    def validate(self, value: Any) -> Optional[str]:
-        # The value must be included within the subfield.
-        self.check_field(value, self.param_name)
-        return None
+class NestedValueValidator(NestedBaseValidator):
+    def __init__(
+        self,
+        param_name: str,
+        error_msg: Optional[str] = None,
+        subfields: list[str] = [],
+        target_values: list[str] = []
+    ):
+        def checker(param_name: str, value: Any):
+            if value[param_name.split('.')[-1]] not in target_values:
+                return (f'{param_name} only support the value in {target_values}', None)
+            return None, None
+        super().__init__(param_name, error_msg, subfields, checker)
 
 
 class RangeValidator(BaseValidator):
@@ -143,6 +186,13 @@ def create_validator(param_name: str, config: dict[str, Any]) -> Optional[BaseVa
             max_val=config.get("max_val"),
             type_=tuple(map(TYPE_MAPPING.get, type_str))
         )
+    elif validator_type == 'nested_value':
+        return NestedValueValidator(
+            param_name=config.get('param_name', param_name),
+            error_msg=config.get('error_msg'),
+            subfields=config.get('subfield', []),
+            target_values=config.get('target_value', [])
+        )
     
     else:
         raise ValueError(f"Unknown validator type: {validator_type}")
@@ -155,20 +205,26 @@ def load_validators_from_json(config_path: str) -> tuple[dict[str, BaseValidator
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
     
-    validators = {}
-    custom_validators = {}
+    validators = defaultdict(list)
+    custom_validators = defaultdict(list)
     
     # load validators
     for param_name, validator_config in config.get("validators", {}).items():
-        validator = create_validator(param_name, validator_config)
-        if validator:
-            validators[param_name] = validator
+        if not isinstance(validator_config, list):
+            validator_config = [validator_config]
+        for cfg in validator_config:
+            validator = create_validator(param_name, cfg)
+            if validator:
+                validators[param_name].append(validator)
     
     # load custom_validators
     for param_name, validator_config in config.get("custom_validators", {}).items():
-        validator = create_validator(param_name, validator_config)
-        if validator:
-            custom_validators[param_name] = validator
+        if not isinstance(validator_config, list):
+            validator_config = [validator_config]
+        for cfg in validator_config:
+            validator = create_validator(param_name, cfg)
+            if validator:
+                custom_validators[param_name].append(validator)
     
     return validators, custom_validators
 
@@ -207,17 +263,19 @@ class ValidateSamplingParams(BaseHTTPMiddleware):
             status_code = HTTPStatus.BAD_REQUEST
             unsupported_param = []
             for param_name, value in json_load.items():
-                validator = VALIDATORS.get(param_name)
-                if not validator:
+                validators = VALIDATORS.get(param_name)
+                if not validators:
                     unsupported_param.append(param_name)
                     continue
-                if error := validator.validate(value):
-                    return self.create_error_response(status_code, error)
-                if validator := CUSTOM_VALIDATORS.get(param_name):
-                    if validator.param_name not in json_load.keys():
-                        return self.create_error_response(status_code, validator.error_msg)
-                    elif error := validator.validate(json_load[validator.param_name]):
+                for validator in validators:
+                    if error := validator.validate(value):
                         return self.create_error_response(status_code, error)
+                if validators := CUSTOM_VALIDATORS.get(param_name):
+                    for validator in validators:
+                        if validator.param_name not in json_load.keys():
+                            return self.create_error_response(status_code, validator.error_msg)
+                        elif error := validator.validate(json_load[validator.param_name]):
+                            return self.create_error_response(status_code, error)
             
             for param_name in unsupported_param:
                 json_load.pop(param_name)
