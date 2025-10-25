@@ -124,30 +124,24 @@ class NPUModelRunner(GPUModelRunner):
         if vllm_config.additional_config is not None:
             self.use_rejection_sampler = vllm_config.additional_config.get("use_rejection_sampler", False)
             self.use_penalty = vllm_config.additional_config.get("use_penalty", False)
-            self.topk = vllm_config.additional_config.get("rejection_sampler_topk", 4)
+            self.topk = vllm_config.additional_config.get("rejection_sampler_topk", -1)
         else:
             self.use_rejection_sampler = False
             self.use_penalty = False
-            self.topk = 4
-        num_tokens_per_reqs_decode = 1 if not self.use_spec_decode else (1 + self.speculative_config.num_speculative_tokens) 
+            self.topk = -1
+        num_tokens_per_reqs_decode = 1 if not self.use_spec_decode else (1 + self.speculative_config.num_speculative_tokens)
+        self.num_tokens_per_reqs_decode = num_tokens_per_reqs_decode
+        self.decode_max_num_tokens = self.max_num_reqs * self.num_tokens_per_reqs_decode
         if self.use_spec_decode:
-            self.rejection_sampler = SimpleSampler(AscendSamplerV1(), self.use_rejection_sampler, self.topk)
-            if self.use_penalty:
-                penalty_cache = PenaltyCache(self.max_num_reqs, self.input_batch.vocab_size, self.device)
-                self.rejection_sampler.main_sampler.penalty_cache = penalty_cache
-            else:
-                self.rejection_sampler.main_sampler.penalty_cache = None
-            if self.use_rejection_sampler:
-                prob_cache = ProbCache(self.max_num_reqs, num_tokens_per_reqs_decode - 1, self.topk, self.device)
-                self.rejection_sampler.main_sampler.prob_cache = prob_cache
+            from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
+            from omni.adaptors.vllm.sample.validator import SimpleValidator, SparseRejectionSamplerValidator
+            
+            self.sampler = NewAscendSamplerV1(self)
+            self.rejection_sampler = SimpleValidator(self.sampler) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
             self.drafter = PostDrafter(vllm_config, device, self)
         else:
-            self.sampler = AscendSamplerV1()
-            if self.use_penalty:
-                penalty_cache = PenaltyCache(self.max_num_reqs, self.input_batch.vocab_size, self.device)
-                self.sampler.penalty_cache = penalty_cache
-            else:
-                self.sampler.penalty_cache = None
+            from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
+            self.sampler = NewAscendSamplerV1(self)
 
         self._init_graph_options()
 
@@ -220,12 +214,18 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
         self.use_cached_npu_graph = self.vllm_config.npu_compilation_config.use_ge_graph_cached
         self.decode_gear_list = self.vllm_config.npu_compilation_config.decode_gear_list
-        self.max_batch_size = self.max_num_reqs if not self.use_spec_decode else self.max_num_reqs * (
-                    1 + self.speculative_config.num_speculative_tokens)
+        if not self.use_spec_decode:
+            self.max_batch_size = self.max_num_reqs
+        elif not self.speculative_config.enable_adaptive:
+            self.max_batch_size = self.max_num_reqs * (1 + self.speculative_config.num_speculative_tokens)
+        else:
+            if self.decode_gear_list is None or len(self.decode_gear_list) == 0:
+                raise RuntimeError("When enable adaptive speculative decoding, decode_gear_list must be set.")
+            self.max_batch_size = self.decode_gear_list[0]
+
         if self.decode_gear_list is None:
             self.decode_gear_list = []
-            self.decode_gear_list.append(self.max_num_reqs if not self.use_spec_decode else self.max_num_reqs * \
-                                            (1 + self.speculative_config.num_speculative_tokens))
+            self.decode_gear_list.append(self.max_batch_size)
     
     
     def _prepare_inputs(
@@ -295,8 +295,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # check and set attention state
         can_decode = self.vllm_config.kv_transfer_config is None or self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        num_no_spec_reqs = np.sum(num_scheduled_tokens == 1)
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        if can_decode and (np.all(num_scheduled_tokens == 1) or num_scheduled_spec_decode_reqs == num_reqs):
+        if can_decode and (num_scheduled_spec_decode_reqs + num_no_spec_reqs == num_reqs):
             attn_state = AscendAttentionState.DecodeOnly
         elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
@@ -311,12 +312,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly and len(self.decode_gear_list) > 1:
             self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, num_reqs)
         if attn_state == AscendAttentionState.DecodeOnly:
-            if num_reqs > self.max_batch_size:
+            if total_num_scheduled_tokens > self.max_batch_size:
                 raise RuntimeError("num_reqs is bigger than max_batch_size")
-            if self.use_spec_decode:
-                graph_pad_size = self.max_batch_size - num_reqs * (1 + self.speculative_config.num_speculative_tokens)
-            else:
-                graph_pad_size = self.max_batch_size - num_reqs
+            graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
         else:
             # The reduce_scatter in the TP communication domain after embedding, P goes through this
             graph_pad_size = _get_pad_size(num_input_tokens)
@@ -373,17 +371,18 @@ class NPUModelRunner(GPUModelRunner):
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
 
-        # spec decode tokens
-        has_spec_tokens = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-
-        if has_spec_tokens:
-            # 当前仅在DecodeOnly时才可能到此逻辑
-            # TODO 复用GPU ModelRunner中的_calc_spec_decode_metadata及SpecDecodeMetadata
+        if self.use_spec_decode:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
-            sample_indices = total_num_scheduled_tokens
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+            spec_decode_metadata = self._calc_spec_decode_metadata(
+                num_draft_tokens, cu_num_tokens)
+            sample_indices = spec_decode_metadata.logits_indices
         else:
             if model_extra_config.parall_config.attn_sp_size > 1:
                 sp_size = model_extra_config.parall_config.attn_sp_size * 2
@@ -394,9 +393,12 @@ class NPUModelRunner(GPUModelRunner):
                     cu_num_tokens[i] = prev_aligned + num_scheduled_tokens[i]
             sample_indices = cu_num_tokens - 1
             sample_indices = torch.from_numpy(sample_indices).to(self.device, non_blocking=True)
+            spec_decode_metadata = None
+
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
-        return attn_metadata, graph_pad_size, sample_indices, positions
+
+        return attn_metadata, graph_pad_size, sample_indices, positions, spec_decode_metadata
 
     def _simple_prepare_inputs(
         self,
@@ -721,7 +723,7 @@ class NPUModelRunner(GPUModelRunner):
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
             if self.curr_step == 0:
-                attn_metadata, graph_pad_size, sample_indices, positions = self._prepare_inputs(scheduler_output)
+                attn_metadata, graph_pad_size, sample_indices, positions, spec_decode_metadata = self._prepare_inputs(scheduler_output)
             else:
                 attn_metadata, positions = self._simple_prepare_inputs(attn_metadata, positions,
                         sampled_tokens, spec_tokens_tensor, accepted_num)
@@ -729,13 +731,7 @@ class NPUModelRunner(GPUModelRunner):
                                                    attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
             sampling_metadata = self.input_batch.sampling_metadata
             if self.curr_step == 0:
-                if self.use_penalty:
-                    if self.use_spec_decode:
-                        self.rejection_sampler.main_sampler.penalty_cache.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
-                    else:
-                        self.sampler.penalty_cache.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
-                if self.use_rejection_sampler:
-                    self.rejection_sampler.main_sampler.prob_cache.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
+                self.sampler.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
             if temp_finished_sending is not None:
                 finished_sending.update(temp_finished_sending)
             if temp_finished_recving is not None:
@@ -804,10 +800,10 @@ class NPUModelRunner(GPUModelRunner):
                 sampler_output, last_accepted_index, accepted_num = self.drafter.verify_and_prepare_inputs(
                     input_ids=input_ids,
                     logits=logits,
-                    logits_indices=sample_indices,
                     sampling_metadata=sampling_metadata,
-                    num_decodes=num_decodes,
+                    spec_decode_metadata=spec_decode_metadata,
                     num_prefills=num_prefills,
+                    num_decodes=num_decodes,
                     chunk_next_tokens=chunk_next_tokens,
                     chunk_next_indices=chunk_next_indices,
                 )
@@ -825,7 +821,9 @@ class NPUModelRunner(GPUModelRunner):
                     previous_hidden_states=raw_hidden_states,
                     last_accepted_index=last_accepted_index,
                     sample_indices=sample_indices,
+                    sampling_metadata=sampling_metadata,
                 )
+            start_7 = time.time()
 
             # NOTE: NPU -> CPU Sync happens here.
             # Move as many CPU operations as possible before this sync point.
@@ -845,10 +843,18 @@ class NPUModelRunner(GPUModelRunner):
             cost_bitmask = start_4 - start_3
             cost_disc = start_5 - start_4
             cost_sampler = start_6 - start_5
-            cost_output = time.time() - start_6
-            cost = cost_upd_states + cost_proc_reqs + cost_logits + cost_bitmask + cost_sampler + cost_disc + cost_output
-            logger.info(f" ***** execute model cost:{cost:.6f}={cost_upd_states:.6f}+{cost_proc_reqs:.6f}+{cost_logits:.6f}+{cost_bitmask:.6f}+{cost_sampler:.6f}+{cost_disc:.6f}+{cost_output:.6f}")
-        spec_token_ids = None if spec_tokens_tensor is None else spec_tokens_tensor.tolist()
+            cost_drafter = start_7 - start_6
+            cost_output = time.time() - start_7
+            cost = cost_upd_states + cost_proc_reqs + cost_logits + cost_bitmask + cost_sampler + cost_disc + cost_drafter + cost_output
+            logger.info(f" ***** execute model cost:{cost:.6f}="
+                        f"{cost_upd_states:.6f}+{cost_proc_reqs:.6f}+{cost_logits:.6f}+{cost_bitmask:.6f}"
+                        f"+{cost_disc:.6f}+{cost_sampler:.6f}+{cost_drafter:.6f}+{cost_output:.6f}")
+
+        spec_token_ids = None if spec_tokens_tensor is None else self.rejection_sampler.parse_output(
+            spec_tokens_tensor,
+            self.input_batch.vocab_size,
+        )
+
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() if logprobs_tensors is not None else None
         for sampled_token_ids in sampled_token_ids_list:

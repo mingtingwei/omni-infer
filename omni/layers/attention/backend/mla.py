@@ -114,7 +114,7 @@ class AscendMLABackend(AttentionBackend):
             # force tensor format to ND
             layer_kv_cache_nope = torch_npu.npu_format_cast(layer_kv_cache_nope, 2)
             layer_kv_cache_pe = torch_npu.npu_format_cast(layer_kv_cache_pe, 2)
-        
+
         if model_extra_config.operator_opt_config.enable_dsa:
             layer_indexer_k_nope = torch.zeros(
                             kv_cache_shape[:-2] +
@@ -272,6 +272,10 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             self.mc2_mask = torch.zeros(self.decode_gear_list[-1], dtype=torch.bool, device=current_platform.device_type)
         self.already_mark_static = False
 
+        self.decode_num_tokens = torch.zeros(
+            runner.max_num_reqs, dtype=torch.int32, device=runner.device
+        )
+
     def generate_activate_mask(self, actual_seqs_num, batch_size):
         if len(self.decode_gear_list) > 1:
             gear = next((g for g in self.decode_gear_list if g >= batch_size), self.decode_gear_list[-1])
@@ -306,6 +310,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         # where attention is likely compute-bound
         decodes = []
         prefills = []
+        decode_num_tokens = []
         num_decode_tokens = 0
         num_prefill_tokens = 0
 
@@ -318,6 +323,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             # Only in decode the spec tokens are scheduled
             if req_id in scheduler_output.scheduled_spec_decode_tokens or num_tokens == 1:
                 decodes.append(i)
+                decode_num_tokens.append(num_tokens)
                 num_decode_tokens += num_tokens
             else:
                 prefills.append(i)
@@ -354,6 +360,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+        self.decode_num_tokens[:num_decodes].copy_(torch.tensor(decode_num_tokens), non_blocking=True)
 
         return modified_batch
 
@@ -421,7 +428,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             zigzag_index.extend([batch_id * cp_piece_num + sp_rank,
                 (batch_id + 1) * cp_piece_num - sp_rank - 1])
         zigzag_index = zigzag_index[::2] + zigzag_index[1::2]
-        
+
         # get zigzag reverse index
         cp_reverse_index = []
         for batch_id in range(bsz):
@@ -452,7 +459,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                           query_lens):
         sp_seq_lens_list = [math.ceil(kv_len / model_extra_config.parall_config.attn_sp_size / 2) for kv_len in seq_lens_list]
         sp_split_list, sp_zigzag_index, sp_reverse_index, sp_reverse_split_list = self.prepare_sp_split_indices(torch.tensor(query_lens_list))
-        
+
         # prepare sp positions
         sp_size = model_extra_config.parall_config.attn_sp_size
         positions = self.pad_inputs(positions, query_lens_list, sp_size * 2, 0)
@@ -595,12 +602,11 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             if self.runner.attn_state == AscendAttentionState.DecodeOnly:
                 if self._num_decode_tokens % self._num_decodes != 0:
                     raise RuntimeError("self._num_decode_tokens must be divisible by self._num_decodes")
-                num_tokens_per_req = self._num_decode_tokens // self._num_decodes
                 seq_lens = (input_positions + 1).to(self.runner.seq_lens.dtype)
                 block_table = block_table[:self._num_decodes, ...]
                 # has speculative tokens
-                if num_tokens_per_req > 1:
-                    block_table = block_table.repeat_interleave(num_tokens_per_req, dim=0)
+                if self._num_decode_tokens > self._num_decodes:
+                    block_table = block_table.repeat_interleave(self.decode_num_tokens[:self._num_decodes], dim=0)
                 block_table = torch.cat([block_table,
                                          torch.zeros(
                                             (graph_pad_size, ) + block_table.shape[1:],
@@ -670,7 +676,6 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             input_positions, cos, sin, best_topk = \
                 ref_d.input_positions, ref_d.cos, ref_d.sin, ref_d.best_topk
             num_tokens_per_req = num_decode_tokens // num_decodes
-
             block_table = torch.zeros_like(ref_d.block_table)
             seq_lens = (input_positions + 1).to(dtype=torch.int64)
             slot_mapping = torch.full_like(ref.slot_mapping, PAD_SLOT_ID)
@@ -808,5 +813,5 @@ class AscendMLAImpl(MLAAttentionImpl):
         **kwargs
     ) -> torch.Tensor:
         # This method should be implemented in the subclass
-        raise NotImplementedError("AscendMLAImpl.forward is not implemented.")  
+        raise NotImplementedError("AscendMLAImpl.forward is not implemented.")
 

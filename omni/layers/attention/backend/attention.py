@@ -146,6 +146,10 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         self.block_size = runner.block_size
         self.block_table = block_table
 
+        self.decode_num_tokens = torch.zeros(
+            runner.max_num_reqs, dtype=torch.int32, device=runner.device
+        )
+
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
@@ -155,6 +159,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         # where attention is likely compute-bound
         decodes = []
         prefills = []
+        decode_num_tokens = []
         num_decode_tokens = 0
         num_prefill_tokens = 0
 
@@ -167,6 +172,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             # Only in decode the spec tokens are scheduled
             if req_id in scheduler_output.scheduled_spec_decode_tokens or num_tokens == 1:
                 decodes.append(i)
+                decode_num_tokens.append(num_tokens)
                 num_decode_tokens += num_tokens
             else:
                 prefills.append(i)
@@ -192,6 +198,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+        self.decode_num_tokens[:num_decodes].copy_(torch.tensor(decode_num_tokens), non_blocking=True)
 
         return modified_batch
 
@@ -268,15 +275,12 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             input_positions = torch.cat([input_positions, padding_0])
 
         if self.runner.attn_state == AscendAttentionState.DecodeOnly:
-            if self._num_decode_tokens % self._num_decodes != 0:
-                raise RuntimeError("self._num_decode_tokens must be divisible by self._num_decodes")
-            num_tokens_per_req = self._num_decode_tokens // self._num_decodes
             seq_lens = (input_positions + 1).to(seq_lens.dtype)
             query_lens = torch.ones_like(seq_lens)
             block_table = block_table[:self._num_decodes, ...]
             # has speculative tokens
-            if num_tokens_per_req > 1:
-                block_table = block_table.unsqueeze(1).repeat(1, num_tokens_per_req, 1).view(-1, block_table.shape[-1])
+            if self._num_decode_tokens > self._num_decodes:
+                block_table = block_table.repeat_interleave(self.decode_num_tokens[:self._num_decodes], dim=0)
             block_table_padding = torch.zeros(
                 (graph_pad_size, ) + block_table.shape[1:],
                 dtype=block_table.dtype,
