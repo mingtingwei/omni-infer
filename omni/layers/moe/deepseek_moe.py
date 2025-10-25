@@ -215,7 +215,7 @@ class DeepseekMoE(nn.Module):
         first_k_dense_replace_names = ['num_dense_layers', 'first_k_dense_replace']
         self.n_shared_experts = get_attr_by_names(config, n_shared_experts_names, 1)
         self.first_k_dense_replace = get_attr_by_names(config, first_k_dense_replace_names, 3)
-        
+        self.n_redundant_experts = 0
         
         self.shared_experts = None
         self.experts = None
@@ -289,7 +289,12 @@ class DeepseekMoE(nn.Module):
                     reduce_results=False,
                     prefix=f"{prefix}.shared_experts",
                 )
-
+            
+            if model_extra_config.task_config.enable_omni_placement:
+                self.n_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
+                                                                                    num_expert_per_device_origin=int(self.n_routed_experts / (self.ep_size - model_extra_config.parall_config.redundancy_shared_expert_num)),
+                                                                                    rank_device=get_ep_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num) * self.ep_size
+            
             if self.experts is not None:
                 self.w13_prefetch_size = model_extra_config.operator_opt_config.expert_gate_up_prefetch * 1024 * 1024
                 self.w2_prefetch_size = 0
@@ -860,7 +865,7 @@ class DeepseekMoE(nn.Module):
                     actual_batch_mask = attn_metadata.decode.mc2_mask \
                                                             .to(torch.int32).view(-1, 1) \
                                                             .repeat(1, self.experts.top_k)
-                    topk_ids = actual_batch_mask * topk_ids + (1 - actual_batch_mask) * self.n_routed_experts
+                    topk_ids = actual_batch_mask * topk_ids + (1 - actual_batch_mask) * (self.n_routed_experts + self.n_redundant_experts)
 
                 topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)
 
@@ -985,7 +990,7 @@ class DeepseekMoE(nn.Module):
                 actual_batch_mask = attn_metadata.decode.mc2_mask \
                                                         .to(torch.int32).view(-1, 1) \
                                                         .repeat(1, self.experts.top_k)
-                topk_ids = actual_batch_mask * topk_ids + (1 - actual_batch_mask) * self.n_routed_experts
+                topk_ids = actual_batch_mask * topk_ids + (1 - actual_batch_mask) * (self.n_routed_experts + self.n_redundant_experts)
 
             topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)
 
