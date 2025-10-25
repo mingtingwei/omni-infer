@@ -154,6 +154,7 @@ def parse_hf_config(hf_config):
     
     # Fixed parameter key list (parameters to check)
     FIXED_KEYS = [
+    "model_type",
     "hidden_size",
     "num_attention_heads",
     "max_position_embeddings",
