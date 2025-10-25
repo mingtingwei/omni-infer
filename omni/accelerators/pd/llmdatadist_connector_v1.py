@@ -389,7 +389,7 @@ class DecodeConnectorScheduler:
             self.context = zmq.Context()
             self.pub = self.context.socket(zmq.PUB)
             kv_rank = self.vllm_config.kv_transfer_config.kv_rank
-            self.pub.bind(f"ipc:///tmp/sched-pub--{kv_rank}-{vllm_config.parallel_config.data_parallel_rank_local}")
+            self.pub.bind(f"ipc:///tmp/sched-pub-{kv_rank}-{vllm_config.parallel_config.data_parallel_rank_local}")
 
     def _send_pulled_kv_req_list(self, path, data):
         if path in self.zmq_socket_map:

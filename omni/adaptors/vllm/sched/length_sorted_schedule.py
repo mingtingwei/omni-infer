@@ -52,7 +52,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 role = os.getenv("ROLE", "NULL")
-is_prefill = role == "PREFILL"
+is_prefill = role == "prefill"
 
 reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
 FORCE_ENABLE_CHUNK_PREFILL = os.getenv("FORCE_ENABLE_CHUNK_PREFILL", "0") == "1"
