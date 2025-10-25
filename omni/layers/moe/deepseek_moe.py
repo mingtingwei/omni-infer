@@ -63,9 +63,6 @@ from omni.models.config_loader.loader import model_extra_config
 from omni.layers.moe.fused_moe.fused_moe import fused_experts_moe_dispatch_combine
 from omni.adaptors.vllm.utils import get_attr_by_names
 
-if model_extra_config.task_config.enable_omni_placement:
-    from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
-
 """NPU Stream Switch Names"""
 STREAM_SHARED_EXPERT = 'stream_shared_expert'
 SEQ_SPLIT_LENGTH = 4096
@@ -242,6 +239,7 @@ class DeepseekMoE(nn.Module):
                 moe_prefix = f"{prefix}.experts"
                 # omni placement for redundancy route experts
                 if model_extra_config.task_config.enable_omni_placement:
+                    from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
                     self.planner = OmniPlanner(device="npu",
                                             rank=get_world_group().rank_in_group,
                                             world_size=get_world_group().world_size,
@@ -274,6 +272,7 @@ class DeepseekMoE(nn.Module):
                 # omni placement for redundancy shared experts
                 if self.redundancy_shared_expert_num > 0 and model_extra_config.task_config.enable_omni_placement:
                     # The order that first initializing OmniPlanner, then ReplicatedDeepseekMLP, should correspond to the router expert rank initialization order in the layer.py file.
+                    from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
                     self.planner = OmniPlanner(device="npu",
                                             rank=self.global_rank, world_size=self.ep_size,
                                             num_experts=self.n_routed_experts,

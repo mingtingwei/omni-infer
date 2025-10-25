@@ -2,10 +2,8 @@
     "model_parallel_config": {
         "dense_mlp_tp_size": 4,
         "o_proj_tp_size": 1,
-        "dp_size": 48,
-        "redundancy_shared_expert_num": 4,
-        "enable_attn_ffn_disaggregation": true,
-        "attn_dies": 12
+        "dp_size": 288,
+        "redundancy_shared_expert_num": 32
     },
     "operator_optimization_config": {
         "enable_kv_rmsnorm_rope_cache": true,
@@ -15,16 +13,14 @@
         "merge_qkv": false,
         "gmm_nz": true,
         "decode_moe_dispatch_combine": true,
-        "use_omni_placement": true,
-        "omni_placement_config_path": "../../tests/test_config/config_d.yaml",
         "use_super_kernel": false,
-        "use_mlaprolog": false,
+        "use_mlaprolog": true,
         "cast_w2_scale_f32": true,
         "control_accept_rate": -1,
         "use_prefetch": true,
+		"fa_quant": true,
         "expert_gate_up_prefetch": 50,
-        "expert_down_prefetch": 0,
-        "attn_prefetch": 96,
-        "decoder_gear_list": [32]
+        "expert_down_prefetch": 28,
+        "attn_prefetch": 96
     }
 }

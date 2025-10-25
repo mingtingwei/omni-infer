@@ -31,6 +31,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: null
+                max_moe_layer_num: 60
+                enable_dynamic: true
+                max_redundant_per_expert: 10
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: true
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -151,6 +161,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: null
+                max_moe_layer_num: 60
+                enable_dynamic: true
+                max_redundant_per_expert: 10
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: true
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -269,6 +289,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: null
+                max_moe_layer_num: 60
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: true
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -389,6 +420,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: null
+                max_moe_layer_num: 60
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: true
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:

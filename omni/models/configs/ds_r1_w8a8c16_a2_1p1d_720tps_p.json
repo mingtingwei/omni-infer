@@ -12,8 +12,6 @@
         "merge_qkv": false,
         "two_stage_comm": false,
         "gmm_nz": true,
-        "use_omni_placement": false,
-        "omni_placement_config_path": ".",
         "cast_w2_scale_f32": false,
         "enable_round_pipeline_comm": false,
         "enable_pipeline_comm": true,

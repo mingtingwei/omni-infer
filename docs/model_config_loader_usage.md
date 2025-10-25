@@ -5,7 +5,7 @@
 模型配置类分为三个：
 1. `TaskConfig`: 任务相关的一些配置项，如当前模型的类型、当前执行的硬件环境、节点属性。
 2. `ModelParallelConfig`: 推理时并行策略相关配置项，注意框架侧可获取的并行配置框架侧获取。
-3. `ModelOperatorOptConfig`: 算子特效相关配置项。
+3. `ModelOperatorOptConfig`: 算子特性相关配置项。
 
 三个模型配置类统一到`ModelExtraConfig`类中，若存在部分配置项存在冲突的情况，在`ModelExtraConfig`类的`__post_init__`中进行校验，并提供提示信息。
 

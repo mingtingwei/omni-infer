@@ -242,7 +242,7 @@ class DeepseekMoE(nn.Module):
             torch._dynamo.mark_static(self.in_scale_2) # call the mark_static to reduce memory usage
 
         # TODO: gmm_nz, not aligned with vLLM's tuning_config
-        # model_extra_config.operator_opt_config.decode_gear_list[:1]
+        # model_extra_config.task_config.decode_gear_list[:1]
         self.tuning_config = None
 
         # ====================== init shared_experts ======================

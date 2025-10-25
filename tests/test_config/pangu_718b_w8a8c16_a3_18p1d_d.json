@@ -17,7 +17,7 @@
         "omni_placement_config_path": "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.yaml",
         "use_super_kernel": true,
         "use_mlaprolog": false,
-        "opt_w2_scale_cast": true,
+        "cast_w2_scale_f32": true,
         "control_accept_rate": -1,
         "shared_experts_to_gmm": true,
         "mla_multistream_limit_core": "",

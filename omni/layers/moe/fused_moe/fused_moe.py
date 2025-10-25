@@ -811,7 +811,7 @@ def shared_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, 
         quant_scale=None, quant_offset=None,
         group_index=None, activate_left=True, quant_mode=1)
 
-    if not model_extra_config.operator_opt_config.opt_w2_scale_cast:
+    if not model_extra_config.operator_opt_config.cast_w2_scale_f32:
         w2_scale = layer.down_proj.weight_scale.unsqueeze(0).to(torch.bfloat16)
     else:
         w2_scale = layer.down_proj.weight_scale.unsqueeze(0)

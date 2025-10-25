@@ -10,10 +10,7 @@
         "best_ep": false,
         "merge_qkv": false,
         "gmm_nz": true,
-        "use_omni_placement": true,
-        "omni_placement_config_path": "../workspace/omniinfer/tests/test_config/ep_ds_r1_w8a8c16_a3_1p1d_p.yaml",
         "control_accept_rate": -1,
-        "enable_prefill_micro_batch": false,
-        "experts_pruning": false
+        "enable_prefill_micro_batch": false
     }
 }

@@ -1,8 +1,7 @@
 {
     "model_parallel_config": {
         "dense_mlp_tp_size": 8,
-        "o_proj_tp_size": 1,
-        "dp_size": 32
+        "o_proj_tp_size": 1
     },
     "operator_optimization_config": {
         "enable_kv_rmsnorm_rope_cache": true,
@@ -13,8 +12,6 @@
         "two_stage_comm": true,
         "gmm_nz": true,
         "decode_moe_dispatch_combine": false,
-        "use_omni_placement": false,
-        "omni_placement_config_path": "../../tests/test_config/ep_ds_r1_w4a8c16_a2_2p1d_d.yaml",
         "cast_w2_scale_f32": false,
         "enable_round_pipeline_comm": true,
         "enable_pipeline_comm": false,

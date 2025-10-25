@@ -5,7 +5,7 @@
         "dp_size": 1,
         "attn_sp_size": 32
     },
-    "operator_optimizition_config": {
+    "operator_optimization_config": {
         "enable_kv_rmsnorm_rope_cache": true,
         "prefill_moe_all_to_all": true,
         "best_ep": false,

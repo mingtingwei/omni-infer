@@ -33,13 +33,13 @@ def call_config_updater(config_updater_name: str, **kwargs):
 
 @dataclass
 class TaskConfig:
-    model_type: str = "deepseek_v3"
+    model_name: str = "deepseek_v3"
     hardware_platform: str = "A3"
     is_pd_disaggregation: bool = True
     is_prefill_node: bool = True # decode_node when it's False
     quant_type: str = "w8a8"
-    prefill_nodes_num: int = 0
-    decode_nodes_num: int = 0
+    prefill_node_num: int = 0
+    decode_node_num: int = 0
     enable_omni_placement: bool = False
     decode_gear_list: list[int] = field(default_factory = lambda: [1])
     enable_chunked_prefill: bool = False
@@ -193,22 +193,22 @@ def parse_hf_config(hf_config):
 
     # Check matching results
     if len(matches) == 0:
-        model_type = hf_config.model_type
+        model_name = hf_config.model_type
     elif len(matches) > 1:
         raise RuntimeError(f"[ERROR] Multiple matching models found: {matches}")
     else:
-        model_type = matches[0]
+        model_name = matches[0]
 
     if hasattr(hf_config, "quantization_config") and hf_config.quantization_config['format'].strip() == 'int-quantized':
         weights_type = hf_config.quantization_config["config_groups"]["group_0"]["weights"]["num_bits"]
         input_activations_type = hf_config.quantization_config["config_groups"]["group_0"]["input_activations"]["num_bits"]
         quant_type = f"w{weights_type}a{input_activations_type}"
-        if isinstance(weights_type, dict) and model_type == "kimi-k2":
+        if isinstance(weights_type, dict) and weights_type.get('mlp.experts', None) == 4:
             quant_type = "w4a8"
     else:
         quant_type = "bf16"
 
-    return model_type, quant_type
+    return model_name, quant_type
 
 
 def _loader_configs_data(file_path):
@@ -236,7 +236,7 @@ def _load_best_practice_config():
     configs_data = _loader_configs_data(best_practice_configs_path)
     
     config_map = {
-        (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_nodes_num"],c["decode_nodes_num"]): \
+        (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
         (c["prefill_config_file"], c["decode_config_file"])
         for c in configs_data
     }
@@ -247,11 +247,11 @@ def _load_best_practice_config():
 def _get_best_practice_config(task_config):
     config_map = _load_best_practice_config()
 
-    best_practice_model_config_path = config_map.get((task_config.model_type,
+    best_practice_model_config_path = config_map.get((task_config.model_name,
         task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
-        task_config.prefill_nodes_num,task_config.decode_nodes_num), None)
+        task_config.prefill_node_num,task_config.decode_node_num), None)
     
-    task_info = f'{task_config.model_type}_{task_config.quant_type}_{task_config.hardware_platform}'
+    task_info = f'{task_config.model_name}_{task_config.quant_type}_{task_config.hardware_platform}'
     if best_practice_model_config_path:
         if task_config.is_prefill_node:
             best_practice_model_config_path = best_practice_model_config_path[0]
@@ -311,7 +311,7 @@ def update_task_config(**kwargs):
             if hasattr(task_config, key):
                 setattr(task_config, key, value)
                 logger.info(f"{key} loads from vllm config: {value}")
-    task_config.model_type, task_config.quant_type = parse_hf_config(kwargs['hf_config'])
+    task_config.model_name, task_config.quant_type = parse_hf_config(kwargs['hf_config'])
     _init_model_extra_config(task_config)
     _validate_config()
     

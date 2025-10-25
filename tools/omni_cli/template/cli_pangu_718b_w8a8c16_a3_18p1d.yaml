@@ -31,6 +31,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -151,6 +161,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -271,6 +291,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -391,6 +421,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -511,6 +551,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -631,6 +681,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -751,6 +811,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -871,6 +941,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -991,6 +1071,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1111,6 +1201,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1231,6 +1331,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1351,6 +1461,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1471,6 +1591,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1591,6 +1721,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1711,6 +1851,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1831,6 +1981,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -1951,6 +2111,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2071,6 +2241,16 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_d.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 30
+                max_redundant_per_rank: 1
+                enable_rank_round_robin: true
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2189,6 +2369,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2307,6 +2498,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2425,6 +2627,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2543,6 +2756,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2661,6 +2885,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2779,6 +3014,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -2897,6 +3143,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3015,6 +3272,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3133,6 +3401,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3251,6 +3530,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3369,6 +3659,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3487,6 +3788,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3605,6 +3917,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3723,6 +4046,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3841,6 +4175,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -3959,6 +4304,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -4077,6 +4433,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
@@ -4195,6 +4562,17 @@ all:
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
           args:
+            additional-config:
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: "../../tests/test_config/ep_pangu_718b_w4a8c16_a3_18p1d_p.npy"
+                max_moe_layer_num: 58
+                enable_dynamic: true
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: "../dump_data"
             base-api-port: $API_PORT
             enable-mtp: ''
             extra-args:
