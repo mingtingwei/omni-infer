@@ -25,6 +25,7 @@
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union, List
+import os
 
 import torch
 import torch_npu
@@ -81,6 +82,7 @@ torch.npu.config.allow_internal_format = True
 MICROBATCH_TOKEN_THRESHOLD = 4096
 DEFAULT_ROPE_THETA = 1000000
 MAX_PREFETCH_SIZE = 90
+PREFILL_FLASHCOMM = os.getenv("PREFILL_FLASHCOMM", "0") == "1"
 
 class Qwen3MLP(FusedMLP):
     pass
@@ -150,15 +152,18 @@ class Qwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.a2a_o_proj = ColumnParallelFlashCommLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            tp_size=1,
-            tp_rank=0,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.a2a_o_proj",
-        )
+        if PREFILL_FLASHCOMM:
+            self.a2a_o_proj = ColumnParallelFlashCommLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                tp_size=1,
+                tp_rank=0,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.a2a_o_proj",
+            )
+        else:
+            self.a2a_o_proj = None
 
         if rope_scaling is None:
             rope_scaling = {'factor': '0'}
@@ -419,11 +424,11 @@ class Qwen3Model(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
             n_tokens = hidden_states.shape[0]
-            if n_tokens <= MICROBATCH_TOKEN_THRESHOLD:
-                hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_all_reduce(
+            if n_tokens > MICROBATCH_TOKEN_THRESHOLD and PREFILL_FLASHCOMM:
+                hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_all_to_all(
                     positions, hidden_states, residual, kv_caches, cos, sin)
             else:
-                hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_all_to_all(
+                hidden_states, residual = self.forward_layers_prefill_microbatch_tp8_all_reduce(
                     positions, hidden_states, residual, kv_caches, cos, sin)
         else:
             hidden_states, residual = self.forward_layers(
@@ -722,9 +727,7 @@ class Qwen3Model(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        duplicate_params_mapping = [
-            ("a2a_o_proj", "o_proj"),
-        ]
+        duplicate_params_mapping = [("a2a_o_proj", "o_proj")] if PREFILL_FLASHCOMM else []
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
