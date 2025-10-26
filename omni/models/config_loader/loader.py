@@ -154,7 +154,6 @@ def parse_hf_config(hf_config):
     
     # Fixed parameter key list (parameters to check)
     FIXED_KEYS = [
-    "model_type",
     "hidden_size",
     "num_attention_heads",
     "max_position_embeddings",
@@ -195,7 +194,10 @@ def parse_hf_config(hf_config):
     if len(matches) == 0:
         model_name = hf_config.model_type
     elif len(matches) > 1:
-        raise RuntimeError(f"[ERROR] Multiple matching models found: {matches}")
+        if hf_config.model_type == "deepseek_v3":
+            model_name = "deepseek_v3" 
+        elif hf_config.model_type == "deepseek_v32": 
+            model_name = "deepseek_v32"
     else:
         model_name = matches[0]
 
