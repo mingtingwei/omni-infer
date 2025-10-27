@@ -156,6 +156,8 @@ class LLMDataDistManager:
 
         # dense model.
         flatten_kv_caches = maybe_merge_kv_caches(flatten_kv_caches)
+        # spec model.
+        flatten_kv_caches = maybe_split_kv_caches_for_spec_layers(flatten_kv_caches)
 
         for model_id, sub_kv_caches in enumerate(flatten_kv_caches):
             cache_desc = CacheDesc(num_tensors=len(sub_kv_caches), shape=tuple(sub_kv_caches[0].shape),
@@ -393,4 +395,22 @@ def maybe_merge_kv_caches(flatten_kv_caches):
         return merged_kv_caches
     return flatten_kv_caches
 
+def maybe_split_kv_caches_for_spec_layers(flatten_kv_caches):
+    flatten_kv_caches_split = []
+    need_split = False
+    for caches in flatten_kv_caches:
+        shape_dict = {}
+        for cache in caches:
+            if str(cache.shape) not in shape_dict:
+                shape_dict[str(cache.shape)] = []
+            shape_dict[str(cache.shape)].append(cache)
+        
+        flatten_kv_caches_split.extend(shape_dict.values())
+        if len(shape_dict) > 1 or need_split: 
+            need_split = True
+        
+    if not need_split:
+        return flatten_kv_caches
+    else:
+        return flatten_kv_caches_split
 RankLinkInfo = namedtuple("RankLinkInfo", ["comm_name", "comm_id", "cluster_rank_info"])

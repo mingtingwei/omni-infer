@@ -346,6 +346,7 @@ class Qwen3MoeModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.aux_hidden_state_layers: tuple[int] = tuple()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -385,9 +386,12 @@ class Qwen3MoeModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         # 采用FlashComm1.0, 通过slice使用hidden_states转为DP
+        aux_hidden_states = []
         hidden_states = self.get_tp_slice(hidden_states)
 
         for i in range(self.start_layer, self.end_layer):
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             layer = self.layers[i]
             hidden_states, residual = layer(positions,
                                             hidden_states,
@@ -401,6 +405,8 @@ class Qwen3MoeModel(nn.Module):
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual, y_transform='AG')
+        if len(aux_hidden_states) > 0:
+            return aux_hidden_states, hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -564,3 +570,10 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
             attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
 
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly
+    
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+    
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)

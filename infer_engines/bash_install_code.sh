@@ -29,3 +29,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/function_calling_and_reasoning_content
 git apply --whitespace=nowarn $PATCH_ROOT/adaptive_speculative_decode.patch
 git apply --whitespace=nowarn $PATCH_ROOT/pd_num_cached_tokens.patch
 git apply --whitespace=nowarn $PATCH_ROOT/guided_decoding_adaption.patch
+git apply --whitespace=nowarn $PATCH_ROOT/patch_qwen_moe_eagle3.patch

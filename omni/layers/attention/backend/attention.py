@@ -150,6 +150,13 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             runner.max_num_reqs, dtype=torch.int32, device=runner.device
         )
 
+        current_layers_names = []
+        for i, kv_cache_group in enumerate(self.runner.kv_cache_config.kv_cache_groups):
+            if kv_cache_spec == kv_cache_group.kv_cache_spec:
+                current_layers_names = kv_cache_group.layer_names
+        self.is_spec_metadata = hasattr(self.runner, "drafter") \
+            and sorted(self.runner.drafter.attn_layer_names) == sorted(current_layers_names)
+
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
@@ -319,7 +326,10 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             else:
                 cos, sin = self.runner.model.language_model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
         else:
-            cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
+            if self.is_spec_metadata:
+                cos, sin = self.runner.drafter.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
+            else:
+                cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'
@@ -367,7 +377,10 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             else:
                 cos, sin = self.runner.model.language_model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
         else:
-            cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
+            if self.is_spec_metadata:
+                cos, sin = self.runner.drafter.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
+            else:
+                cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'

@@ -28,6 +28,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.distributed import get_tp_group
 
 from omni.adaptors.vllm.forward_context import set_forward_context
 from omni.layers.sampler import random_choice
@@ -154,6 +155,11 @@ class PostDrafter(EagleProposer):
                 **kwargs,
     ):
         input_ids = self.input_ids[:num_tokens]
+        if self.method == 'eagle3':
+            previous_hidden_states = self.model.combine_hidden_states(previous_hidden_states)
+            if previous_hidden_states.shape[0] < input_ids.shape[0]:
+                previous_hidden_states = get_tp_group().all_gather(previous_hidden_states, dim=0)
+
         if kv_caches is None:
             with set_forward_context(None, self.vllm_config):
                 for i in range(self.speculative_config.num_speculative_tokens):
