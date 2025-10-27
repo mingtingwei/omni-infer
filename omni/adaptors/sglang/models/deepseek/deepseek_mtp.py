@@ -35,7 +35,7 @@ from omni.adaptors.sglang.layers.vocab_parallel_embedding import VocabParallelEm
 logger = logging.getLogger(__name__)
 
 
-class DeepseekModelNextN(nn.Module):
+class DeepseekMultiTokenPredictor(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -141,7 +141,7 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         self.quant_config = quant_config
         self.determine_num_fused_shared_experts("DeepseekV3ForCausalLMNextN")
 
-        self.model = DeepseekModelNextN(
+        self.model = DeepseekMultiTokenPredictor(
             config, quant_config, prefix=add_prefix("model", prefix)
         )
         self.lm_head = None

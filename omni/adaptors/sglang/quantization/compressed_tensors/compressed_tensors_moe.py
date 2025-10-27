@@ -12,7 +12,7 @@ from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_moe im
     CompressedTensorsMoEMethod,
 )
 from sglang.srt.utils import set_weight_attrs
-from omni.adaptors.sglang.layers.moe.ep_moe.layer import moe_infer_fusion
+from omni.adaptors.sglang.layers.moe.fused_moe.layer import moe_infer_fusion
 
 SEQ_SPLIT_LENGTH = 4096
 torch.npu.config.allow_internal_format = True

@@ -27,7 +27,7 @@ PAGE_SIZE = 128
 MAX_SEQ_LEN = 4096
 
 @dataclass
-class NpuMLADecodeMetadata:
+class AscendMLAMetadata:
     npumla_metadata: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     block_kv_indices: Optional[torch.Tensor] = None
     cos: Optional[torch.Tensor] = None
@@ -119,7 +119,7 @@ class KVBlockTable:
         return self.block_table[ptr, :]
 
 
-class NpuMLABackend(TorchNativeAttnBackend):
+class AscendMLABackend(TorchNativeAttnBackend):
     """npumla attention kernels."""
 
     def __init__(self,
@@ -130,7 +130,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         self.max_context_len = model_runner.model_config.context_len
         self.device = model_runner.device
         self.skip_prefill = skip_prefill
-        self.forward_metadata: Optional[NpuMLADecodeMetadata] = None
+        self.forward_metadata: Optional[AscendMLAMetadata] = None
 
         self.num_q_heads = (
             model_runner.model_config.num_attention_heads // get_attention_tp_size()
@@ -199,7 +199,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 self.norm_res = None
                 self.actual_seq_lengths = torch.tensor(list(range(1, bs + 1)), dtype=torch.int64, device=self.device)
 
-            self.forward_metadata = NpuMLADecodeMetadata(
+            self.forward_metadata = AscendMLAMetadata(
                 layer=layer,
                 forward_batch=forward_batch,
                 block_kv_indices=self.kv_block_table.index(bs, forward_batch.req_pool_indices),
@@ -207,7 +207,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
                 norm_res=self.norm_res,
             )
         else:
-            self.forward_metadata = NpuMLADecodeMetadata(
+            self.forward_metadata = AscendMLAMetadata(
                 layer=layer,
                 forward_batch=forward_batch,
                 attn_mask=self.attn_mask,
@@ -229,7 +229,7 @@ class NpuMLABackend(TorchNativeAttnBackend):
         spec_info: Optional[SpecInfo],
         forward_batch: ForwardBatch,
     ):
-        self.forward_metadata = NpuMLADecodeMetadata(
+        self.forward_metadata = AscendMLAMetadata(
             None,
             torch.full(
                 (bs, self.max_seqlen_pad),

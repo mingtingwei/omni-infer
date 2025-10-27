@@ -293,9 +293,9 @@ index 12c1dd2cb..613bb4cbb 100644
 +++ b/python/sglang/srt/models/registry.py
 @@ -107,4 +107,6 @@ def import_model_classes():
  tmp_ = _ModelRegistry(import_model_classes())
- module = importlib.import_module("omni.adaptors.sglang.models.deepseek_v3")
+ module = importlib.import_module("omni.adaptors.sglang.models.deepseek.deepseek_v3")
  tmp_.models["DeepseekV3ForCausalLM"] = module.EntryClass
-+module = importlib.import_module("omni.adaptors.sglang.models.deepseek_mtp")
++module = importlib.import_module("omni.adaptors.sglang.models.deepseek.deepseek_mtp")
 +tmp_.models["DeepseekV3ForCausalLMNextN"] = module.EntryClass
  ModelRegistry = tmp_
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
@@ -407,8 +407,8 @@ index 376cd029c..02f74fabd 100644
                  )
              self.has_prefill_wrapper_verify = True
 +        elif self.server_args.attention_backend == "npumla":
-+            from omni.adaptors.sglang.layers.attention.npumla_backend import NpuMLABackend
-+            self.draft_attn_backend = NpuMLABackend(
++            from omni.adaptors.sglang.layers.attention.backend.mla import AscendMLABackend
++            self.draft_attn_backend = AscendMLABackend(
 +                self.draft_model_runner,
 +                skip_prefill=False,
 +            )

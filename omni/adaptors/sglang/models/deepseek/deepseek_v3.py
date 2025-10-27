@@ -48,7 +48,7 @@ from sglang.srt.utils import (
 from omni.adaptors.sglang.layers.attention.deepseek_mla import DeepseekMLA
 from omni.adaptors.sglang.layers.activation import SiluAndMul
 from omni.adaptors.sglang.layers.moe.deepseek_moe import DeepseekMoE
-from omni.adaptors.sglang.layers.moe.ep_moe.layer import FusedMoE
+from omni.adaptors.sglang.layers.moe.fused_moe.layer import FusedMoE
 from omni.adaptors.sglang.layers.layernorm import RMSNorm
 from omni.adaptors.sglang.distributed import (
     get_mlp_tp_group_parallel_world_size,
@@ -56,8 +56,8 @@ from omni.adaptors.sglang.distributed import (
     get_mlp_tp_group,
 )
 from omni.adaptors.sglang.layers.linear import (
-    MergedColumnParallelLinear,
-    RowParallelLinear,
+    AscendMergedColumnParallelLinear,
+    AscendRowParallelLinear,
 )
 from omni.adaptors.sglang.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
 logger = logging.getLogger(__name__)
@@ -81,28 +81,28 @@ class ParallelDeepseekMLP(nn.Module):
         super().__init__()
         self.tp_size = tp_size
 
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.gate_up_proj = AscendMergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config,
-            prefix=add_prefix("gate_up_proj", prefix),
-            tp_rank=tp_rank,
             tp_size=tp_size,
+            tp_rank=tp_rank,
+            quant_config=quant_config,
+            prefix=add_prefix("gate_up_proj", prefix)
         )
 
         # TODO: temporarily disable DequantSwigluQuant
         self.gate_up_proj.throw_dequant = True
 
-        self.down_proj = RowParallelLinear(
+        self.down_proj = AscendRowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
             quant_config=quant_config,
             reduce_results=False,
-            prefix=add_prefix("down_proj", prefix),
-            tp_rank=tp_rank,
-            tp_size=tp_size,
+            prefix=add_prefix("down_proj", prefix)
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -155,6 +155,7 @@ class DeepseekDecoderLayer(nn.Module):
         self.is_nextn = is_nextn
         self.quant_symbol = quant_config is not None
         self.use_super_kernel = os.environ.get("USE_SUPER_KERNEL", "0") == "1"
+        self.use_mla_prolog = os.environ.get("USE_MLA_PROLOG", "0") == "1"
 
         self.is_layer_sparse = is_nextn or (
                 self.config.n_routed_experts is not None
@@ -228,7 +229,7 @@ class DeepseekDecoderLayer(nn.Module):
                 hidden_states = self.input_layernorm(hidden_states)
             else:
                 hidden_states, residual = self.input_layernorm(
-                    hidden_states, residual, quant_symbol=self.quant_symbol
+                    hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog
                 )
 
         hidden_states = self.self_attn(
@@ -430,7 +431,9 @@ class DeepseekV3ForCausalLM(nn.Module):
         if forward_batch.is_extend_in_batch :
             last_index = torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
             pruned_states = hidden_states[last_index]
-        else :
+            if not forward_batch.capture_hidden_mode.need_capture():
+                hidden_states = None
+        else:
             pruned_states = hidden_states
         logits = self.compute_lmhead(pruned_states)
         return LogitsProcessorOutput(
