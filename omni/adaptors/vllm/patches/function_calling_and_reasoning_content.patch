@@ -365,7 +365,7 @@ index 7a0a804..376041a 100644
 +                        content="",
 +                        tool_calls=[
 +                            tool_call_class(
-+                                id=f"functions.{tool_choice_function_name}:{turn_id}",
++                                id=f"functions.{request.tool_choice.function.name}:{turn_id}",
 +                                function=FunctionCall(
 +                                name=request.tool_choice.function.name,
 +                                arguments=content))
