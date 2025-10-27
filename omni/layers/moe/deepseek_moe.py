@@ -169,7 +169,7 @@ class DeepseekMoE(nn.Module):
         self.node_rank = get_world_group().rank_in_group // self.device_count
         self.which_half = get_world_group().rank_in_group // (get_world_group().world_size // 2)
 
-        n_routed_experts_names = ['num_routed_experts', 'n_routed_experts']
+        n_routed_experts_names = ['num_routed_experts', 'n_routed_experts', 'num_experts']
         self.n_routed_experts = get_attr_by_names(config, n_routed_experts_names, 256)
         self.redundancy_shared_expert_num = model_extra_config.parall_config.redundancy_shared_expert_num
         self.quant_symbol = quant_config is not None
@@ -195,11 +195,16 @@ class DeepseekMoE(nn.Module):
                                      quant_config=None,
                                      params_dtype=params_dtype,
                                      prefix=f"{prefix}.gate")
-        if getattr(config, "topk_method", "topk") == "noaux_tc":
+        if getattr(config, "moe_router_enable_expert_bias", False):
+            self.gate.e_score_correction_bias = None
+            self.gate.expert_bias = nn.Parameter(
+                torch.empty(self.n_routed_experts, dtype=torch.float), requires_grad=False)
+        elif getattr(config, "topk_method", "topk") == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(self.n_routed_experts, dtype=torch.float), requires_grad=False)
         else:
             self.gate.e_score_correction_bias = None
+            self.gate.expert_bias = None
 
         self.top_k = config.num_experts_per_tok
         self.use_grouped_topk = True
@@ -260,7 +265,7 @@ class DeepseekMoE(nn.Module):
                     topk_group=self.topk_group,
                     prefix=moe_prefix,
                     scoring_func=self.scoring_func,
-                    e_score_correction_bias=self.gate.e_score_correction_bias,
+                    e_score_correction_bias=self.gate.e_score_correction_bias if self.gate.e_score_correction_bias is not None else self.gate.expert_bias,
                     planner=self.planner,
                     moe_layer_idx=self.moe_layer_idx,
                     expert_mapping=self.expert_mapping,
@@ -318,10 +323,12 @@ class DeepseekMoE(nn.Module):
                         [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135])
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
+        is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                    (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
             return self.forward_separate_expert_decode(hidden_states, residual, attn_metadata)
         elif self.redundancy_shared_expert_num > 0:
-            if attn_metadata is None or attn_metadata.prefill is not None:
+            if is_prefill:
                 return self.forward_separate_expert_prefill(hidden_states, residual, attn_metadata)
             else:
                 return self.forward_separate_expert_decode(hidden_states, residual, attn_metadata)
@@ -329,7 +336,7 @@ class DeepseekMoE(nn.Module):
             if not self.is_init_gate:
                 self.gate.weight.data = torch_npu.npu_format_cast(self.gate.weight.data, 2)
                 self.is_init_gate = True
-            if attn_metadata is None or attn_metadata.prefill is not None:
+            if is_prefill:
                 if self.is_A2 and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
                     return self.forward_prefill_a2(hidden_states, residual, attn_metadata)
                 else:
@@ -442,7 +449,8 @@ class DeepseekMoE(nn.Module):
                                                             self.routed_scaling_factor,
                                                             layer=self.experts  # ENABLE_OMNI_PLANNER
                                                             )
-        topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=attn_metadata.decode.best_topk)
+        best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
         if not model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)
             topk_all = get_world_group().all_gather(topk_cat, dim=0)
@@ -491,7 +499,8 @@ class DeepseekMoE(nn.Module):
         return final_hidden_states, residual
 
     def _forward_decode_dispatch_combine(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
-        is_prefill = (attn_metadata is None or attn_metadata.prefill is not None)
+        is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                    (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         router_logits, _ = self.gate.forward(hidden_states.float())
         # Here, we do a 2D to 3D conversion, and then convert back to 2D to trigger the fusion rule, fusing add rms and cast into AddRmsNormCast.
         hidden_states_3d = hidden_states.unsqueeze(1)
@@ -519,9 +528,11 @@ class DeepseekMoE(nn.Module):
                                                                 self.routed_scaling_factor,
                                                                 layer=self.experts  # ENABLE_OMNI_PLANNER
                                                                 )
-        topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=attn_metadata.decode.best_topk)
 
-        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
+        best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
+
         layer = self.experts
         
         max_num_deployed_expert = self.local_expert_num * get_dp_group().world_size
@@ -712,7 +723,7 @@ class DeepseekMoE(nn.Module):
                                                             self.topk_group, self.num_expert_group,
                                                             self.custom_routing_function,
                                                             self.scoring_func,
-                                                            self.gate.e_score_correction_bias,
+                                                            self.gate.e_score_correction_bias if self.gate.e_score_correction_bias is not None else self.gate.expert_bias,
                                                             self.routed_scaling_factor,
                                                             layer=self.experts)
         max_num_deployed_expert=self.n_routed_experts
@@ -727,7 +738,8 @@ class DeepseekMoE(nn.Module):
                                                                           is_prefill=False)
                 max_num_deployed_expert_per_rank = self.planner.get_max_num_deployed_expert_per_rank()
                 max_num_deployed_expert = max_num_deployed_expert_per_rank * (self.ep_size - self.redundancy_shared_expert_num)
-        if model_extra_config.operator_opt_config.best_ep and attn_metadata.decode.best_topk is not None:
+        
+        if model_extra_config.operator_opt_config.best_ep and hasattr(attn_metadata, "decode") and attn_metadata.decode.best_topk is not None:
             fake_topk_ids = attn_metadata.decode.best_topk
             topk_ids = tng.scope.npu_wait_tensor(fake_topk_ids, topk_ids)
         
@@ -858,9 +870,10 @@ class DeepseekMoE(nn.Module):
                                                                     layer=self.experts)
                 topk_ids = self.experts.apply_expert_load_balance(
                     topk_ids=topk_ids, 
-                    best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and attn_metadata.decode is not None else None
+                    best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") and \
+                            attn_metadata.decode is not None else None
                 )
-                if attn_metadata is not None and attn_metadata.decode is not None:
+                if attn_metadata is not None and hasattr(attn_metadata, "decode") and attn_metadata.decode is not None:
                     actual_batch_mask = attn_metadata.decode.mc2_mask \
                                                             .to(torch.int32).view(-1, 1) \
                                                             .repeat(1, self.experts.top_k)
@@ -983,9 +996,10 @@ class DeepseekMoE(nn.Module):
                                                                 layer=self.experts)
             topk_ids = self.experts.apply_expert_load_balance(
                 topk_ids=topk_ids, 
-                best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and attn_metadata.decode is not None else None
+                best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") and \
+                        attn_metadata.decode is not None else None
             )
-            if attn_metadata is not None and attn_metadata.decode is not None:
+            if attn_metadata is not None and hasattr(attn_metadata, "decode") and attn_metadata.decode is not None:
                 actual_batch_mask = attn_metadata.decode.mc2_mask \
                                                         .to(torch.int32).view(-1, 1) \
                                                         .repeat(1, self.experts.top_k)
@@ -1130,7 +1144,8 @@ class DeepseekMoE(nn.Module):
                                                             )
         topk_ids = self.experts.apply_expert_load_balance(
             topk_ids=topk_ids, 
-            best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and attn_metadata.decode is not None else None
+            best_topk_ids=attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") and \
+                        attn_metadata.decode is not None else None
         )
         
         topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)

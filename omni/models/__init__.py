@@ -113,6 +113,9 @@ def register_model():
         "Gemma3ForConditionalGeneration",
         "omni.models.gemma.gemma3_mm:Gemma3ForConditionalGeneration")
 
+    ModelRegistry.register_model(
+        "BailingMoeV2ForCausalLM",
+        "omni.models.bailing.bailing:BailingMoeV2ForCausalLM")
 
     if (
         int(os.getenv("RANDOM_MODE", default='0')) or

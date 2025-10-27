@@ -45,7 +45,8 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
             attn_metadata: AttentionMetadata,
             comm_group: Optional[GroupCoordinator]
     ) -> torch.Tensor:
-        is_prefill = attn_metadata is None or attn_metadata.prefill is not None
+        is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                    (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         out = self.moe_infer_fusion(layer,
                                     x,
                                     topk_ids,
@@ -309,7 +310,6 @@ class FusedMoE(torch.nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[next(iter(attn_metadata))]
-        is_prefill = attn_metadata is None or attn_metadata.prefill is not None
         # DeekSeekv2 uses grouped_top_k
         # adapt: When num_expert_group=1, it degenerates to fused_topk.
         if use_grouped_topk:  # and num_expert_group != 1:

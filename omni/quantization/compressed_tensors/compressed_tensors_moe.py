@@ -130,7 +130,8 @@ class AscendCompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             max_num_deployed_expert_per_rank = layer.planner.get_max_num_deployed_expert_per_rank()
 
         if get_ep_group().world_size > 1:
-            is_prefill = attn_metadata is None or attn_metadata.prefill is not None
+            is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                    (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
             if model_extra_config.operator_opt_config.prefill_moe_all_to_all or (model_extra_config.operator_opt_config.decode_moe_dispatch_combine and not is_prefill):
                 if is_prefill:
                     out = moe_infer_fusion(
@@ -406,11 +407,10 @@ class AscendCompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         max_num_deployed_expert_per_rank = self.n_routed_experts
         # if model_extra_config.operator_opt_config.use_omni_planner:
         #     max_num_deployed_expert_per_rank = layer.planner.get_max_num_deployed_expert_per_rank()
-
-        is_prefill = is_prefill = attn_metadata is None or attn_metadata.prefill is not None
+        is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                    (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         expert_parallel_size = get_ep_group().world_size
         if expert_parallel_size > 1:
-            is_prefill = attn_metadata is None or attn_metadata.prefill is not None
             if model_extra_config.operator_opt_config.prefill_moe_all_to_all or (model_extra_config.operator_opt_config.decode_moe_dispatch_combine and not is_prefill):
                 if is_prefill:
                     out = moe_infer_fusion(

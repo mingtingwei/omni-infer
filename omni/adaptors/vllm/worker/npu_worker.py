@@ -180,8 +180,10 @@ class NPUWorker(WorkerBase):
             is_pd_disaggregation = True
             is_prefill_node = True if os.getenv('ROLE', None)=='prefill' else False
         enable_chunked_prefill = self.scheduler_config.enable_chunked_prefill
-        enable_omni_placement = self.vllm_config.additional_config.get("enable_omni_placement", False)
-
+        if self.vllm_config.additional_config is not None:
+            enable_omni_placement = self.vllm_config.additional_config.get("enable_omni_placement", False)
+        else:
+            enable_omni_placement = False
         max_num_reqs = self.scheduler_config.max_num_seqs
         self.decode_gear_list = self.vllm_config.npu_compilation_config.decode_gear_list
         if self.decode_gear_list is None:
