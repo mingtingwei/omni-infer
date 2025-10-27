@@ -31,3 +31,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/pd_num_cached_tokens.patch
 git apply --whitespace=nowarn $PATCH_ROOT/guided_decoding_adaption.patch
 git apply --whitespace=nowarn $PATCH_ROOT/patch_qwen_moe_eagle3.patch
 git apply --whitespace=nowarn $PATCH_ROOT/extract_layer_index.patch
+git apply --whitespace=nowarn $PATCH_ROOT/overwrite_request_id_chat.patch

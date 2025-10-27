@@ -128,20 +128,6 @@ def update_utils_custom_op():
     utils.direct_register_custom_op = ascend_direct_register_custom_op
 
 
-def enable_overwrite_request_id():
-    """Patch OpenAIServing to use random UUIDs for request IDs."""
-    from fastapi import Request
-    from vllm.utils import random_uuid
-    from vllm.entrypoints.openai.serving_engine import OpenAIServing
-    @staticmethod
-    def _base_request_id(raw_request: Optional[Request], 
-                         default: Optional[str] = None) -> Optional[str]:
-        return default or random_uuid()
-
-    OpenAIServing._base_request_id = _base_request_id
-    logging.info("Applied patch: overwrite_request_id")
-
-
 def apply_constant_list_patch():
       import vllm.v1.utils as vllm_utils
       cls = vllm_utils.ConstantList
@@ -378,8 +364,6 @@ class NPUPlatform(Platform):
         if os.getenv("ENABLE_APC_EVENT", "0") == "1":
             apply_kv_cache_patch()
             apply_constant_list_patch()
-        if os.getenv("ENABLE_OVERWRITE_REQ_IDS", "0") == "1":
-            enable_overwrite_request_id()
         import omni.quantization  # noqa: F401
 
     @classmethod
