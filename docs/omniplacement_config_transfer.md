@@ -92,7 +92,7 @@
               omni_placement_config:
                 pattern_path: "../../tests/test_config/ep_ds_r1_w8a8c16_a3_5p1d_d.npy"
                 max_moe_layer_num: 58
-                enale_dynamic: true
+                enable_dynamic: true
                 max_redundant_per_expert: 10
                 max_redundant_per_rank: 1
                 enable_rank_round_robin: true
@@ -107,7 +107,7 @@
               omni_placement_config:
                 pattern_path: "../../tests/test_config/ep_ds_r1_w8a8c16_a3_5p1d_d.npy"
                 max_moe_layer_num: 58
-                enale_dynamic: true
+                enable_dynamic: true
                 max_redundant_per_expert: 10
                 max_redundant_per_rank: 1
                 enable_rank_round_robin: true
