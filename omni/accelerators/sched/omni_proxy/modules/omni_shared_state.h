@@ -7,6 +7,7 @@
 #include <omni_tokenizer.h>
 #include <omni_zmq_handler.h>
 #include <omni_radix_tree.h>
+#include <ngx_atomic.h>  
 
 #define NUM_PREFILL_BATCH_METRICS_HIS 32
 #define NUM_DECODE_BATCH_METRICS_HIS 256
@@ -16,6 +17,9 @@
 #define MAX_DECODE_UPSTREAMS 1024
 #define MAX_REQUEST_SLOTS 16384
 #define MAX_WORKERS 320
+#define OMNI_TTFT_BUCKETS_COUNT 23
+#define OMNI_TPOT_BUCKETS_COUNT 20
+#define OMNI_E2E_BUCKETS_COUNT 22
 
 typedef enum omni_proxy_request_phase
 {
@@ -54,6 +58,7 @@ typedef struct omni_request_metrics_s
     ngx_msec_t time_first_token;
     ngx_msec_t tpot;
     ngx_msec_t ttft;
+    ngx_uint_t http_status;  
 } omni_request_metrics_t;
 
 typedef struct omni_request_s
@@ -211,6 +216,20 @@ typedef struct omni_global_state_s
     int workers[MAX_WORKERS];
     omni_upstream_prefill_t prefill_states[MAX_PREFILL_UPSTREAMS];
     omni_upstream_decode_t decode_states[MAX_DECODE_UPSTREAMS];
+
+    ngx_atomic_t ttft_buckets[OMNI_TTFT_BUCKETS_COUNT];
+    ngx_atomic_t ttft_sum_ms;
+    ngx_atomic_t ttft_count;
+    ngx_atomic_t tpot_buckets[OMNI_TPOT_BUCKETS_COUNT];
+    ngx_atomic_t tpot_sum_ms;
+    ngx_atomic_t tpot_count;
+    ngx_atomic_t e2e_buckets[OMNI_E2E_BUCKETS_COUNT];
+    ngx_atomic_t e2e_sum_ms;
+    ngx_atomic_t e2e_count;
+    ngx_atomic_t success_count;
+    ngx_atomic_t failure_count;
+    char      model_name[128];
+    ngx_uint_t model_name_len;
     omni_prefill_batch_stats_t prefill_batch_stats;
 } omni_global_state_t;
 

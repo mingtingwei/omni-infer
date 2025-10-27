@@ -15,6 +15,71 @@ static const char *LABEL_PHASE[] = {"phase"};
 static omni_metric_desc_t *metrics_registry = NULL;
 static size_t metrics_count = 0;
 
+//Collector bucket 
+static const ngx_uint_t OMNI_TTFT_BUCKET_BOUNDS_MS[OMNI_TTFT_BUCKETS_COUNT - 1] =
+    {1, 5, 10, 20, 40, 60, 80, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000, 
+    20000, 40000, 80000, 160000, 640000, 2560000};
+static const ngx_uint_t OMNI_TPOT_BUCKET_BOUNDS_MS[OMNI_TPOT_BUCKETS_COUNT - 1] =
+    {10, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 2500, 5000, 7500, 10000, 
+    20000, 40000, 80000};
+static const ngx_uint_t OMNI_E2E_BUCKET_BOUNDS_MS[OMNI_E2E_BUCKETS_COUNT - 1] =
+    {300, 500, 800, 1000, 1500, 2000, 2500, 5000, 10000, 15000, 20000, 30000, 40000, 50000, 
+    60000, 120000, 240000, 480000, 960000, 1920000, 7680000};
+
+static ngx_uint_t
+omni_hist_bucket_index_ms(ngx_msec_t v, const ngx_uint_t *bounds, ngx_uint_t n_bounds)
+{
+    for (ngx_uint_t i = 0; i < n_bounds; i++)
+    {
+        if ((ngx_uint_t)v <= bounds[i])
+        {
+            return i; // in i th bucket
+        }
+    }
+    return n_bounds; // +Inf bucket
+}
+
+void omni_metrics_record_ttft(omni_global_state_t *gs, ngx_msec_t ttft_ms)
+{
+    if (gs == NULL || ttft_ms <= 0)
+        return;
+    ngx_uint_t idx = omni_hist_bucket_index_ms(ttft_ms, OMNI_TTFT_BUCKET_BOUNDS_MS,
+                                               (ngx_uint_t)(OMNI_TTFT_BUCKETS_COUNT - 1));
+    ngx_atomic_fetch_add(&gs->ttft_buckets[idx], 1);
+    ngx_atomic_fetch_add(&gs->ttft_count, 1);
+    ngx_atomic_fetch_add(&gs->ttft_sum_ms, (ngx_atomic_uint_t)ttft_ms);
+}
+
+void omni_metrics_record_tpot(omni_global_state_t *gs, ngx_msec_t tpot_ms)
+{
+    if (gs == NULL || tpot_ms <= 0)
+        return;
+    ngx_uint_t idx = omni_hist_bucket_index_ms(tpot_ms, OMNI_TPOT_BUCKET_BOUNDS_MS,
+                                               (ngx_uint_t)(OMNI_TPOT_BUCKETS_COUNT - 1));
+    ngx_atomic_fetch_add(&gs->tpot_buckets[idx], 1);
+    ngx_atomic_fetch_add(&gs->tpot_count, 1);
+    ngx_atomic_fetch_add(&gs->tpot_sum_ms, (ngx_atomic_uint_t)tpot_ms);
+}
+
+void omni_metrics_record_e2e(omni_global_state_t *gs, ngx_msec_t e2e_ms)
+{
+    if (gs == NULL || e2e_ms <= 0)
+        return;
+
+    ngx_uint_t idx = omni_hist_bucket_index_ms(e2e_ms, OMNI_E2E_BUCKET_BOUNDS_MS,
+                                               (ngx_uint_t)(OMNI_E2E_BUCKETS_COUNT - 1));
+    ngx_atomic_fetch_add(&gs->e2e_buckets[idx], 1);
+    ngx_atomic_fetch_add(&gs->e2e_count, 1);
+    ngx_atomic_fetch_add(&gs->e2e_sum_ms, (ngx_atomic_uint_t)e2e_ms);
+}
+
+static inline const char *omni_metrics_get_model_name(omni_global_state_t *gs) {
+    if (gs && gs->model_name_len > 0) {
+        return gs->model_name;
+    }
+    return "unknown";
+}
+
 #define UPSTREAM_METRIC(endpoint, name, help, value)                                                          \
     metrics_registry[index] = (omni_metric_desc_t){                                                           \
         name,                                                                                                 \
@@ -235,6 +300,34 @@ static u_char *format_metric_value(u_char *p, u_char *end,
     return p;
 }
 
+static u_char *export_histogram_series(u_char *p, u_char *end,
+                                       const char *metric_name,
+                                       const char *help,
+                                       const ngx_atomic_t *buckets, ngx_uint_t nbuckets,
+                                       const ngx_uint_t *bounds_ms,
+                                       ngx_atomic_t sum_ms, ngx_atomic_t count,const char *model)
+{
+    // HELP/TYPE
+    p = ngx_snprintf(p, end - p, "# HELP %s %s\n", metric_name, help);
+    p = ngx_snprintf(p, end - p, "# TYPE %s histogram\n", metric_name);
+    // accumulate
+    ngx_uint_t cumulative = 0;
+    for (ngx_uint_t i = 0; i < nbuckets - 1; i++)
+    {
+        ngx_atomic_t v = buckets ? buckets[i] : 0;
+        cumulative += (ngx_uint_t)v;
+        double le = ((double)bounds_ms[i]) / 1000.0;
+        p = ngx_snprintf(p, end - p, "%s_bucket{engine=\"0\",model_name=\"%s\",le=\"%.3f\"} %ui\n", metric_name, model, le, cumulative);
+    }
+    // +Inf bucket
+    p = ngx_snprintf(p, end - p, "%s_bucket{engine=\"0\",model_name=\"%s\",le=\"+Inf\"} %uA\n", metric_name, model, count);
+
+    // sum / count（sec）
+    p = ngx_snprintf(p, end - p, "%s_sum %.6f\n", metric_name, ((double)sum_ms) / 1000.0);
+    p = ngx_snprintf(p, end - p, "%s_count %uA\n", metric_name, count);
+
+    return p;
+}
 // Export all metrics in Prometheus format
 ngx_str_t omni_metrics_export(omni_global_state_t *global_state)
 {
@@ -300,7 +393,47 @@ ngx_str_t omni_metrics_export(omni_global_state_t *global_state)
         // Format the metric value
         p = format_metric_value(p, end, desc);
     }
+    const char *model = omni_metrics_get_model_name(global_state);
 
+    p = export_histogram_series(
+        p, end,
+        "vllm:time_to_first_token_seconds",
+        "Time to first token histogram (seconds)",
+        global_state->ttft_buckets, OMNI_TTFT_BUCKETS_COUNT,
+        OMNI_TTFT_BUCKET_BOUNDS_MS,
+        global_state->ttft_sum_ms, global_state->ttft_count, model);
+
+    p = export_histogram_series(
+        p, end,
+        "vllm:time_per_output_token_seconds",
+        "Time per output token histogram (seconds)",
+        global_state->tpot_buckets, OMNI_TPOT_BUCKETS_COUNT,
+        OMNI_TPOT_BUCKET_BOUNDS_MS,
+        global_state->tpot_sum_ms, global_state->tpot_count, model);
+
+    p = export_histogram_series(
+        p, end,
+        "vllm:e2e_request_latency_seconds",
+        "End-to-end request latency histogram (seconds)",
+        global_state->e2e_buckets, OMNI_E2E_BUCKETS_COUNT,
+        OMNI_E2E_BUCKET_BOUNDS_MS,
+        global_state->e2e_sum_ms, global_state->e2e_count, model);
+        
+    p = ngx_snprintf(p, end - p,
+                     "# HELP vllm:requests_success_total Total number of successful global proxy requests\n");
+    p = ngx_snprintf(p, end - p,
+                     "# TYPE vllm:requests_success_total counter\n");
+    p = ngx_snprintf(p, end - p,
+                     "vllm:requests_success_total %uA\n",
+                     global_state->success_count);
+
+    p = ngx_snprintf(p, end - p,
+                     "# HELP vllm:requests_failure_total Total number of failed global proxy requests\n");
+    p = ngx_snprintf(p, end - p,
+                     "# TYPE vllm:requests_failure_total counter\n");
+    p = ngx_snprintf(p, end - p,
+                     "vllm:requests_failure_total %uA\n",
+                     global_state->failure_count);
 done:
     {
         ngx_str_t result;

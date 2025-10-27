@@ -345,6 +345,24 @@ static void omni_proxy_main_req_cleanup(void *data)
     ngx_http_request_t *r = omni_get_http_request(req);
     struct timeval tv;
     gettimeofday(&tv, NULL);
+    if (req->metrics.http_status >= 200 && req->metrics.http_status < 300)
+    {
+        ngx_atomic_fetch_add(&omni_get_global_state()->success_count, 1);
+    }
+    else
+    {
+        ngx_atomic_fetch_add(&omni_get_global_state()->failure_count, 1);
+    }
+    if (req->metrics.decoded_tokens > 0 && req->metrics.tpot > 0)
+    {
+        omni_metrics_record_tpot(g_state, req->metrics.tpot);
+    }
+    if (req->metrics.time_last_reponse > 0 && req->metrics.time_received > 0 &&
+        req->metrics.time_last_reponse >= req->metrics.time_received)
+    {
+        ngx_msec_t e2e_ms = req->metrics.time_last_reponse - req->metrics.time_received;
+        omni_metrics_record_e2e(omni_get_global_state(), e2e_ms);
+    }
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                 "<<<Action: Received all tokens; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
     ngx_log_error(NGX_LOG_INFO, omni_get_http_request(req)->connection->log, 0,
@@ -836,6 +854,7 @@ static void omni_proxy_update_decode_stats(ngx_http_request_t *r, ngx_buf_t *buf
         req->metrics.ttft = ngx_current_msec - req->metrics.time_received;
         req->metrics.time_first_token = req->metrics.tpot = ngx_current_msec - req->metrics.time_to_decode;
         req->metrics.decoded_tokens++;
+        omni_metrics_record_ttft(g_state, req->metrics.ttft);
 
         ngx_uint_t decode_idx = req->decode_upstream_endpoint_idx;
         ngx_atomic_fetch_add(&g_state->decode_states[decode_idx].num_tokens, 1);
@@ -1078,6 +1097,14 @@ static ngx_int_t ngx_http_omni_process_status_line(ngx_http_request_t *r)
         return NGX_ERROR;
     }
     ngx_memcpy(u->headers_in.status_line.data, st.start, u->headers_in.status_line.len);
+
+    {
+        omni_req_t *req = omni_get_req(r);
+        if (req)
+        {
+            req->metrics.http_status = (ngx_uint_t)st.code;
+        }
+    }
 
     return ngx_http_omni_process_header(r);
 }
@@ -1803,13 +1830,13 @@ static ngx_int_t omni_proxy_post_config(ngx_conf_t *cf)
     }
     *h = ngx_http_omni_proxy_metrics_handler;
 
-    return NGX_OK;
-
     h = ngx_array_push(&cmcf->phases[NGX_HTTP_CONTENT_PHASE].handlers);
     if (h == NULL) {
         return NGX_ERROR;
     }
     *h = ngx_http_omni_proxy_health_status_handler;
+    
+    return NGX_OK;
 }
 
 static void ngx_omni_tokenizer_pipe_handler(ngx_event_t *ev)

@@ -53,3 +53,6 @@ const omni_metric_desc_t *omni_metrics_get_registry(omni_global_state_t *global_
 ngx_str_t omni_metrics_export(omni_global_state_t *global_state);
 
 ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *pool);
+void omni_metrics_record_ttft(omni_global_state_t *gs, ngx_msec_t ttft_ms);
+void omni_metrics_record_tpot(omni_global_state_t *gs, ngx_msec_t tpot_ms);
+void omni_metrics_record_e2e(omni_global_state_t *gs, ngx_msec_t e2e_ms);

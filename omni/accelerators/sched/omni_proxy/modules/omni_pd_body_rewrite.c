@@ -16,6 +16,72 @@ extern ngx_module_t ngx_http_omni_proxy_module;
 
 static unsigned int prefill_response_json_keys_len = sizeof(prefill_response_json_keys) / sizeof(char *);
 
+static void omni_try_set_model_name_from_json(ngx_http_request_t *r, const u_char *json_data, size_t json_len)
+{
+    if (json_data == NULL || json_len == 0) {
+        return;
+    }
+
+    omni_global_state_t *gs = omni_get_global_state();
+    if (gs == NULL) {
+        return;
+    }
+
+    if (gs->model_name_len != 0) {
+        // already set
+        return;
+    }
+
+    jsmn_parser parser;
+    int tokens_cap = 256;
+    jsmntok_t *tokens = ngx_palloc(r->pool, tokens_cap * sizeof(jsmntok_t));
+    if (!tokens) {
+        return;
+    }
+
+    jsmn_init(&parser);
+    int ntok = jsmn_parse(&parser, (const char *)json_data, (int)json_len, tokens, tokens_cap);
+    while (ntok == JSMN_ERROR_NOMEM) {
+        ngx_pfree(r->pool, tokens);
+        tokens_cap *= 2;
+        tokens = ngx_palloc(r->pool, tokens_cap * sizeof(jsmntok_t));
+        if (!tokens) return;
+        jsmn_init(&parser);
+        ntok = jsmn_parse(&parser, (const char *)json_data, (int)json_len, tokens, tokens_cap);
+    }
+    if (ntok <= 0) {
+        return;
+    }
+
+    // find top "model": "<value>"
+    for (int i = 1; i < ntok - 1; i++) {
+        if (tokens[i].type == JSMN_STRING) {
+            int key_len = tokens[i].end - tokens[i].start;
+            if (key_len == 5 && ngx_strncmp((u_char *)json_data + tokens[i].start, "model", 5) == 0) {
+                jsmntok_t *val = &tokens[i + 1];
+                if (val->type == JSMN_STRING) {
+                    const u_char *v = (const u_char *)json_data + val->start;
+                    size_t vlen = (size_t)(val->end - val->start);
+                    if (vlen > sizeof(gs->model_name) - 1) {
+                        vlen = sizeof(gs->model_name) - 1;
+                    }
+
+                    ngx_shmtx_lock(&gs->shmtx);
+                    if (gs->model_name_len == 0) {
+                        ngx_memcpy(gs->model_name, v, vlen);
+                        gs->model_name[vlen] = '\0';
+                        gs->model_name_len = (ngx_uint_t)vlen;
+                        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                                      "Set global model_name to \"%s\" (len=%ui)",
+                                      gs->model_name, gs->model_name_len);
+                    }
+                    ngx_shmtx_unlock(&gs->shmtx);
+                }
+                break; 
+            }
+        }
+    }
+}
 // Helper: Find the index of a key in a JSMN token array
 int find_jsmn_key(ngx_http_request_t *r, const char *json, jsmntok_t *tokens, int tokens_size, const char *key)
 {
@@ -683,6 +749,7 @@ ngx_int_t omni_proxy_save_origin_body(
     *p = '\0';
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "prefill: original body for subrequest: %s", body_data);
+    omni_try_set_model_name_from_json(r, ctx->origin_body_data, ctx->origin_body_data_size);
 
     return NGX_DONE;
 }

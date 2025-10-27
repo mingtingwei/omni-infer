@@ -396,6 +396,10 @@ EOF
             default_type application/json; 
         }
 
+        location = /internal/metrics {
+            rewrite ^ /omni_proxy/metrics last;
+        }
+        
         location ~ ^/prefill_sub(?<orig>/.*)\$ {
             internal;
             proxy_pass http://prefill_endpoints\$orig\$is_args\$args;
