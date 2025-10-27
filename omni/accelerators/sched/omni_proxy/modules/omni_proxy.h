@@ -12,6 +12,15 @@
 #include <omni_shared_state.h>
 #include <omni_tokenizer_worker.h>
 
+#define OMNI_PROXY_SCHEDULE_ALGO_DEFAULT 0
+#define OMNI_PROXY_SCHEDULE_ALGO_EARLIEST_BATCH 1
+
+typedef enum {
+    NGX_PREFILL_STREAM_OFF = 0,
+    NGX_PREFILL_STREAM_ADD,
+    NGX_PREFILL_STREAM_SET_OPT
+} ngx_prefill_stream_op_e;
+
 typedef struct
 {
     ngx_str_t upstream_name;
@@ -25,7 +34,9 @@ typedef struct
     ngx_uint_t prefill_max_num_seqs;
     ngx_uint_t decode_max_num_seqs;
     ngx_uint_t prefill_starvation_timeout;
-    ngx_flag_t  health_status_enabled;
+    ngx_flag_t health_status_enabled;
+    ngx_uint_t schedule_algo;
+    ngx_prefill_stream_op_e stream_ops;
 } ngx_http_omni_loc_conf_t;
 
 typedef struct omni_req_context_s

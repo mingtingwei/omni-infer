@@ -10,6 +10,8 @@
 
 #define NUM_PREFILL_BATCH_METRICS_HIS 32
 #define NUM_DECODE_BATCH_METRICS_HIS 256
+#define OMNI_PREFILL_BATCH_STATS_MAX 64
+#define OMNI_PREFILL_BATCH_STATS_WINDOW 128
 #define MAX_PREFILL_UPSTREAMS 128
 #define MAX_DECODE_UPSTREAMS 1024
 #define MAX_REQUEST_SLOTS 16384
@@ -105,6 +107,8 @@ typedef struct omni_batch_metrics_s
     ngx_msec_t time_taken; // Since the oldest request responded in this batch
     ngx_msec_t first_response_receive_time;
     ngx_msec_t last_response_receive_time;
+    ngx_msec_t first_schedule_sent_time;
+    ngx_msec_t last_schedule_sent_time;
     double average_delta;
 } omni_batch_metrics_t;
 
@@ -114,6 +118,20 @@ typedef struct omni_batch_metrics_his_s
     uint32_t count;
     omni_batch_metrics_t his[NUM_PREFILL_BATCH_METRICS_HIS];
 } omni_batch_metrics_his_t;
+
+typedef struct omni_prefill_batch_stats_bucket_s
+{
+    ngx_msec_t durations[OMNI_PREFILL_BATCH_STATS_WINDOW];
+    uint32_t count;
+    uint32_t cursor;
+    uint64_t total;
+    ngx_msec_t cached_average;
+} omni_prefill_batch_stats_bucket_t;
+
+typedef struct omni_prefill_batch_stats_s
+{
+    omni_prefill_batch_stats_bucket_t buckets[OMNI_PREFILL_BATCH_STATS_MAX + 1];
+} omni_prefill_batch_stats_t;
 
 #define UPSTREAM_NAME_MAX 64
 #define UPSTREAM_IP_MAX 16
@@ -135,6 +153,9 @@ typedef struct omni_upstream_prefill_s
     uint32_t index;
     omni_upstream_address_t address;
     uint32_t num_running;
+    uint32_t num_queue;
+    uint32_t num_batch_exec;
+    uint32_t idle_batch;
     uint32_t num_tokens;
     ngx_msec_t last_scheduled_time;
     ngx_msec_t expected_next_schedule_time;
@@ -190,6 +211,7 @@ typedef struct omni_global_state_s
     int workers[MAX_WORKERS];
     omni_upstream_prefill_t prefill_states[MAX_PREFILL_UPSTREAMS];
     omni_upstream_decode_t decode_states[MAX_DECODE_UPSTREAMS];
+    omni_prefill_batch_stats_t prefill_batch_stats;
 } omni_global_state_t;
 
 #define GLOBAL_STATE_SIZE sizeof(omni_global_state_t)

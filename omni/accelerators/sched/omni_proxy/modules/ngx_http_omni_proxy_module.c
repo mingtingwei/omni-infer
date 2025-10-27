@@ -54,6 +54,13 @@ static const size_t PREFILL_URI_LEN = sizeof("/prefill_sub") - 1;
 
 static ngx_int_t ngx_http_omni_proxy_health_status_handler(ngx_http_request_t *r);
 
+static char *ngx_conf_set_omni_stream_ops(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+
+static ngx_conf_enum_t ngx_http_omni_schedule_algos[] = {
+    {ngx_string("default"), OMNI_PROXY_SCHEDULE_ALGO_DEFAULT},
+    {ngx_string("earliest_batch"), OMNI_PROXY_SCHEDULE_ALGO_EARLIEST_BATCH},
+    {ngx_null_string, 0}};
+
 static omni_global_state_t *g_state;          // In share memory
 static omni_worker_local_state_t local_state; // In local process memory space
 
@@ -442,13 +449,6 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
         return rc;
     }
 
-    if (subr->headers_out.status != NGX_HTTP_OK)
-    {
-        r->headers_out.status = subr->headers_out.status;
-        ngx_http_finalize_request(r, subr->headers_out.status);
-        return NGX_OK;
-    }
-
     for (cl = subr->out; cl; cl = cl->next)
     {
         total += ngx_buf_size(cl->buf);
@@ -478,23 +478,112 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
 
     omni_upstream_prefill_t *us = &g_state->prefill_states[req->prefill_upstream_endpoint_idx];
     us->num_running--;
+
     us->num_tokens -= req->metrics.prompt_num_tokens;
+    if (subr->headers_out.status < NGX_HTTP_OK ||
+        subr->headers_out.status >= NGX_HTTP_SPECIAL_RESPONSE)
+    {
+        ngx_log_error(NGX_LOG_INFO,
+                      r->connection->log,
+                      0,
+                      "[Prefill-%d] subrequest returned non-success status:%i",
+                      req->slot_index,
+                      subr->headers_out.status);
+
+        r->headers_out.status = subr->headers_out.status;
+        r->headers_out.content_length_n = ctx->prefill_response_body_size;
+        r->headers_out.content_type = subr->headers_out.content_type;
+        r->headers_out.content_type_len = subr->headers_out.content_type_len;
+
+        ngx_int_t send_rc = ngx_http_send_header(r);
+        if (send_rc == NGX_ERROR || send_rc > NGX_OK)
+        {
+            ngx_http_finalize_request(r, send_rc);
+            return NGX_DONE;
+        }
+
+        ngx_buf_t *b = ngx_calloc_buf(r->pool);
+        if (b == NULL)
+        {
+            ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+            return NGX_DONE;
+        }
+
+        b->pos = ctx->prefill_response_body;
+        b->last = ctx->prefill_response_body + ctx->prefill_response_body_size;
+        b->memory = 1;
+        b->last_buf = 1;
+        b->last_in_chain = 1;
+
+        ngx_chain_t out;
+        out.buf = b;
+        out.next = NULL;
+
+        ngx_int_t body_rc = ngx_http_output_filter(r, &out);
+        ngx_http_finalize_request(r, (body_rc == NGX_ERROR) ? NGX_ERROR : NGX_OK);
+        return NGX_DONE;
+    }
 
     omni_batch_metrics_t *current_batch = &us->his.his[us->his.head];
-    ngx_msec_t delta = (current_batch->last_response_receive_time > 0) ? 
-                     (ngx_current_msec - current_batch->last_response_receive_time) : 
-                     (21); // If first，force delta > 20 to get a new batch
+    omni_batch_metrics_t *request_batch = current_batch;
+    ngx_msec_t response_time = ngx_current_msec;
+    ngx_msec_t schedule_time = req->metrics.time_to_prefill;
+    ngx_msec_t delta = (current_batch->last_response_receive_time > 0) ?
+                         (response_time - current_batch->last_response_receive_time) :
+                         (21); // If first，force delta > 20 to get a new batch
 
     // Need a smarter value from statistics or work out by the number of tokens scheduled
     if (delta > 20)
     {
+        if (current_batch->last_response_receive_time == 0) {
+            us->num_batch_exec = us->num_queue;
+            us->num_queue = 0;
+        }
         // 1. **calculate last batch**
-        if (current_batch->num_requests > 0) 
+        if (current_batch->num_requests > 0)
         { // not a empty batch
-            current_batch->time_taken += current_batch->last_response_receive_time - current_batch->first_response_receive_time;
-             ngx_log_error(NGX_LOG_INFO, omni_get_http_request(req)->connection->log, 0,
-                          "[Prefill-Batch-End] Batch at head %ui finalized. Duration: %ui ms, Tokens: %ui",
-                          us->his.head, current_batch->time_taken, current_batch->num_tokens);
+            if (current_batch->first_schedule_sent_time > 0 &&
+                current_batch->last_response_receive_time >= current_batch->first_schedule_sent_time)
+            {
+                current_batch->time_taken =
+                    current_batch->last_response_receive_time - current_batch->first_schedule_sent_time;
+            }
+
+            ngx_msec_t gap = 0;
+            if (current_batch->last_schedule_sent_time > 0 &&
+                current_batch->first_response_receive_time >= current_batch->last_schedule_sent_time)
+            {
+                gap = current_batch->first_response_receive_time - current_batch->last_schedule_sent_time;
+            }
+
+
+            ngx_log_error(NGX_LOG_INFO, ngx_cycle->log,
+                          0,
+                          "[Prefill-Batch-End] Batch head=%ui duration=%M first_schedule=%M last_schedule=%M first_response=%M last_response=%M gap=%M tokens=%ui batch_exec=%ui queue=%ui",
+                          us->his.head,
+                          current_batch->time_taken,
+                          current_batch->first_schedule_sent_time,
+                          current_batch->last_schedule_sent_time,
+                          current_batch->first_response_receive_time,
+                          current_batch->last_response_receive_time,
+                          gap,
+                          current_batch->num_tokens,
+                          us->num_batch_exec,
+                          us->num_queue);
+
+            if (gap > 0)
+            {
+                omni_scheduler_record_prefill_batch_stat(g_state, current_batch->num_requests, gap);
+            }
+
+            if (current_batch->num_requests == 1 && us->idle_batch == true)
+            {
+                //omni_scheduler_record_prefill_batch_stat(g_state, current_batch->num_requests, gap);
+                us->idle_batch = false;
+            }
+
+            us->num_batch_exec = us->num_queue;
+            us->num_queue = 0;
         }
 
         // 2. **start a new batch**
@@ -506,21 +595,63 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
         omni_batch_metrics_t *new_batch = &us->his.his[us->his.head];
         ngx_memzero(new_batch, sizeof(omni_batch_metrics_t));
 
-        new_batch->first_response_receive_time = ngx_current_msec;
-        new_batch->last_response_receive_time = ngx_current_msec;
+        new_batch->first_response_receive_time = response_time;
+        new_batch->last_response_receive_time = response_time;
         new_batch->num_requests = 1;
         new_batch->num_tokens = req->metrics.prompt_num_tokens;
-        new_batch->time_taken = ngx_current_msec - req->metrics.time_to_prefill;
+        if (schedule_time > 0 && response_time >= schedule_time)
+        {
+            new_batch->time_taken = response_time - schedule_time;
+        }
+        new_batch->first_schedule_sent_time = schedule_time;
+        new_batch->last_schedule_sent_time = schedule_time;
+        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
+                      "[Prefill-Batch-Metrics] head=%ui last_response_receive_time=%M num_requests=%ui num_tokens=%ui first_schedule=%M last_schedule=%M time_taken=%M batch_exec=%ui queue=%ui",
+                      us->his.head,
+                      new_batch->last_response_receive_time,
+                      new_batch->num_requests,
+                      new_batch->num_tokens,
+                      new_batch->first_schedule_sent_time,
+                      new_batch->last_schedule_sent_time,
+                      new_batch->time_taken,
+                      (ngx_uint_t)us->num_batch_exec,
+                      (ngx_uint_t)us->num_queue);
     }
     else
     {
         // **add to current batch**
-        current_batch->last_response_receive_time = ngx_current_msec;
+        current_batch->last_response_receive_time = response_time;
         current_batch->num_requests++;
         current_batch->num_tokens += req->metrics.prompt_num_tokens;
         // average_delta 
         current_batch->average_delta = current_batch->average_delta * (current_batch->num_requests - 1) +
                                        delta / (current_batch->num_requests);
+        if (current_batch->first_schedule_sent_time == 0 ||
+            schedule_time < current_batch->first_schedule_sent_time)
+        {
+            current_batch->first_schedule_sent_time = schedule_time;
+        }
+        if (schedule_time > current_batch->last_schedule_sent_time)
+        {
+            current_batch->last_schedule_sent_time = schedule_time;
+        }
+        if (current_batch->first_schedule_sent_time > 0 &&
+            current_batch->last_response_receive_time >= current_batch->first_schedule_sent_time)
+        {
+            current_batch->time_taken =
+                current_batch->last_response_receive_time - current_batch->first_schedule_sent_time;
+        }
+        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
+                      "[Prefill-Batch-Metrics] head=%ui last_response_receive_time=%M num_requests=%ui num_tokens=%ui first_schedule=%M last_schedule=%M time_taken=%M batch_exec=%ui queue=%ui",
+                      us->his.head,
+                      current_batch->last_response_receive_time,
+                      current_batch->num_requests,
+                      current_batch->num_tokens,
+                      current_batch->first_schedule_sent_time,
+                      current_batch->last_schedule_sent_time,
+                      current_batch->time_taken,
+                      us->num_batch_exec,
+                      us->num_queue);
     }
 
     // check policy
@@ -1294,7 +1425,9 @@ static void *ngx_http_omni_create_loc_conf(ngx_conf_t *cf)
     conf->prefill_max_num_seqs = NGX_CONF_UNSET_UINT;
     conf->decode_max_num_seqs = NGX_CONF_UNSET_UINT;
     conf->prefill_starvation_timeout = NGX_CONF_UNSET_UINT;
+    conf->schedule_algo = NGX_CONF_UNSET_UINT;
     conf->health_status_enabled = NGX_CONF_UNSET;
+    conf->stream_ops = (ngx_prefill_stream_op_e) NGX_CONF_UNSET_UINT;
 
     return conf;
 }
@@ -1322,6 +1455,7 @@ static char *ngx_http_omni_merge_loc_conf(ngx_conf_t *cf, void *parent, void *ch
     ngx_conf_merge_uint_value(conf->prefill_max_num_seqs, prev->prefill_max_num_seqs, 32);
     ngx_conf_merge_uint_value(conf->decode_max_num_seqs, prev->decode_max_num_seqs, 32);
     ngx_conf_merge_uint_value(conf->prefill_starvation_timeout, prev->prefill_starvation_timeout, 400);
+    ngx_conf_merge_uint_value(conf->schedule_algo, prev->schedule_algo, 0);
 
     if (conf->metrics_enabled == NGX_CONF_UNSET)
     {
@@ -1333,6 +1467,54 @@ static char *ngx_http_omni_merge_loc_conf(ngx_conf_t *cf, void *parent, void *ch
     if (conf->model_path.len != 0 || conf->vllm_kv_port_offset != NGX_CONF_UNSET || conf->pd_policy != NGX_CONF_UNSET)
     {
         local_state.loc_conf = conf;
+    }
+
+    if ((ngx_uint_t)conf->stream_ops == NGX_CONF_UNSET_UINT)
+    {
+        if ((ngx_uint_t)prev->stream_ops == NGX_CONF_UNSET_UINT)
+        {
+            conf->stream_ops = NGX_PREFILL_STREAM_OFF;
+        }
+        else
+        {
+            conf->stream_ops = prev->stream_ops;
+        }
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *ngx_conf_set_omni_stream_ops(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_omni_loc_conf_t *olcf = conf;
+    ngx_str_t *value = cf->args->elts;
+
+    if (cf->args->nelts != 2)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid number of arguments in \"%V\" directive",
+                           &cmd->name);
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_strcmp(value[1].data, "off") == 0)
+    {
+        olcf->stream_ops = NGX_PREFILL_STREAM_OFF;
+    }
+    else if (ngx_strcmp(value[1].data, "add") == 0)
+    {
+        olcf->stream_ops = NGX_PREFILL_STREAM_ADD;
+    }
+    else if (ngx_strcmp(value[1].data, "set_opt") == 0)
+    {
+        olcf->stream_ops = NGX_PREFILL_STREAM_SET_OPT;
+    }
+    else
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid value \"%V\" in \"%V\" directive, it must be \"add\", \"set_opt\", or \"off\"",
+                           &value[1], &cmd->name);
+        return NGX_CONF_ERROR;
     }
 
     return NGX_CONF_OK;
@@ -2318,6 +2500,20 @@ static ngx_command_t omni_proxy_commands[] = {
      ngx_conf_set_flag_slot,
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, health_status_enabled),
+     NULL},
+    
+    {ngx_string("omni_proxy_schedule_algo"),
+     NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+     ngx_conf_set_enum_slot,
+     NGX_HTTP_LOC_CONF_OFFSET,
+     offsetof(ngx_http_omni_loc_conf_t, schedule_algo),
+     ngx_http_omni_schedule_algos},
+
+    {ngx_string("stream_ops"),
+     NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+     ngx_conf_set_omni_stream_ops,
+     NGX_HTTP_LOC_CONF_OFFSET,
+     offsetof(ngx_http_omni_loc_conf_t, stream_ops),
      NULL},
 
     ngx_null_command};

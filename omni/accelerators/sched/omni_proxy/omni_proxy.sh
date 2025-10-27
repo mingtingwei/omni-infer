@@ -19,6 +19,7 @@ omni_proxy_max_batch_num_token="32000"
 omni_proxy_prefill_max_num_seqs="32"
 omni_proxy_decode_max_num_seqs="32"
 omni_proxy_prefill_starvation_timeout="400"
+stream_ops="off"
 
 dry_run=false
 stop=false
@@ -42,6 +43,8 @@ print_help() {
     echo "  --omni-proxy-pd-policy <policy> sequential or parallel (default: sequential)"
     echo "  --omni-proxy-model-path <path>  Path to model directory (default: unset)"
     echo "  --omni-proxy-max-batch-num-token <N>      max_batch_num_token (default: 32000)"
+    echo "  --stream-ops <add|set_opt|off>             Set stream_ops directive (default: off), set add to enforce turning on streaming and stream_options, set set_opt to only turn on stream_options when streaming is on"
+    echo "  --omni-proxy-schedule-algo <algo>       default or earliest_batch (default: default)"
     echo "  --omni-proxy-prefill-max-num-seqs <N>      prefill_max_num_seqs (default: 32)"
     echo "  --omni-proxy-decode-max-num-seqs <N>       decode_max_num_seqs (default: 32)"
     echo "  --omni-proxy-prefill-starvation-timeout <N> prefill_starvation_timeout (default: 400)"
@@ -128,6 +131,26 @@ while [[ $# -gt 0 ]]; do
             ;;
         --omni-proxy-prefill-starvation-timeout)
             omni_proxy_prefill_starvation_timeout="$2"
+            shift 2
+            ;;
+        --stream-ops)
+            case "$2" in
+                add|set_opt|off)
+                    stream_ops="$2"
+                    ;;
+                *)
+                    echo "Error: --stream-ops must be 'add', 'set_opt', or 'off'"
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
+        --omni-proxy-schedule-algo)
+            if [[ "$2" != "default" && "$2" != "earliest_batch" ]]; then
+                echo "Error: --omni-proxy-schedule-algo must be 'default' or 'earliest_batch'"
+                exit 1
+            fi
+            omni_proxy_schedule_algo="$2"
             shift 2
             ;;
         --dry-run)
@@ -340,11 +363,13 @@ $(gen_upstream_block "decode_endpoints" "$decode_endpoints")
         location /v1 {
             set_request_id on;
             omni_proxy decode_endpoints;
+            stream_ops $stream_ops;
             omni_proxy_pd_policy $omni_proxy_pd_policy;
             omni_proxy_max_batch_num_token $omni_proxy_max_batch_num_token;
             omni_proxy_prefill_max_num_seqs $omni_proxy_prefill_max_num_seqs;
             omni_proxy_decode_max_num_seqs $omni_proxy_decode_max_num_seqs;
             omni_proxy_prefill_starvation_timeout $omni_proxy_prefill_starvation_timeout;
+            omni_proxy_schedule_algo $omni_proxy_schedule_algo;
 EOF
 
     if [[ -n "$omni_proxy_model_path" ]]; then

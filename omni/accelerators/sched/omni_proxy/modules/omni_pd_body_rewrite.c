@@ -8,6 +8,12 @@ static char *prefill_response_json_keys[] = {
     "kv_transfer_params",
 };
 
+
+static const ngx_str_t stream_options_content_str = ngx_string("\"stream_options\":{\"include_usage\":true,\"continuous_usage_stats\":true}");
+static const ngx_str_t stream_all_content_str = ngx_string("\"stream\":true,\"stream_options\":{\"include_usage\":true,\"continuous_usage_stats\":true}");
+
+extern ngx_module_t ngx_http_omni_proxy_module;
+
 static unsigned int prefill_response_json_keys_len = sizeof(prefill_response_json_keys) / sizeof(char *);
 
 // Helper: Find the index of a key in a JSMN token array
@@ -173,8 +179,183 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
         b = b_new;
     }
 
-    b->last_buf = 1;
-    b->last_in_chain = 1;
+    jsmntok_t *origin_tokens = ctx->origin_body_tokens;
+    int origin_token_size = ctx->origin_body_tokens_size;
+
+    if (origin_tokens == NULL || origin_token_size <= 0)
+    {
+        origin_tokens = ngx_palloc(r->pool, tokens_size * sizeof(jsmntok_t));
+        if (origin_tokens == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "gen decode json: palloc origin jsmntok_t");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        jsmn_init(&parser);
+        origin_token_size = jsmn_parse(
+            &parser, (char *)(ctx->origin_body_data), ctx->origin_body_data_size, origin_tokens, tokens_size);
+        ctx->origin_body_tokens = origin_tokens;
+        ctx->origin_body_tokens_size = origin_token_size;
+    }
+
+    int need_add_stream_option = 0;
+    char *stream_str = "stream";
+    char *stream_opt_str = "stream_options";
+    int stream_idx = -1;
+    int stream_is_true = 0;
+
+    if (origin_tokens != NULL && origin_token_size > 0)
+    {
+        stream_idx = find_jsmn_key(
+            r, (char *)(ctx->origin_body_data), origin_tokens, origin_token_size, stream_str);
+        if (stream_idx != -1)
+        {
+            int stream_val_idx = stream_idx + 1;
+            if (origin_tokens[stream_val_idx].type == JSMN_PRIMITIVE &&
+                strncmp(ctx->origin_body_data + origin_tokens[stream_val_idx].start, "true", 4) == 0)
+            {
+                stream_is_true = 1;
+            }
+        }
+    }
+
+    int include_usage_true = 0;
+    int continuous_usage_true = 0;
+
+    if (stream_is_true)
+    {
+        need_add_stream_option = 0;
+        int stream_option_idx = find_jsmn_key(
+            r, (char *)(ctx->origin_body_data), origin_tokens, origin_token_size, stream_opt_str);
+        include_usage_true = 0;
+        continuous_usage_true = 0;
+
+        if (stream_option_idx != -1)
+        {
+            int stream_option_val_idx = stream_option_idx + 1;
+            if (origin_tokens[stream_option_val_idx].type == JSMN_OBJECT)
+            {
+                for (int i = 0; i < origin_tokens[stream_option_val_idx].size; ++i)
+                {
+                    int key_token_idx = stream_option_val_idx + 1 + 2 * i;
+                    char keybuf[32];
+                    json_token_tostr((char *)(ctx->origin_body_data), &origin_tokens[key_token_idx], keybuf, sizeof(keybuf));
+                    int val_token_idx = key_token_idx + 1;
+                    if (strcmp(keybuf, "include_usage") == 0)
+                    {
+                        if (origin_tokens[val_token_idx].type == JSMN_PRIMITIVE &&
+                            strncmp(ctx->origin_body_data + origin_tokens[val_token_idx].start, "true", 4) == 0)
+                        {
+                            include_usage_true = 1;
+                        }
+                    }
+                    if (strcmp(keybuf, "continuous_usage_stats") == 0)
+                    {
+                        if (origin_tokens[val_token_idx].type == JSMN_PRIMITIVE &&
+                            strncmp(ctx->origin_body_data + origin_tokens[val_token_idx].start, "true", 4) == 0)
+                        {
+                            continuous_usage_true = 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (!(include_usage_true && continuous_usage_true))
+        {
+            need_add_stream_option = 1;
+        }
+    }
+    else
+    {
+        need_add_stream_option = 0;
+    }
+
+    ngx_http_omni_loc_conf_t *plcf = ngx_http_get_module_loc_conf(r, ngx_http_omni_proxy_module);
+    if (plcf != NULL)
+    {
+        switch (plcf->stream_ops)
+        {
+        case NGX_PREFILL_STREAM_ADD:
+            need_add_stream_option = 1;
+            break;
+        case NGX_PREFILL_STREAM_SET_OPT:
+            break;
+        case NGX_PREFILL_STREAM_OFF:
+        default:
+            need_add_stream_option = 0;
+            break;
+        }
+    }
+
+    if (need_add_stream_option)
+    {
+        size_t content_len;
+        u_char *content_data_to_copy;
+
+        while (b->last > b->pos)
+        {
+            if (b->last[-1] == '}')
+            {
+                b->last -= 1;
+                break;
+            }
+            b->last -= 1;
+        }
+
+        if (stream_is_true)
+        {
+            content_len = stream_options_content_str.len;
+            content_data_to_copy = stream_options_content_str.data;
+        }
+        else
+        {
+            content_len = stream_all_content_str.len;
+            content_data_to_copy = stream_all_content_str.data;
+        }
+
+        b_new = ngx_create_temp_buf(r->pool, content_len + 3);
+        if (b_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_create_temp_buf: failed! ");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        int pos = 0;
+        b_new->pos[pos++] = ',';
+        ngx_memcpy(b_new->pos + pos, content_data_to_copy, content_len);
+        pos += content_len;
+        b_new->pos[pos++] = '}';
+        b_new->pos[pos] = '\0';
+        b_new->last = b_new->pos + pos;
+        b_new->memory = 1;
+
+        chain_new = ngx_alloc_chain_link(r->pool);
+        if (chain_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_alloc_chain_link: failed! ");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        chain->buf->last_buf = 0;
+        chain->buf->last_in_chain = 0;
+        b_new->last_buf = 1;
+        b_new->last_in_chain = 1;
+
+        chain_new->buf = b_new;
+        chain_new->next = NULL;
+        chain->next = chain_new;
+        chain = chain_new;
+    }
+
+    if (chain->buf != NULL)
+    {
+        chain->buf->last_buf = 1;
+        chain->buf->last_in_chain = 1;
+    }
+
     chain->next = NULL;
 
     // Set up the subrequest's body structure
