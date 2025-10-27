@@ -51,7 +51,6 @@ from omni.layers.attention.backend.attention_dummy_builder import DummyAttention
 from omni.layers.sampler import SimpleSampler, AscendSamplerV1
 from omni.layers.npu_sampler_cache import PenaltyCache, ProbCache
 from omni.adaptors.vllm.platform import NPUPlatform
-from omni.adaptors.vllm.ems.ems_env import EmsEnv
 from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
 from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
@@ -188,10 +187,6 @@ class NPUModelRunner(GPUModelRunner):
         self.arange_npu = torch.arange(max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens),
                                        dtype=torch.int64,
                                        device=self.device)
-        #init ems adapters
-        if EmsEnv.enable_vllm_ems:
-            from omni.adaptors.vllm.ems.ems_adapter import EmsAdapter
-            self.ems_adapter = EmsAdapter(vllm_config=vllm_config)
 
         self.omni_cache = None
         rank = get_tensor_model_parallel_rank()
@@ -636,10 +631,6 @@ class NPUModelRunner(GPUModelRunner):
         output.loading_kv_failure = loading_kv_failure
         return output
 
-    def load_kv_cache(self, info_load_reqs) -> List[int]:
-        result = self.ems_adapter.load(info_load_reqs)
-        return result
-
     @staticmethod
     def get_loading_kv_failure_req_ids() -> Optional[set[str]]:
         if has_kv_transfer_group():
@@ -683,9 +674,6 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         start = time.time()
-
-        if EmsEnv.enable_vllm_ems:
-            self.ems_adapter.sync_save_event()
 
         if self.save_token_ids:
             self.save_tokens(scheduler_output)
@@ -879,8 +867,6 @@ class NPUModelRunner(GPUModelRunner):
             cached_sampled_token_ids[i].clear()
             if spec_token_ids is not None:
                 spec_token_ids[i].clear()
-        if EmsEnv.enable_vllm_ems:
-            self.ems_adapter.async_save(scheduler_output)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1117,9 +1103,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-
-        if EmsEnv.enable_vllm_ems:
-            self.ems_adapter.bind_kvcaches(self.kv_caches)
 
     def initialize_omni_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         from omni.accelerators.cache.omni_cache import create_omni_cache

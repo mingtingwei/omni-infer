@@ -303,10 +303,6 @@ class NPUWorker(WorkerBase):
             f"Available memory: {usable_memory_size}, total memory: {total_npu_memory}"
         )
         return int(npu_kv_cache_bytes)
-    
-    def load_kv_cache(self, info_load_reqs) -> List[int]:
-        result = self.model_runner.load_kv_cache(info_load_reqs)
-        return result
 
     def execute_model(
         self,

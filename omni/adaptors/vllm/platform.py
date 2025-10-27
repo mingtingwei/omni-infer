@@ -381,9 +381,6 @@ class NPUPlatform(Platform):
         if os.getenv("ENABLE_OVERWRITE_REQ_IDS", "0") == "1":
             enable_overwrite_request_id()
         import omni.quantization  # noqa: F401
-        from omni.adaptors.vllm.ems.ems_env import EmsEnv
-        if EmsEnv.enable_vllm_ems:
-            from omni.adaptors.vllm.patches import ems_patch
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> None:
@@ -468,6 +465,10 @@ class NPUPlatform(Platform):
             vllm_config: The vLLM configuration to update.
         """            
         ConfigUpdater.update_vllm_config(vllm_config)
+
+        if (vllm_config.kv_transfer_config and vllm_config.kv_transfer_config.kv_connector and
+                (vllm_config.kv_transfer_config.kv_connector == "CcConnector" or vllm_config.kv_transfer_config.kv_connector == "EmsConnector")):
+            from omni.adaptors.vllm.ems import ems_patch
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: str, head_size: int, dtype: torch.dtype,

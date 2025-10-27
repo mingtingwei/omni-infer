@@ -14,3 +14,15 @@ def register():
                                                         else "omni.accelerators.pd.llmdatadist_connector_v1",
         "LLMDataDistConnector"
     )
+
+    KVConnectorFactory.register_connector(
+        "CcConnector",
+        "omni.accelerators.pd.cc_connector",
+        "CcConnector"
+    )
+
+    KVConnectorFactory.register_connector(
+        "EmsConnector",
+        "omni.accelerators.pd.ems_connector",
+        "EmsConnector"
+    )
