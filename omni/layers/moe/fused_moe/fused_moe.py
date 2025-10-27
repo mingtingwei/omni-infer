@@ -803,13 +803,18 @@ def moe_infer_fusion(
 
 def shared_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dynamic_scale=None):
     pertoken_scale = dynamic_scale
-    gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.gate_up_proj.weight], bias=None, group_list=expert_tokens,
-                                    split_item=3, output_dtype=torch.int32, group_type=0, group_list_type=1)[0]
-    
-    gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
-        gate_up_proj, weight_scale=layer.gate_up_proj.weight_scale.unsqueeze(0), activation_scale=pertoken_scale, bias=None,
-        quant_scale=None, quant_offset=None,
-        group_index=None, activate_left=True, quant_mode=1)
+
+    if model_extra_config.operator_opt_config.enable_gmm_swiglu_quant:
+        gate_up_proj, pertoken_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            sorted_tokens, [layer.gate_up_proj.weight], [layer.gate_up_proj.weight_scale.unsqueeze(0)], pertoken_scale, expert_tokens)
+    else:
+        gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.gate_up_proj.weight], bias=None, group_list=expert_tokens,
+                                        split_item=3, output_dtype=torch.int32, group_type=0, group_list_type=1)[0]
+        
+        gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+            gate_up_proj, weight_scale=layer.gate_up_proj.weight_scale.unsqueeze(0), activation_scale=pertoken_scale, bias=None,
+            quant_scale=None, quant_offset=None,
+            group_index=None, activate_left=True, quant_mode=1)
 
     if not model_extra_config.operator_opt_config.cast_w2_scale_f32:
         w2_scale = layer.down_proj.weight_scale.unsqueeze(0).to(torch.bfloat16)
@@ -830,16 +835,19 @@ def moe_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dyn
         sorted_tokens, pertoken_scale = torch_npu.npu_dynamic_quant(sorted_tokens)
 
     if layer.weight_num_bits == 8:
+        if model_extra_config.operator_opt_config.enable_gmm_swiglu_quant:
+            gate_up_proj, pertoken_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                sorted_tokens, [layer.w13_weight], [layer.w13_weight_scale], pertoken_scale, expert_tokens)
+        else:
+            gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.w13_weight], bias=None, group_list=expert_tokens,
+                                            split_item=3, output_dtype=torch.int32, group_type=0, group_list_type=1)[0]
 
-        gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.w13_weight], bias=None, group_list=expert_tokens,
-                                         split_item=3, output_dtype=torch.int32, group_type=0, group_list_type=1)[0]
-
-        scale_2 = torch.ones((len(layer.w13_weight), layer.w13_weight_scale.shape[-1] // 2), dtype=torch.float32,
-                             device=current_platform.device_type)
-        gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
-            gate_up_proj, weight_scale=layer.w13_weight_scale, activation_scale=pertoken_scale, bias=None,
-            quant_scale=scale_2, quant_offset=None,
-            group_index=expert_tokens, activate_left=True, quant_mode=1)
+            scale_2 = torch.ones((len(layer.w13_weight), layer.w13_weight_scale.shape[-1] // 2), dtype=torch.float32,
+                                device=current_platform.device_type)
+            gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+                gate_up_proj, weight_scale=layer.w13_weight_scale, activation_scale=pertoken_scale, bias=None,
+                quant_scale=scale_2, quant_offset=None,
+                group_index=expert_tokens, activate_left=True, quant_mode=1)
 
         if not model_extra_config.operator_opt_config.cast_w2_scale_f32:
             w2_scale = layer.w2_weight_scale.to(torch.bfloat16)
