@@ -295,4 +295,8 @@ def patch_pangu():
     SpeculativeConfig.hf_config_override = hf_config_override
     SpeculativeConfig.use_eagle = use_eagle
 
+    from omni.adaptors.vllm.reasoning import register_reasoning
+    from omni.adaptors.vllm.entrypoints.openai.tool_parsers import register_tool
+    register_reasoning()
+    register_tool()
     print("++++++++++++++++++++++patch_pangu++++++++++++++++++++++++++++")
