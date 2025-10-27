@@ -140,6 +140,6 @@ uvicorn==0.35.0
 uvloop==0.21.0
 watchfiles==1.1.0
 websockets==15.0.1
-xgrammar==0.1.19
+xgrammar==0.1.23
 yarl==1.20.1
 zipp==3.23.0
