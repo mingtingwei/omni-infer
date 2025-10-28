@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Tuple
 import os
 import torch
 import torch_npu
+import torchair as tng
 import torch.distributed as dist
 
 from vllm.distributed import get_pp_group, get_world_group
@@ -16,10 +17,10 @@ from vllm.distributed import get_tp_group, get_dp_group, get_ep_group
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
+from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
-
-
 
 class FusedMoeWeightScaleSupported(Enum):
     CHANNEL = 'channel'
@@ -186,6 +187,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             tokens_per_expert_group.view(ep_size, -1)
         )
         group_list = tokens_per_local_expert.to(torch.int64)
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                group_list,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+            )
 
         gate_up_proj = torch_npu.npu_grouped_matmul(
             [hidden_states_sorted_by_experts],
@@ -396,6 +403,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             )
         topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.int()
+        topk_ids = layer.apply_expert_load_balance(
+            topk_ids=topk_ids,
+            best_topk_ids=None
+        )
         expanded_x, expanded_row_idx, tokens_per_expert, _ = torch_npu.npu_moe_init_routing_v2(
             x,
             topk_ids,
@@ -461,89 +472,103 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             scoring_func: str = 'softmax',
             e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=None
-        )
-        topk_ids = topk_ids.int()
+        with ConditionalTNGScope(super_kernel=model_extra_config.operator_opt_config.use_super_kernel,
+                                        scope="superkernel_moe1"):
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=None
+            )
+            topk_ids = topk_ids.int()
+            topk_ids = layer.apply_expert_load_balance(
+                topk_ids=topk_ids,
+                best_topk_ids=None
+            )
 
-        if model_extra_config.operator_opt_config.use_prefetch:
-            flag_expert_prefetch = topk_ids
-            if self.w13_prefetch_size > 0:
-                torch_npu.npu_prefetch(layer.w13_weight, flag_expert_prefetch, self.w13_prefetch_size)
-            if self.w2_prefetch_size > 0:
-                torch_npu.npu_prefetch(layer.w2_weight, flag_expert_prefetch, self.w2_prefetch_size)
+            if model_extra_config.operator_opt_config.use_prefetch:
+                flag_expert_prefetch = topk_ids
+                if self.w13_prefetch_size > 0:
+                    torch_npu.npu_prefetch(layer.w13_weight, flag_expert_prefetch, self.w13_prefetch_size)
+                if self.w2_prefetch_size > 0:
+                    torch_npu.npu_prefetch(layer.w2_weight, flag_expert_prefetch, self.w2_prefetch_size)
 
-        tp_world_size = 1
-        expand_x, dynamic_scales, expand_idx, expert_token_nums, ep_recv_counts, tp_recv_counts, expand_scales = torch_npu.npu_moe_distribute_dispatch_v2(
-            x=x,
-            expert_ids=topk_ids,
-            group_ep=layer.moe_all_to_all_group_name,
-            group_tp=layer.moe_rs_group_name,
-            ep_world_size=layer.all2all_world_size,
-            tp_world_size=tp_world_size,
-            ep_rank_id=layer.all2all_global_rank // tp_world_size,
-            tp_rank_id=layer.all2all_global_rank % tp_world_size,
-            expert_shard_type=0,
-            shared_expert_rank_num=0,
-            moe_expert_num=global_num_experts,
-            scales=None,
-            quant_mode=0,  # 0: 非量化; 1: 静态量化; 2: 动态量化
-            global_bs=0
-        )
-        group_list = expert_token_nums.to(torch.int64)
+            tp_world_size = 1
+            expand_x, dynamic_scales, expand_idx, expert_token_nums, ep_recv_counts, tp_recv_counts, expand_scales = torch_npu.npu_moe_distribute_dispatch_v2(
+                x=x,
+                expert_ids=topk_ids,
+                group_ep=layer.moe_all_to_all_group_name,
+                group_tp=layer.moe_rs_group_name,
+                ep_world_size=layer.all2all_world_size,
+                tp_world_size=tp_world_size,
+                ep_rank_id=layer.all2all_global_rank // tp_world_size,
+                tp_rank_id=layer.all2all_global_rank % tp_world_size,
+                expert_shard_type=0,
+                shared_expert_rank_num=0,
+                moe_expert_num=global_num_experts,
+                scales=None,
+                quant_mode=0,  # 0: 非量化; 1: 静态量化; 2: 动态量化
+                global_bs=0
+            )
+            group_list = expert_token_nums.to(torch.int64)
+            if model_extra_config.task_config.enable_omni_placement:
+                layer.planner.record_activation(
+                    layer.moe_layer_idx,
+                    group_list,
+                    support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+                )
 
-        gate_up_proj = torch_npu.npu_grouped_matmul(
-            [expand_x],
-            [layer.w13_weight],
-            bias=None,
-            group_list=group_list,
-            split_item=3,
-            output_dtype=x.dtype,
-            group_type=0,
-            group_list_type=1
-        )[0]
+            gate_up_proj = torch_npu.npu_grouped_matmul(
+                [expand_x],
+                [layer.w13_weight],
+                bias=None,
+                group_list=group_list,
+                split_item=3,
+                output_dtype=x.dtype,
+                group_type=0,
+                group_list_type=1
+            )[0]
         inter_states = torch_npu.npu_swiglu(
             gate_up_proj
         )
-        hidden_states_ordered_by_experts = torch_npu.npu_grouped_matmul(
-            [inter_states],
-            [layer.w2_weight],
-            bias=None,
-            group_list=group_list,
-            split_item=3,
-            output_dtype=x.dtype,
-            group_type=0,
-            group_list_type=1
-        )[0]
+        with ConditionalTNGScope(super_kernel=model_extra_config.operator_opt_config.use_super_kernel,
+                                        scope="superkernel_moe2"):
+            hidden_states_ordered_by_experts = torch_npu.npu_grouped_matmul(
+                [inter_states],
+                [layer.w2_weight],
+                bias=None,
+                group_list=group_list,
+                split_item=3,
+                output_dtype=x.dtype,
+                group_type=0,
+                group_list_type=1
+            )[0]
 
-        output_combine = torch_npu.npu_moe_distribute_combine_v2(
-            expand_x=hidden_states_ordered_by_experts,
-            expert_ids=topk_ids,
-            assist_info_for_combine=expand_idx,
-            ep_send_counts=ep_recv_counts,
-            tp_send_counts=tp_recv_counts,
-            expert_scales=topk_weights.to(torch.float32),
-            group_ep=layer.moe_all_to_all_group_name,
-            group_tp=layer.moe_rs_group_name,
-            ep_world_size=layer.all2all_world_size,
-            tp_world_size=tp_world_size,
-            ep_rank_id=layer.all2all_global_rank // tp_world_size,
-            tp_rank_id=layer.all2all_global_rank % tp_world_size,
-            expert_shard_type=0,
-            shared_expert_rank_num=0,
-            moe_expert_num=global_num_experts,
-            global_bs=0,
-        )
+            output_combine = torch_npu.npu_moe_distribute_combine_v2(
+                expand_x=hidden_states_ordered_by_experts,
+                expert_ids=topk_ids,
+                assist_info_for_combine=expand_idx,
+                ep_send_counts=ep_recv_counts,
+                tp_send_counts=tp_recv_counts,
+                expert_scales=topk_weights.to(torch.float32),
+                group_ep=layer.moe_all_to_all_group_name,
+                group_tp=layer.moe_rs_group_name,
+                ep_world_size=layer.all2all_world_size,
+                tp_world_size=tp_world_size,
+                ep_rank_id=layer.all2all_global_rank // tp_world_size,
+                tp_rank_id=layer.all2all_global_rank % tp_world_size,
+                expert_shard_type=0,
+                shared_expert_rank_num=0,
+                moe_expert_num=global_num_experts,
+                global_bs=0,
+            )
 
         return output_combine
 
@@ -628,6 +653,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=None
         )
+        topk_ids = layer.apply_expert_load_balance(
+            topk_ids=topk_ids,
+            best_topk_ids=None
+        )
         sorted_tokens, expanded_x_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
             x,
             topk_ids,
@@ -643,6 +672,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             quant_mode=-1,
             row_idx_type=1
         )
+        
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                expert_tokens,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+            )
+
         gate_up_proj = torch_npu.npu_grouped_matmul(
             [sorted_tokens],
             [layer.w13_weight],
@@ -767,8 +804,13 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        **kwargs
     ):
         super().__init__()
+        self.planner = kwargs.get("planner", None)
+        self.moe_layer_idx = kwargs.get("moe_layer_idx", None)
+        self.expert_mapping = kwargs.get("expert_mapping", None)
+        self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         self.prefix = prefix
 
         if params_dtype is None:
@@ -860,9 +902,16 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+        
+        num_of_redundant_experts = 0
+        if model_extra_config.task_config.enable_omni_placement:
+            num_of_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
+                                                                                 num_expert_per_device_origin=self.local_num_experts,
+                                                                                 rank_device=get_ep_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num)
+        
 
         moe_quant_params = {
-            "num_experts": self.local_num_experts,
+            "num_experts": self.local_num_experts + num_of_redundant_experts,
             "hidden_size": hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
@@ -993,8 +1042,21 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-
-        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
+        ep_rank = get_ep_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num
+        # ENABLE_OMNI_PLANNER
+        if model_extra_config.task_config.enable_omni_placement:
+            # OMNI_PLANNER: determine the expert deployment based on the pattern
+            exists_locally, local_pos = self.planner.is_expert_on_current_rank(self.moe_layer_idx, expert_id,
+                                                                                ep_rank, self.local_num_experts)
+            # if the re-deployed expert is not on the current rank, then skip the weight_loader
+            if not exists_locally:
+                return
+            # if the re-deployed expert is on the current rank, then update the id of the expert
+            else:
+                expert_id = ep_rank * self.local_num_experts + local_pos
+            expert_id -= ep_rank * self.local_num_experts
+        else:
+            expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id is None:
             return
         if shard_id not in ('w1', 'w2', 'w3'):
@@ -1035,6 +1097,35 @@ class FusedMoE(torch.nn.Module):
                 expert_data=expert_data,
                 tp_rank=self.tp_rank)
             return
+
+    def apply_expert_load_balance(
+            self,
+            topk_ids: torch.Tensor,
+            best_topk_ids: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # omni placement
+        if self.planner is not None:
+            _, topk_ids, _ = self.planner.plan(
+                layer_idx_moe=self.moe_layer_idx,
+                tokens=None,
+                token_expert_ids=topk_ids,
+                token_expert_scores=None,
+                expert_mapping=self.expert_mapping
+            )
+
+        # Forced load balance
+        if model_extra_config.operator_opt_config.best_ep:
+            if self.is_prefill_instance:
+                t = (topk_ids.shape[0] * 8) // 256
+                topk_ids = torch.arange(256, device=current_platform.device_type, dtype=torch.int32).unsqueeze(
+                    0).repeat(t + 1, 1).view(-1, 8)[:topk_ids.shape[0]]
+            elif best_topk_ids is not None:
+                if model_extra_config.operator_opt_config.moe_multi_stream_tune:
+                    topk_ids = tng.scope.npu_wait_tensor(best_topk_ids, topk_ids)
+                else:
+                    topk_ids = best_topk_ids
+
+        return topk_ids
 
     @staticmethod
     def select_experts(hidden_states: torch.Tensor,

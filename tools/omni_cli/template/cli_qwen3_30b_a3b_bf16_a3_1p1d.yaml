@@ -38,6 +38,8 @@ all:
               disable-log-requests: ''
               enable-expert-parallel: ''
               enforce-eager: ''
+              enable-reasoning: ''
+              reasoning-parser: 'deepseek_r1'
               max-num-seqs: 4
               no-enable-prefix-caching: ''
             gpu-util: '0.88'
@@ -99,7 +101,7 @@ all:
             PREFILL_POD_NUM: 1
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path//decode_config/local_*.json)
+            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/decode_config/local_*.json)
             ROLE: decode
             SERVER_IP_LIST: 127.0.0.2
             SERVER_OFFSET: 0
