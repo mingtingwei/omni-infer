@@ -172,8 +172,6 @@ class NPUWorker(WorkerBase):
     def _init_model_best_practice_configs(self):
 
         hardware_platform = "A2" if torch_npu.npu.get_device_name(0).startswith("Ascend910B") else "A3"
-        if int(os.getenv("VLLM_DP_SIZE", 1)) == 288:
-            hardware_platform = hardware_platform + '_288die'
         is_pd_disaggregation = False
         is_prefill_node = None
         if os.getenv('ROLE', None):

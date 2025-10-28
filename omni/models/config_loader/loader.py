@@ -199,6 +199,8 @@ def parse_hf_config(hf_config):
             model_name = "deepseek_v3" 
         elif hf_config.model_type == "deepseek_v32": 
             model_name = "deepseek_v32"
+        else:
+            raise RuntimeError(f"[ERROR] Multiple matching model names found: {matches}. Unable to determine the correct model name.")
     else:
         model_name = matches[0]
 

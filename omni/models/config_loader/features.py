@@ -12,8 +12,6 @@ def apply_eager_mode_config(operator_opt_config):
     operator_opt_config.moe_multi_stream_tune = False
     operator_opt_config.use_super_kernel = False
     operator_opt_config.use_prefetch = False
-    operator_opt_config.use_mlaprolog = False
-    operator_opt_config.fa_quant = False
     operator_opt_config.expert_gate_up_prefetch = 0
     operator_opt_config.expert_down_prefetch = 0
     operator_opt_config.attn_prefetch = 0
