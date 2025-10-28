@@ -116,30 +116,19 @@ static inline void omni_phase_change_to(
     omni_add_req_to_group(req->slot_index, &groups[to]);
 }
 
-static inline void omni_register_worker(omni_global_state_t *gs, ngx_shmtx_t *g_shmtx)
+static inline void omni_register_worker(omni_global_state_t *gs, omni_worker_local_state_t *local)
 {
-    // need to protect by g_shmtx
-    ngx_shmtx_lock(g_shmtx);
-
-    for (size_t i = 0; i < MAX_WORKERS; ++i)
-    {
-        if (gs->workers[i] == 0)
-        {
-            gs->workers[i] = ngx_pid;
-            gs->num_workers++;
-            ngx_shmtx_unlock(g_shmtx);
-            return;
-        }
+    ngx_shmtx_lock(&gs->shmtx);
+    if (!gs->master_worker_selected) {
+        gs->master_worker_selected = true;
+        local->is_master_worker = true;
     }
-    ngx_shmtx_unlock(g_shmtx);
-
-    assert(!"No space left for new worker");
+    ngx_shmtx_unlock(&gs->shmtx);
 }
 
-// The first work is the master and will do the global schduling
-static inline int omni_is_master_worker(omni_global_state_t *gs)
+static inline bool omni_is_master_worker(omni_worker_local_state_t *local)
 {
-    return gs->workers[0] == ngx_pid;
+    return local->is_master_worker;
 }
 
 omni_global_state_t *omni_get_global_state();

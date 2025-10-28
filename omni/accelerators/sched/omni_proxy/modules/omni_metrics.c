@@ -91,7 +91,7 @@ static inline const char *omni_metrics_get_model_name(omni_global_state_t *gs) {
         OMNI_VALUE_INT32,                                                                                     \
         1};                                                                                                   \
     snprintf(&metrics_registry[index].label_names[0][0],                                                      \
-             OMNI_METRICS_MAX_LABEL_LEN, "endpoint=\"%s:%d\"", endpoint->address.ip, endpoint->address.port); \
+             OMNI_METRICS_MAX_LABEL_LEN, "endpoint=\"%s:%d\"", endpoint->comm.address.ip, endpoint->comm.address.port); \
     snprintf(&metrics_registry[index].label_names[1][0],                                                      \
              OMNI_METRICS_MAX_LABEL_LEN, "role=\"prefill\"");                                                 \
     index++;
@@ -121,7 +121,7 @@ static inline const char *omni_metrics_get_model_name(omni_global_state_t *gs) {
         OMNI_VALUE_INT64,                                                                                     \
         1};                                                                                                   \
     snprintf(&metrics_registry[index].label_names[0][0],                                                      \
-             OMNI_METRICS_MAX_LABEL_LEN, "endpoint=\"%s:%d\"", endpoint->address.ip, endpoint->address.port); \
+             OMNI_METRICS_MAX_LABEL_LEN, "endpoint=\"%s:%d\"", endpoint->comm.address.ip, endpoint->comm.address.port); \
     snprintf(&metrics_registry[index].label_names[1][0],                                                      \
              OMNI_METRICS_MAX_LABEL_LEN, "role=\"prefill\"");                                                 \
     index++;
@@ -156,12 +156,15 @@ const omni_metric_desc_t *omni_metrics_get_registry(omni_global_state_t *global_
     }
 
     size_t index = 0;
-
+    size_t cnt = 0;
     // Setup prefill metrics for each endpoint
-    for (int i = 0; i < num_prefill; i++)
+    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < num_prefill; i++)
     {
         omni_upstream_prefill_t *prefill = &global_state->prefill_states[i];
-
+        if (prefill->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         // Prefill running requests
         UPSTREAM_METRIC(
             prefill,
@@ -191,11 +194,15 @@ const omni_metric_desc_t *omni_metrics_get_registry(omni_global_state_t *global_
             expected_next_schedule_time);
     }
 
+    cnt = 0;
     // Setup decode metrics for each endpoint
-    for (int i = 0; i < num_decode; i++)
+    for (int i = 0; i < MAX_DECODE_UPSTREAMS && cnt < num_decode; i++)
     {
         omni_upstream_decode_t *decode = &global_state->decode_states[i];
-
+        if (decode->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         UPSTREAM_METRIC(
             decode,
             "omni_decode_running_requests",
@@ -445,26 +452,35 @@ done:
 }
 
 ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *pool) {
-    
+
     ngx_uint_t i;
 
     size_t required_size = 1024;
 
-    for (i = 0; i < gs->num_prefill_endpoints; i++) {
+    uint16_t cnt = 0;
+    for (i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; i++) {
+        if (gs->prefill_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         required_size += 300;
-        required_size += gs->prefill_states[i].address.name_str.len;
+        required_size += gs->prefill_states[i].comm.address.name_str.len;
     }
 
-    for (i = 0; i < gs->num_decode_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_DECODE_UPSTREAMS && cnt < gs->num_decode_endpoints; i++) {
+        if (gs->decode_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         required_size += 300;
-        required_size += gs->decode_states[i].address.name_str.len;
+        required_size += gs->decode_states[i].comm.address.name_str.len;
     }
 
-    u_char *buf = ngx_palloc(pool, required_size); 
+    u_char *buf = ngx_palloc(pool, required_size);
     if (buf == NULL) {
         return (ngx_str_t){0, NULL};
     }
-    
+
     u_char *p = buf;
     u_char *end = buf + required_size;
     ngx_uint_t is_first_node = 1;
@@ -476,14 +492,22 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
     strftime((char *)time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", now_tm);
 
     ngx_uint_t healthy_prefill_count = 0;
-    for (i = 0; i < gs->num_prefill_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; i++) {
+        if (gs->prefill_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         if (gs->prefill_states[i].healthy) {
             healthy_prefill_count++;
         }
     }
 
     ngx_uint_t healthy_decode_count = 0;
-    for (i = 0; i < gs->num_decode_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_DECODE_UPSTREAMS && cnt < gs->num_decode_endpoints; i++) {
+        if (gs->decode_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         if (gs->decode_states[i].healthy) {
             healthy_decode_count++;
         }
@@ -493,7 +517,7 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
     ngx_uint_t m = 1;
     ngx_uint_t y = healthy_decode_count / gs->num_decode_endpoints;
     ngx_uint_t n = gs->num_decode_endpoints / DECODE_INSTANCE_GROUP_SIZE;
-    
+
 
     ngx_uint_t code;
     ngx_str_t status;
@@ -524,22 +548,26 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
     p = ngx_snprintf(p, end - p, "    \"prefill\": [\n");
 
     // 1. for Prefill nodes
-    for (i = 0; i < gs->num_prefill_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; i++) {
+        if (gs->prefill_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         p = ngx_snprintf(p, end - p, "%s        {\n", is_first_node ? "" : ",\n");
         if (gs->prefill_states[i].healthy == 1){
-            p = ngx_snprintf(p, end - p, "            \"status\": \"running\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"status\": \"running\",\n");
         } else {
-            p = ngx_snprintf(p, end - p, "            \"status\": \"failed\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"status\": \"failed\",\n");
         }
         p = ngx_snprintf(p, end - p, "            \"pod_name\": \"\",\n");
-        p = ngx_snprintf(p, end - p, "            \"url\": \"%V\",\n", &gs->prefill_states[i].address.name_str);
+        p = ngx_snprintf(p, end - p, "            \"url\": \"%V\",\n", &gs->prefill_states[i].comm.address.name_str);
         p = ngx_snprintf(p, end - p, "            \"role\": \"prefill\",\n");
         p = ngx_snprintf(p, end - p, "            \"index\": %d,\n", i);
-        p = ngx_snprintf(p, end - p, "            \"port\": %ui,\n", gs->prefill_states[i].address.port);
+        p = ngx_snprintf(p, end - p, "            \"port\": %ui,\n", gs->prefill_states[i].comm.address.port);
         if (gs->prefill_states[i].healthy == 1){
-            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"healthy\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"healthy\",\n");
         } else {
-            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"unhealthy\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"unhealthy\",\n");
         }
         p = ngx_snprintf(p, end - p, "            \"alert\": \"\"\n");
         p = ngx_snprintf(p, end - p, "        }");
@@ -549,7 +577,11 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
     p = ngx_snprintf(p, end - p, "    \"decode\": [\n");
 
     // 2. for Decode nodes
-    for (i = 0; i < gs->num_decode_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_DECODE_UPSTREAMS && cnt < gs->num_decode_endpoints; i++) {
+        if (gs->decode_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         ngx_uint_t index = i / DECODE_INSTANCE_GROUP_SIZE;
         if (i != 0){
             p = ngx_snprintf(p, end - p, "%s        {\n", is_first_node ? "" : ",\n");
@@ -557,19 +589,19 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
             p = ngx_snprintf(p, end - p, "        {\n");
         }
         if (gs->decode_states[i].healthy == 1){
-            p = ngx_snprintf(p, end - p, "            \"status\": \"running\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"status\": \"running\",\n");
         } else {
-            p = ngx_snprintf(p, end - p, "            \"status\": \"failed\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"status\": \"failed\",\n");
         }
         p = ngx_snprintf(p, end - p, "            \"pod_name\": \"\",\n");
-        p = ngx_snprintf(p, end - p, "            \"url\": \"%V\",\n", &gs->decode_states[i].address.name_str);
+        p = ngx_snprintf(p, end - p, "            \"url\": \"%V\",\n", &gs->decode_states[i].comm.address.name_str);
         p = ngx_snprintf(p, end - p, "            \"role\": \"decode\",\n");
         p = ngx_snprintf(p, end - p, "            \"index\": %d,\n", index);
-        p = ngx_snprintf(p, end - p, "            \"port\": %ui,\n", gs->decode_states[i].address.port);
+        p = ngx_snprintf(p, end - p, "            \"port\": %ui,\n", gs->decode_states[i].comm.address.port);
         if (gs->prefill_states[i].healthy == 1){
-            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"healthy\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"healthy\",\n");
         } else {
-            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"unhealthy\",\n"); 
+            p = ngx_snprintf(p, end - p, "            \"fault_message\": \"unhealthy\",\n");
         }
         p = ngx_snprintf(p, end - p, "            \"alert\": \"\"\n");
         p = ngx_snprintf(p, end - p, "        }");
@@ -578,7 +610,7 @@ ngx_str_t omni_health_status_export_json(omni_global_state_t *gs, ngx_pool_t *po
 
     p = ngx_snprintf(p, end - p, "\n    ]\n");
     p = ngx_snprintf(p, end - p, "}\n");
-    
+
     ngx_str_t result;
     result.data = buf;
     result.len = p - buf;

@@ -57,7 +57,7 @@ void omni_scheduler_record_prefill_batch_stat(omni_global_state_t *gs,
                           "[PrefillStat] batch=%ui window full, reset cursor=0", batch_size);
         }
     }
-    else 
+    else
     {
         uint32_t pos = bucket->cursor;
         ngx_msec_t old = bucket->durations[pos];
@@ -315,9 +315,14 @@ omni_scheduler_select_earliest_prefill(omni_global_state_t *gs,
     ngx_msec_t cand_finish[MAX_PREFILL_UPSTREAMS];
     ngx_uint_t cand_count = 0;
 
-    for (uint32_t idx = 0; idx < gs->num_prefill_endpoints; idx++)
+    uint16_t cnt = 0;
+    for (uint32_t idx = 0; idx < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; idx++)
     {
         omni_upstream_prefill_t *us = &gs->prefill_states[idx];
+        if (us->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
 
         if (us->num_tokens > olcf->max_batch_num_token ||
             us->num_running > olcf->prefill_max_num_seqs)
@@ -638,6 +643,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
         uint32_t best_idx = UINT32_MAX;
         ngx_flag_t used_earliest_algo = 0;
         ngx_msec_t algo_estimated_time = 0;
+        uint16_t cnt = 0;
 
         if (olcf->schedule_algo == OMNI_PROXY_SCHEDULE_ALGO_EARLIEST_BATCH)
         {
@@ -685,8 +691,12 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
             uint32_t best_running = UINT32_MAX;
             uint32_t best_idx = UINT32_MAX;
 
-            for (uint32_t j = 0; j < gs->num_prefill_endpoints; j++)
+            for (uint32_t j = 0; j < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; j++)
             {
+                if (gs->prefill_states[j].comm.status != STATUS_ENABLE) {
+                    continue;
+                }
+                cnt++;
                 uint32_t m = req->match_depths[j];
 
                 uint32_t load_tokens = gs->prefill_states[j].num_tokens;
@@ -711,32 +721,36 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
                 selected = best_idx;
                 ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0, "[Prefill-%d] Prefix cache hit on: %d with match_depth %d",
                               req->slot_index, selected, req->match_depths[selected]);
-            }
-            else
-            {
+            } else {
                 uint32_t least_load = UINT32_MAX;
-                for (uint32_t m = gs->last_selected_prefill;
-                     m < gs->num_prefill_endpoints + gs->last_selected_prefill;
-                     m++)
-                {
-                    uint32_t j = m % gs->num_prefill_endpoints;
-                    if (gs->prefill_states[j].num_tokens < least_load)
-                    {
-                        least_load = gs->prefill_states[j].num_tokens;
-                        selected = j;
-                        if (least_load == 0)
+                for (uint32_t m = gs->last_selected_prefill, cnt = 0;
+                    m < MAX_PREFILL_UPSTREAMS + gs->last_selected_prefill && cnt < gs->num_prefill_endpoints; m++) {
+                    uint32_t j = m % MAX_PREFILL_UPSTREAMS;
+                    omni_upstream_prefill_t *prefill = &gs->prefill_states[j];
+                    if (prefill->comm.status != STATUS_ENABLE) {
+                        if (prefill->comm.status == STATUS_UNUSED) {
+                            m = MAX_PREFILL_UPSTREAMS; /* skip unuse upstream and start from 0 */
+                        }
+                        continue;
+                    }
+                    cnt++;
+                        if (gs->prefill_states[j].num_tokens < least_load)
                         {
-                            break;
+                            least_load = gs->prefill_states[j].num_tokens;
+                            selected = j;
+                            if (least_load == 0)
+                            {
+                                break;
+                            }
                         }
                     }
-                }
-                ngx_log_error(NGX_LOG_INFO,
-                              ngx_cycle->log,
-                              0,
-                              "[Prefill-%d] No Prefix cache hit, choose least workload Prefill %d with load %d",
-                              req->slot_index,
-                              selected,
-                              least_load);
+                    ngx_log_error(NGX_LOG_INFO,
+                                  ngx_cycle->log,
+                                  0,
+                                  "[Prefill-%d] No Prefix cache hit, choose least workload Prefill %d with load %d",
+                                  req->slot_index,
+                                  selected,
+                                  least_load);
             }
         }
 
@@ -757,6 +771,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
 
         selected_prefill->num_running++;
         selected_prefill->num_tokens += req->metrics.prompt_num_tokens;
+        ngx_atomic_fetch_add(&selected_prefill->comm.ref, 1);
 
         omni_global_phase_change_to(req, PHASE_PREFILL_WAITING_SCHEDULE, PHASE_PREFILL_SCHEDULED);
         omni_req_leave_phase(req, PHASE_PREFILL_WAITING_SCHEDULE);
@@ -767,6 +782,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
         {
             req->decode_upstream_endpoint_idx = 0;
             gs->decode_states[selected].num_running++;
+            ngx_atomic_fetch_add(&gs->decode_states[selected].comm.ref, 1);
 
             omni_add_req_to_group(req->slot_index, &gs->groups[PHASE_DECODE_SCHEDULED]);
             omni_req_enter_phase(req, PHASE_DECODE_SCHEDULED);
@@ -807,9 +823,18 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
 
         uint32_t least_load = UINT32_MAX;
         uint32_t selected = rand() % gs->num_decode_endpoints;
-        for (int m = gs->last_selected_decode; m < gs->num_decode_endpoints + gs->last_selected_decode; m++)
-        {
-            int j = m % gs->num_decode_endpoints;
+        uint32_t cnt = 0;
+        for (int m = gs->last_selected_decode;
+            m < MAX_DECODE_UPSTREAMS + gs->last_selected_decode && cnt < gs->num_decode_endpoints; m++) {
+            int j = m % MAX_DECODE_UPSTREAMS;
+            omni_upstream_decode_t *decode = &gs->decode_states[j];
+            if (decode->comm.status != STATUS_ENABLE) {
+                if (decode->comm.status == STATUS_UNUSED) {
+                    m = MAX_DECODE_UPSTREAMS; /* skip unuse upstream and start from 0 */
+                }
+                continue;
+            }
+            cnt++;
             if (gs->decode_states[j].num_tokens < least_load && gs->decode_states[j].num_running < olcf->decode_max_num_seqs)
             {
                 least_load = gs->decode_states[j].num_tokens;
@@ -825,6 +850,7 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
         gs->last_selected_decode = selected + 1;
         gs->decode_states[selected].num_running++;
         gs->decode_states[selected].num_tokens += req->metrics.prompt_num_tokens;
+        ngx_atomic_fetch_add(&gs->decode_states[selected].comm.ref, 1);
 
         omni_global_phase_change_to(req, PHASE_DECODE_WAITING_SCHEDULE, PHASE_DECODE_SCHEDULED);
         omni_req_leave_phase(req, PHASE_DECODE_WAITING_SCHEDULE);

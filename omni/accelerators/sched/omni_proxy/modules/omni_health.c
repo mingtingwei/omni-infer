@@ -9,7 +9,7 @@
 #include <omni_health.h>
 #include <ngx_core.h>
 #include <ngx_string.h>
-#include <netinet/in.h> 
+#include <netinet/in.h>
 #include <ngx_inet.h>
 #include <omni_metrics.h>
 
@@ -40,7 +40,7 @@ typedef struct {
 
 void omni_health_send_response(omni_health_check_job_t *job) {
     ngx_http_request_t *r = job->request;
-    
+
     ngx_str_t health_json = omni_health_status_export_json(omni_get_global_state(), r->pool);
 
     r->headers_out.status = NGX_HTTP_OK;
@@ -71,7 +71,7 @@ void omni_health_send_response(omni_health_check_job_t *job) {
     ngx_chain_t out = {b, NULL};
 
     ngx_http_output_filter(r, &out);
-    ngx_http_finalize_request(r, NGX_OK); 
+    ngx_http_finalize_request(r, NGX_OK);
 }
 
 static void omni_health_check_finalize(ngx_connection_t *c, ngx_int_t is_healthy) {
@@ -196,9 +196,9 @@ void omni_run_single_health_check(omni_health_check_job_t *job, ngx_log_t *log, 
     omni_upstream_address_t *addr;
 
     if (upstream_type == 0) {
-        addr = &gs->prefill_states[index].address;
+        addr = &gs->prefill_states[index].comm.address;
     } else {
-        addr = &gs->decode_states[index].address;
+        addr = &gs->decode_states[index].comm.address;
     }
 
     pool = ngx_create_pool(1024, log);
@@ -225,7 +225,7 @@ void omni_run_single_health_check(omni_health_check_job_t *job, ngx_log_t *log, 
         ngx_destroy_pool(pool);
         return;
     }
-    
+
     c = ctx->peer.connection;
     c->data = ctx;
     c->pool = pool;

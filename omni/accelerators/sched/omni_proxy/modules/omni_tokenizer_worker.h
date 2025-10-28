@@ -20,14 +20,14 @@
 typedef struct
 {
     pthread_t thread_id;
-    int cmd_pipe[2];  // 命令管道: nginx worker → tokenizer worker
-    int resp_pipe[2]; // 响应管道: tokenizer worker → nginx worker
+    int cmd_pipe[2];  /* nginx worker -> tokenizer worker */
+    int resp_pipe[2]; /* tokenizer worker -> nginx worker */
     int epoll_fd;
     ngx_int_t active;
     ngx_str_t model_path;
     ngx_int_t kv_block_size;
     ngx_log_t *log;
-    ngx_connection_t *resp_connection; // 响应管道的连接
+    ngx_connection_t *resp_connection;
 } ngx_omni_tokenize_worker_t;
 
 ngx_int_t omni_tokenizer_worker_init(ngx_cycle_t *cycle, ngx_omni_tokenize_worker_t *worker);

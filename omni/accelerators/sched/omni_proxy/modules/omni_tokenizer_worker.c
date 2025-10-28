@@ -86,6 +86,10 @@ static void *omni_tokenizer_worker_func(void *data)
                 }
             }
 
+            if (worker->active == 0) {
+                break;
+            }
+
             printf("Tokenize batch %ld\n", batch_count);
 
             if (omni_batch_chat_encode(batch_requests, batch_count) == 0)

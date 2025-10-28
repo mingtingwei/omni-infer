@@ -34,6 +34,14 @@ typedef enum omni_proxy_request_phase
     PHASE_MAX
 } omni_proxy_request_phase_t;
 
+typedef enum omni_upstream_status
+{
+    STATUS_UNUSED,
+    STATUS_ENABLE,
+    STATUS_DISABLE,
+    STATUS_ABANDON,
+} omni_upstream_status_t;
+
 typedef struct omni_request_metrics_s
 {
     uint32_t prompt_num_tokens;
@@ -153,10 +161,17 @@ typedef struct omni_upstream_address_s
     ngx_str_t name_str;
 } omni_upstream_address_t;
 
+typedef struct omni_upstream_common_s
+{
+    ngx_atomic_t ref;
+    omni_upstream_status_t status;
+    omni_upstream_address_t address;
+} omni_upstream_common_t;
+
 typedef struct omni_upstream_prefill_s
 {
-    uint32_t index;
-    omni_upstream_address_t address;
+    omni_upstream_common_t comm;
+
     uint32_t num_running;
     uint32_t num_queue;
     uint32_t num_batch_exec;
@@ -166,7 +181,6 @@ typedef struct omni_upstream_prefill_s
     ngx_msec_t expected_next_schedule_time;
     omni_batch_metrics_his_t his;
     omni_zmq_handler_t kv_handler;
-    ngx_slab_pool_t *radix_pool;
     omni_radix_tree_t *radix_tree;
     ngx_atomic_t          healthy; // 1 for healthy, 0 for unhealthy
     ngx_msec_t            last_health_check_time;
@@ -174,8 +188,8 @@ typedef struct omni_upstream_prefill_s
 
 typedef struct omni_upstream_decode_s
 {
-    uint32_t index;
-    omni_upstream_address_t address;
+    omni_upstream_common_t comm;
+
     uint32_t num_running;
     uint32_t num_tokens;
     uint32_t generated_tokens;
@@ -200,6 +214,7 @@ typedef struct omni_global_state_s
     int magic;
     ngx_shmtx_t shmtx;
     ngx_shmtx_sh_t lock;
+    ngx_slab_pool_t *shm;
 
     int has_tokenizer;
     omni_proxy_pd_policy_t pd_policy;
@@ -211,9 +226,8 @@ typedef struct omni_global_state_s
     uint16_t num_decode_endpoints;
     uint16_t last_selected_decode;
     uint32_t last_summary;
-    uint32_t num_workers;
     uint32_t upstream_initialized;
-    int workers[MAX_WORKERS];
+    bool master_worker_selected;
     omni_upstream_prefill_t prefill_states[MAX_PREFILL_UPSTREAMS];
     omni_upstream_decode_t decode_states[MAX_DECODE_UPSTREAMS];
 

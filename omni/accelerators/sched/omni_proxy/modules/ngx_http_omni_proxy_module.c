@@ -64,6 +64,8 @@ static ngx_conf_enum_t ngx_http_omni_schedule_algos[] = {
 static omni_global_state_t *g_state;          // In share memory
 static omni_worker_local_state_t local_state; // In local process memory space
 
+static ngx_int_t ngx_http_omni_init_upstreams(ngx_cycle_t *cycle);
+
 omni_global_state_t *omni_get_global_state()
 {
     return g_state;
@@ -86,6 +88,7 @@ static omni_req_t *omni_req_init(ngx_http_request_t *r)
 
     omni_req_enter_phase(req, 0);
     omni_add_req_to_group(req->slot_index, &local_state.groups[0]);
+    local_state.req_in_groups++;
 
     ngx_shmtx_lock(&g_state->shmtx);
     omni_add_req_to_group(req->slot_index, &g_state->groups[0]);
@@ -95,7 +98,7 @@ static omni_req_t *omni_req_init(ngx_http_request_t *r)
 
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Allocate Req:%d",
                   req->slot_index);
-    
+
     ngx_list_part_t *part = &r->headers_in.headers.part;
     ngx_table_elt_t *header = part->elts;
     ngx_uint_t i;
@@ -156,9 +159,15 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
     /* snapshot radix_tree pointers */
     uint16_t num_prefill = g_state->num_prefill_endpoints;
     omni_radix_tree_t *local_trees[MAX_PREFILL_UPSTREAMS];
-    for (uint16_t i = 0; i < num_prefill; ++i)
-    {
-        local_trees[i] = g_state->prefill_states[i].radix_tree;
+    ngx_memzero(local_trees, sizeof(omni_radix_tree_t *) * MAX_PREFILL_UPSTREAMS);
+    uint16_t cnt = 0;
+    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < num_prefill; i++) {
+        omni_upstream_prefill_t *prefill = &g_state->prefill_states[i];
+        if (prefill->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
+        local_trees[i] = prefill->radix_tree;
     }
     ngx_shmtx_unlock(&g_state->shmtx);
 
@@ -166,12 +175,11 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
     uint32_t local_match_depths[MAX_PREFILL_UPSTREAMS];
     ngx_uint_t computed_max = 0;
 
-    for (uint16_t i = 0; i < num_prefill; ++i)
-    {
+    for (uint16_t i = 0, cnt = 0; i < MAX_PREFILL_UPSTREAMS && cnt < num_prefill; i++) {
         omni_radix_tree_t *tree = local_trees[i];
         ngx_uint_t match_depth = 0;
-        if (tree != NULL)
-        {
+        if (tree != NULL) {
+            cnt++;
             match_depth = omni_radix_tree_match_optimistic(tree,
                                                             (uint64_t *)req->tokenizer_req.block_hashes,
                                                             req->tokenizer_req.block_hashes_len);
@@ -196,13 +204,10 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
                   req->slot_index,
                   num_prefill,
                   computed_max);
-    
+
 
     /* 3) write results to shared request */
-    for (uint16_t i = 0; i < num_prefill; ++i)
-    {
-        req->match_depths[i] = local_match_depths[i];
-    }
+    ngx_memcpy(req->match_depths, local_match_depths, sizeof(local_match_depths));
     req->max_match_depth = (uint32_t)computed_max;
 
     /* Finally perform phase transition and timestamp updates */
@@ -284,6 +289,7 @@ static inline void omni_proxy_cleanup_req(omni_req_t *req)
                 &g_state->prefill_states[req->prefill_upstream_endpoint_idx];
 
             ps->num_running--;
+            ngx_atomic_fetch_add(&ps->comm.ref, -1);
 
             if (ps->num_tokens >= req->metrics.prompt_num_tokens)
             {
@@ -310,6 +316,7 @@ static inline void omni_proxy_cleanup_req(omni_req_t *req)
                 &g_state->decode_states[req->decode_upstream_endpoint_idx];
 
             ds->num_running--;
+            ngx_atomic_fetch_add(&ds->comm.ref, -1);
 
             if (ds->num_tokens >= req->metrics.prompt_num_tokens)
             {
@@ -334,6 +341,7 @@ static inline void omni_proxy_cleanup_req(omni_req_t *req)
         ngx_shmtx_unlock(&g_state->shmtx);
 
         omni_remove_req_from_group_by_req_index(req->slot_index, &local_state.groups[phase]);
+        local_state.req_in_groups--;
     }
 }
 
@@ -496,8 +504,9 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
 
     omni_upstream_prefill_t *us = &g_state->prefill_states[req->prefill_upstream_endpoint_idx];
     us->num_running--;
-
+    ngx_atomic_fetch_add(&us->comm.ref, -1);
     us->num_tokens -= req->metrics.prompt_num_tokens;
+
     if (subr->headers_out.status < NGX_HTTP_OK ||
         subr->headers_out.status >= NGX_HTTP_SPECIAL_RESPONSE)
     {
@@ -605,7 +614,7 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
         }
 
         // 2. **start a new batch**
-        if (us->his.count < NUM_PREFILL_BATCH_METRICS_HIS) { 
+        if (us->his.count < NUM_PREFILL_BATCH_METRICS_HIS) {
             us->his.count++;
         }
         us->his.head = (us->his.head + 1) % NUM_PREFILL_BATCH_METRICS_HIS;
@@ -641,7 +650,7 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
         current_batch->last_response_receive_time = response_time;
         current_batch->num_requests++;
         current_batch->num_tokens += req->metrics.prompt_num_tokens;
-        // average_delta 
+        // average_delta
         current_batch->average_delta = current_batch->average_delta * (current_batch->num_requests - 1) +
                                        delta / (current_batch->num_requests);
         if (current_batch->first_schedule_sent_time == 0 ||
@@ -758,6 +767,53 @@ static ngx_int_t ngx_http_prefill_wakeup(omni_req_t *req)
     return NGX_OK;
 }
 
+static void omni_proxy_req_prefill_resched(omni_req_t *req, ngx_uint_t new_idx)
+{
+    ngx_uint_t old_idx = req->prefill_upstream_endpoint_idx;
+
+    g_state->prefill_states[old_idx].num_running--;
+    g_state->prefill_states[old_idx].num_tokens -= req->metrics.prompt_num_tokens;
+    ngx_atomic_fetch_add(&g_state->prefill_states[old_idx].comm.ref, -1);
+
+    g_state->prefill_states[new_idx].num_running++;
+    g_state->prefill_states[new_idx].num_tokens += req->metrics.prompt_num_tokens;
+
+    req->prefill_upstream_endpoint_idx = new_idx;
+    ngx_atomic_fetch_add(&g_state->prefill_states[new_idx].comm.ref, 1);
+}
+
+static ngx_http_upstream_rr_peer_t *omni_proxy_req_prefill_resched_by_peer(ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_request_t *r)
+{
+    omni_req_t *req = omni_get_req(r);
+    ngx_http_upstream_rr_peer_t *peer;
+    for (peer = peers->peer; peer != NULL; peer = peer->next) {
+        ngx_shmtx_lock(&g_state->shmtx);
+        for (uint32_t j = 0; j < MAX_PREFILL_UPSTREAMS; j++) {
+            omni_upstream_common_t *comm = &g_state->prefill_states[j].comm;
+            if (comm->status == STATUS_ABANDON) {
+                continue;
+            }
+            if (comm->status == STATUS_UNUSED) {
+                break;
+            }
+            ngx_http_upstream_rr_peer_lock(peers, peer);
+            if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen, &comm->address.sockaddr, comm->address.socklen, 1) == NGX_OK) {
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Prefill resched from %ui to %ui",
+                    req->prefill_upstream_endpoint_idx, j);
+                omni_proxy_req_prefill_resched(req, j);
+                ngx_http_upstream_rr_peer_ref(peers, peer);
+                ngx_http_upstream_rr_peer_unlock(peers, peer);
+                ngx_shmtx_unlock(&g_state->shmtx);
+                return peer;
+            }
+            ngx_http_upstream_rr_peer_unlock(peers, peer);
+        }
+        ngx_shmtx_unlock(&g_state->shmtx);
+    }
+    return NULL;
+}
+
 static ngx_int_t omni_proxy_get_peer(ngx_peer_connection_t *pc,
                                      void *data)
 {
@@ -765,18 +821,45 @@ static ngx_int_t omni_proxy_get_peer(ngx_peer_connection_t *pc,
     ngx_http_request_t *r = (ngx_http_request_t *)rrp->data;
     omni_req_t *req = omni_get_req(r);
     ngx_http_upstream_rr_peers_t *peers = rrp->peers;
+    ngx_http_upstream_rr_peer_t *peer;
 
     assert(omni_req_is_in_phase(req, PHASE_PREFILLING));
 
+    ngx_http_upstream_rr_peers_rlock(peers);
+
+    omni_upstream_common_t *comm = &g_state->prefill_states[req->prefill_upstream_endpoint_idx].comm;
+    for (peer = peers->peer; peer != NULL; peer = peer->next) {
+        ngx_http_upstream_rr_peer_lock(peers, peer);
+        if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen, &comm->address.sockaddr, comm->address.socklen, 1) == NGX_OK) {
+            pc->sockaddr = peer->sockaddr;
+            pc->socklen = peer->socklen;
+            pc->name = &peer->name;
+            rrp->current = peer;
+            ngx_http_upstream_rr_peer_ref(peers, peer);
+
+            ngx_http_upstream_rr_peer_unlock(peers, peer);
+            break;
+        }
+        ngx_http_upstream_rr_peer_unlock(peers, peer);
+    }
+
+    if (peer == NULL) {
+        peer = omni_proxy_req_prefill_resched_by_peer(peers, r);
+        if (peer == NULL) {
+            ngx_http_upstream_rr_peers_unlock(peers);
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Prefill %ui req %s:%d no peer match",
+                req->prefill_upstream_endpoint_idx, comm->address.ip, comm->address.port);
+            return NGX_ERROR;
+        }
+        pc->sockaddr = peer->sockaddr;
+        pc->socklen = peer->socklen;
+        pc->name = &peer->name;
+        rrp->current = peer;
+    }
+
+    ngx_http_upstream_rr_peers_unlock(peers);
+
     ngx_uint_t idx = req->prefill_upstream_endpoint_idx;
-    // TODO: Need to consider the liveness of the upstream in case it crashed or lag
-    assert(idx < rrp->peers->number);
-
-    pc->sockaddr = peers->peer[idx].sockaddr;
-    pc->socklen = peers->peer[idx].socklen;
-    pc->name = &peers->peer[idx].name;
-    rrp->current = &peers->peer[idx];
-
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "[Prefill-%d] Upstream set: %d, running:%d",
                   req->slot_index, idx, g_state->prefill_states[idx].num_running);
@@ -1199,14 +1282,13 @@ static ngx_int_t ngx_http_omni_start_decode_upstream(ngx_http_request_t *r)
 
     u->output.tag = (ngx_buf_tag_t)&ngx_http_omni_proxy_module;
 
-    if (req->decode_upstream_endpoint_idx > g_state->num_decode_endpoints - 1)
-    {
+    if (req->decode_upstream_endpoint_idx >= MAX_DECODE_UPSTREAMS) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "omni_proxy: decode upstream endpoint index %d out of bounds for configured size %d",
                       req->decode_upstream_endpoint_idx, g_state->num_decode_endpoints);
         return NGX_ERROR;
     }
-    omni_upstream_address_t *addr = &g_state->decode_states[req->decode_upstream_endpoint_idx].address;
+    omni_upstream_address_t *addr = &g_state->decode_states[req->decode_upstream_endpoint_idx].comm.address;
 
     u->resolved = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_resolved_t));
     if (u->resolved == NULL)
@@ -1337,13 +1419,11 @@ static inline void omni_update_local_decode_waiting(omni_worker_local_state_t *l
 
 static void omni_proxy_schedule(omni_global_state_t *gs)
 {
-    if (omni_is_master_worker(gs))
+    if (omni_is_master_worker(&local_state))
     {
         ngx_shmtx_lock(&gs->shmtx);
         if (local_state.loc_conf) {
             omni_proxy_schedule_prefill(gs, local_state.loc_conf);
-        }
-        if (local_state.loc_conf) {
             omni_proxy_schedule_decode(gs, local_state.loc_conf);
         }
         ngx_shmtx_unlock(&gs->shmtx);
@@ -1361,6 +1441,10 @@ static void omni_proxy_timer_handler(ngx_event_t *ev)
     omni_proxy_run_group(PHASE_PREFILL_SCHEDULED, ngx_http_prefill_wakeup);
     omni_proxy_run_group(PHASE_DECODE_SCHEDULED, ngx_http_decode_wakeup);
 
+    if (ngx_exiting && local_state.req_in_groups == 0) {
+        ngx_log_error(NGX_LOG_INFO, ev->log, 0, "Worker %P timer exit", ngx_pid);
+        return;
+    }
     ngx_add_timer(&local_state.omni_proxy_timer_event, TIMER_INTERVAL);
 
     // print_summary();
@@ -1378,9 +1462,14 @@ static ngx_int_t omni_proxy_global_state_init(ngx_shm_zone_t *zone, void *data)
 {
     ngx_uint_t i;
 
-    if (data)
-    {
-        zone->data = data;
+    ngx_cycle_t *cycle = zone->data;
+    if (data != NULL) {
+        ngx_log_error(NGX_LOG_INFO, zone->shm.log, 0, "reuse global state share mem when reload");
+        if (ngx_http_omni_init_upstreams(cycle) != NGX_OK) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "Init global upstream failed when reload");
+            return NGX_ERROR;
+        }
+        g_state->master_worker_selected = false;
         return NGX_OK;
     }
 
@@ -1389,8 +1478,18 @@ static ngx_int_t omni_proxy_global_state_init(ngx_shm_zone_t *zone, void *data)
         return NGX_ERROR;
     }
 
-    g_state = (omni_global_state_t *)zone->shm.addr;
+    ngx_slab_pool_t *shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    if (zone->shm.exists) {
+        zone->data = shpool->data;
+        return NGX_OK;
+    }
+
+    g_state = ngx_slab_alloc(shpool, sizeof(omni_global_state_t));
+    if (g_state == NULL) {
+        return NGX_ERROR;
+    }
     ngx_memzero(g_state, GLOBAL_STATE_SIZE);
+    g_state->shm = shpool;
     g_state->magic = 47;
 
     g_state->num_prefill_endpoints = 0;
@@ -1400,6 +1499,11 @@ static ngx_int_t omni_proxy_global_state_init(ngx_shm_zone_t *zone, void *data)
 
     ngx_shmtx_create(&g_state->shmtx, &g_state->lock,
                      (u_char *)"omni_proxy_lock");
+
+    if (ngx_http_omni_init_upstreams(cycle) != NGX_OK) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "Init global upstream failed");
+        return NGX_ERROR;
+    }
 
     printf("shared memory initialed: %p\n", zone->shm.addr);
 
@@ -1414,7 +1518,7 @@ ngx_int_t omni_proxy_init_global_state(ngx_conf_t *cf)
     ngx_shm_zone_t *zone = ngx_shared_memory_add(
         cf,
         &name,
-        GLOBAL_STATE_SIZE,
+        NGX_MAX_INT32_VALUE,
         &ngx_http_omni_proxy_module);
 
     if (zone == NULL)
@@ -1423,6 +1527,7 @@ ngx_int_t omni_proxy_init_global_state(ngx_conf_t *cf)
     }
 
     zone->shm.log->data = cf->cycle;
+    zone->data = cf->cycle;
 
     zone->init = omni_proxy_global_state_init;
 
@@ -1547,6 +1652,137 @@ static char *ngx_conf_set_omni_stream_ops(ngx_conf_t *cf, ngx_command_t *cmd, vo
     return NGX_CONF_OK;
 }
 
+static void omni_upstream_addr_set(omni_upstream_address_t *addr, ngx_http_upstream_rr_peer_t *peer)
+{
+    addr->socklen = peer->socklen;
+    ngx_memcpy(&addr->sockaddr, peer->sockaddr, peer->socklen);
+
+    addr->text_len = peer->name.len;
+    if (addr->text_len < UPSTREAM_ADDR_NAME_MAX - 1) {
+        ngx_memcpy(addr->text, peer->name.data, peer->name.len);
+        addr->text[addr->text_len] = '\0';
+    } else {
+        ngx_memcpy(addr->text, peer->name.data, UPSTREAM_ADDR_NAME_MAX - 1);
+        addr->text[UPSTREAM_ADDR_NAME_MAX - 1] = '\0';
+        addr->text_len = UPSTREAM_ADDR_NAME_MAX - 1;
+    }
+
+    if (peer->sockaddr->sa_family == AF_INET) {
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)&addr->sockaddr;
+        inet_ntop(AF_INET, &(ipv4->sin_addr), addr->ip, UPSTREAM_IP_MAX);
+        addr->port = ntohs(ipv4->sin_port);
+    } else if (peer->sockaddr->sa_family == AF_INET6) {
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)&addr->sockaddr;
+        inet_ntop(AF_INET6, &(ipv6->sin6_addr), addr->ip, UPSTREAM_IP_MAX);
+        addr->port = ntohs(ipv6->sin6_port);
+    }
+}
+
+static void omni_upstream_disable(bool is_prefill, omni_upstream_status_t from, omni_upstream_status_t to)
+{
+    ngx_uint_t i;
+    ngx_uint_t max_num = is_prefill ? MAX_PREFILL_UPSTREAMS : MAX_DECODE_UPSTREAMS;
+    for (i = 0; i < max_num; i++) {
+        omni_upstream_common_t *comm = is_prefill ? &g_state->prefill_states[i].comm : &g_state->decode_states[i].comm;
+        if (comm->status == STATUS_UNUSED) {
+            break;
+        }
+        if (comm->status == from) {
+            comm->status = to;
+        }
+    }
+}
+
+static void omni_upstream_reuse(bool is_prefill, ngx_http_upstream_rr_peer_t *peer, ngx_uint_t idx)
+{
+    omni_upstream_common_t *comm = is_prefill ? &g_state->prefill_states[idx].comm : &g_state->decode_states[idx].comm;
+    omni_upstream_addr_set(&comm->address, peer);
+    comm->status = STATUS_ENABLE;
+    if (is_prefill) {
+        g_state->prefill_states[idx].num_running = 0;
+        g_state->prefill_states[idx].num_tokens = 0;
+        g_state->prefill_states[idx].last_scheduled_time = 0;
+        g_state->prefill_states[idx].expected_next_schedule_time = 0;
+        ngx_memzero(&g_state->prefill_states[idx].his, sizeof(omni_batch_metrics_his_t));
+    } else {
+        g_state->decode_states[idx].num_running = 0;
+        g_state->decode_states[idx].num_tokens = 0;
+        g_state->decode_states[idx].generated_tokens = 0;
+        g_state->decode_states[idx].last_scheduled_time = 0;
+        g_state->decode_states[idx].expected_next_schedule_time = 0;
+        ngx_memzero(&g_state->decode_states[idx].his, sizeof(omni_batch_metrics_his_t));
+    }
+}
+
+static ngx_int_t omni_upstream_add(bool is_prefill, ngx_cycle_t *cycle, ngx_http_upstream_rr_peers_t *peers)
+{
+    ngx_uint_t max_num = is_prefill ? MAX_PREFILL_UPSTREAMS : MAX_DECODE_UPSTREAMS;
+    if (peers->number >= max_num) {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+            "%s endpoint num %ui exceeds maximum %ui", is_prefill ? "Prefill" : "Decode", peers->number, max_num);
+        return NGX_ERROR;
+    }
+
+    ngx_uint_t cnt = 0;
+    ngx_http_upstream_rr_peer_t *peer;
+    for (peer = peers->peer; peer != NULL; peer = peer->next) {
+        ngx_http_upstream_rr_peer_lock(peers, peer);
+        omni_upstream_common_t *comm;
+        ngx_int_t abandon_idx = -1;
+        ngx_uint_t j;
+        for (j = 0; j < max_num; j++) {
+            comm = is_prefill ? &g_state->prefill_states[j].comm : &g_state->decode_states[j].comm;
+            if (comm->status == STATUS_ABANDON) {
+                if (comm->ref == 0 && abandon_idx == -1) {
+                    abandon_idx = j;
+                }
+                continue;
+            }
+            if (comm->status != STATUS_UNUSED) {
+                /* ip/port matches exist upstream, continue use it */
+                if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen, &comm->address.sockaddr, comm->address.socklen, 1) != NGX_OK) {
+                    continue;
+                }
+            } else {
+                /* not match any exist upstream, add */
+                omni_upstream_addr_set(&comm->address, peer);
+
+                if (is_prefill && local_state.loc_conf->vllm_kv_port_offset != NGX_CONF_UNSET) {
+                    g_state->prefill_states[j].radix_tree = omni_radix_tree_init(g_state->shm);
+                    if (g_state->prefill_states[j].radix_tree == NULL) {
+                        ngx_http_upstream_rr_peer_unlock(peers, peer);
+                        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                                      "Failed to create radix hash_tree, idx=%ui", cnt);
+                        return NGX_ERROR;
+                    }
+                }
+            }
+            comm->status = STATUS_ENABLE;
+            break;
+        }
+
+        if (j >= max_num) {
+            if (abandon_idx != -1) {
+                omni_upstream_reuse(is_prefill, peer, abandon_idx);
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "%s peer %ui reuse endpoint[%ui]",
+                    is_prefill ? "Prefill" : "Decode", cnt, abandon_idx);
+                j = abandon_idx;
+                comm = is_prefill ? &g_state->prefill_states[j].comm : &g_state->decode_states[j].comm;
+            } else {
+                ngx_http_upstream_rr_peer_unlock(peers, peer);
+                return NGX_ERROR;
+            }
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "Add %s peer %ui in endpoint[%ui] -> %s:%d",
+                     is_prefill ? "Prefill" : "Decode", cnt, j, comm->address.ip, comm->address.port);
+        cnt++;
+        ngx_http_upstream_rr_peer_unlock(peers, peer);
+    }
+
+    return NGX_OK;
+}
+
 static ngx_int_t ngx_http_omni_init_upstreams(ngx_cycle_t *cycle)
 {
     ngx_uint_t i;
@@ -1568,199 +1804,55 @@ static ngx_int_t ngx_http_omni_init_upstreams(ngx_cycle_t *cycle)
             continue;
         }
 
-        bool is_prefill = false;
-        bool is_decode = false;
-        
-        if (ngx_strncmp(uscf->host.data, PREFILL_ENDPOINTS, sizeof(PREFILL_ENDPOINTS) - 1) == 0) {
-            is_prefill = true;
-            g_state->num_prefill_endpoints = uscf->servers->nelts;
-        } else if (ngx_strncmp(uscf->host.data, DECODE_ENDPOINTS, sizeof(DECODE_ENDPOINTS) - 1) == 0) {
-            is_decode = true;
-            g_state->num_decode_endpoints = uscf->servers->nelts;
-        } else {
-            continue;
-        }
-
-        uscf->peer.init = omni_proxy_upstream_init;
-
         ngx_http_upstream_rr_peers_t *peers = uscf->peer.data;
         if (peers == NULL) {
-            ngx_log_error(NGX_LOG_WARN, cycle->log, 0, 
-                         "Worker %ui: No peers found for upstream %V", 
-                         ngx_worker, &uscf->host);
+            ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                         "No peers found for upstream %V", &uscf->host);
             continue;
         }
 
-        ngx_http_upstream_rr_peer_t *peer = peers->peer;
-        for (j = 0; j < peers->number; j++) {
-            omni_upstream_address_t *address = NULL;
-            
-            if (is_prefill) {
-                if (j >= MAX_PREFILL_UPSTREAMS) {
-                    ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                                 "Worker %ui: Prefill endpoint index %ui exceeds maximum %d",
-                                 ngx_worker, j, MAX_PREFILL_UPSTREAMS);
-                    continue;
-                }
-                g_state->prefill_states[j].index = j;
-                g_state->prefill_states[j].healthy = 1;
-                address = &g_state->prefill_states[j].address;
-            } else if (is_decode) {
-                if (j >= MAX_DECODE_UPSTREAMS) {
-                    ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
-                                 "Worker %ui: Decode endpoint index %ui exceeds maximum %d",
-                                 ngx_worker, j, MAX_DECODE_UPSTREAMS);
-                    continue;
-                }
-                g_state->decode_states[j].index = j;
-                g_state->decode_states[j].healthy = 1;
-                address = &g_state->decode_states[j].address;
+        ngx_http_upstream_rr_peers_rlock(peers);
+
+        if (ngx_strncmp(uscf->host.data, PREFILL_ENDPOINTS, sizeof(PREFILL_ENDPOINTS) - 1) == 0) {
+            /* all endpoint set disable before p/d num update */
+            omni_upstream_disable(true, STATUS_ENABLE, STATUS_DISABLE);
+            /* enable/add endpoint by new conf */
+            if (omni_upstream_add(true, cycle, peers) != NGX_OK) {
+                /* if fail here, upstream still can be used */
+                ngx_http_upstream_rr_peers_unlock(peers);
+                ngx_shmtx_unlock(&g_state->shmtx);
+                return NGX_ERROR;
             }
-
-            if (address == NULL) {
-                continue;
+            /* set abandon if not reuse in reload, and will not reuse in reload later */
+            omni_upstream_disable(true, STATUS_DISABLE, STATUS_ABANDON);
+            g_state->num_prefill_endpoints = uscf->servers->nelts >= MAX_PREFILL_UPSTREAMS ?
+                MAX_PREFILL_UPSTREAMS : uscf->servers->nelts;
+        } else if (ngx_strncmp(uscf->host.data, DECODE_ENDPOINTS, sizeof(DECODE_ENDPOINTS) - 1) == 0) {
+            omni_upstream_disable(false, STATUS_ENABLE, STATUS_DISABLE);
+            if (omni_upstream_add(false, cycle, peers) != NGX_OK) {
+                ngx_http_upstream_rr_peers_unlock(peers);
+                ngx_shmtx_unlock(&g_state->shmtx);
+                return NGX_ERROR;
             }
-
-            address->socklen = peer[j].socklen;
-            ngx_memcpy(&address->sockaddr, peer[j].sockaddr, peer[j].socklen);
-
-            address->text_len = peer[j].name.len;
-            if (address->text_len < UPSTREAM_ADDR_NAME_MAX - 1) {
-                ngx_memcpy(address->text, peer[j].name.data, peer[j].name.len);
-                address->text[address->text_len] = '\0';
-            } else {
-                ngx_memcpy(address->text, peer[j].name.data, UPSTREAM_ADDR_NAME_MAX - 1);
-                address->text[UPSTREAM_ADDR_NAME_MAX - 1] = '\0';
-                address->text_len = UPSTREAM_ADDR_NAME_MAX - 1;
-            }
-
-            address->name_str.data = (u_char*)address->text;
-            address->name_str.len = address->text_len;
-
-            if (peer[j].sockaddr->sa_family == AF_INET) {
-                struct sockaddr_in *ipv4 = (struct sockaddr_in *)&address->sockaddr;
-                inet_ntop(AF_INET, &(ipv4->sin_addr), address->ip, UPSTREAM_IP_MAX);
-                address->port = ntohs(ipv4->sin_port);
-            } else if (peer[j].sockaddr->sa_family == AF_INET6) {
-                struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)&address->sockaddr;
-                inet_ntop(AF_INET6, &(ipv6->sin6_addr), address->ip, UPSTREAM_IP_MAX);
-                address->port = ntohs(ipv6->sin6_port);
-            }
-
-            ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0,
-                         "Worker %ui: %s endpoint[%ui] -> %s:%d", 
-                         ngx_worker, 
-                         is_prefill ? "Prefill" : "Decode",
-                         j, address->ip, address->port);
+            omni_upstream_disable(false, STATUS_DISABLE, STATUS_ABANDON);
+            g_state->num_decode_endpoints = uscf->servers->nelts >= MAX_DECODE_UPSTREAMS ?
+                MAX_DECODE_UPSTREAMS : uscf->servers->nelts;
+        } else {
+            ngx_http_upstream_rr_peers_unlock(peers);
+            continue;
         }
+        ngx_http_upstream_rr_peers_unlock(peers);
+
+        uscf->peer.init = omni_proxy_upstream_init;
     }
 
     ngx_log_error(NGX_LOG_INFO, cycle->log, 0,
-                 "Worker %ui: Upstream initialization completed - Prefill: %d, Decode: %d",
-                 ngx_worker, g_state->num_prefill_endpoints, g_state->num_decode_endpoints);
+                 "Upstream initialization completed - Prefill: %d, Decode: %d",
+                 g_state->num_prefill_endpoints, g_state->num_decode_endpoints);
 
     ngx_shmtx_unlock(&g_state->shmtx);
 
     return NGX_OK;
-}
-
-static ngx_int_t omni_proxy_apc_shm_initialized(ngx_shm_zone_t *shm_zone, void *data)
-{
-    if (local_state.num_prefill_endpoints > g_state->num_prefill_endpoints)
-    {
-        g_state->prefill_states[g_state->num_prefill_endpoints].radix_pool = (ngx_slab_pool_t *)shm_zone->shm.addr;
-        g_state->num_prefill_endpoints++;
-    }
-    else if (local_state.num_decode_endpoints > g_state->num_decode_endpoints)
-    {
-        g_state->decode_states[g_state->num_decode_endpoints].radix_pool = (ngx_slab_pool_t *)shm_zone->shm.addr;
-        g_state->num_decode_endpoints++;
-    }
-    else
-    {
-        return NGX_ERROR;
-    }
-
-    return NGX_OK;
-}
-
-static ngx_int_t omni_proxy_init_apc_shm(ngx_conf_t *cf)
-{
-    ngx_http_upstream_main_conf_t *umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
-    ngx_http_upstream_srv_conf_t **uscfp;
-    ngx_uint_t i, j;
-
-    if (umcf == NULL)
-    {
-        return NGX_ERROR;
-    }
-
-    uscfp = umcf->upstreams.elts;
-
-    for (i = 0; i < umcf->upstreams.nelts; i++)
-    {
-        ngx_http_upstream_srv_conf_t *uscf = uscfp[i];
-        if (uscf == NULL)
-        {
-            continue;
-        }
-
-        bool is_prefill = false;
-        const char *type_str = NULL;
-
-        if (ngx_strncmp(uscf->host.data, PREFILL_ENDPOINTS, sizeof(PREFILL_ENDPOINTS) - 1) == 0)
-        {
-            is_prefill = true;
-            type_str = "prefill";
-            local_state.num_prefill_endpoints = uscf->servers->nelts;
-        }
-        else if (ngx_strncmp(uscf->host.data, DECODE_ENDPOINTS, sizeof(DECODE_ENDPOINTS) - 1) == 0)
-        {
-            type_str = "decode";
-            local_state.num_decode_endpoints = uscf->servers->nelts;
-        }
-        else
-        {
-            // If it's not a prefill or decode upstream, skip it.
-            continue;
-        }
-
-        int count = 0;
-        if (uscf->servers)
-        {
-            ngx_http_upstream_server_t *servers = uscf->servers->elts;
-
-            for (j = 0; j < uscf->servers->nelts; j++, count++)
-            {
-                ngx_http_upstream_server_t *server = &servers[j];
-                ngx_shm_zone_t *shm_zone;
-                ngx_str_t shm_name;
-
-                u_char *buffer = ngx_pcalloc(cf->pool, 64);
-                u_char *end = ngx_snprintf(buffer, 64, "omni_proxy_%s_%d", type_str, count);
-                *end = 0;
-
-                shm_name.data = buffer;
-                shm_name.len = end - buffer;
-
-                shm_zone = ngx_shared_memory_add(cf, &shm_name, 20 * 1024 * 1024, &ngx_http_omni_proxy_module);
-                if (shm_zone == NULL)
-                {
-                    ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                                    "Failed to create shared memory for server %V",
-                                    &servers[j].addrs->name);
-                    continue;
-                }
-
-                shm_zone->init = omni_proxy_apc_shm_initialized;
-
-                ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                                "    Created 20MB shared memory zone: %V (zone=%p)",
-                                &shm_name,
-                                shm_zone);
-            }
-        }
-    }
 }
 
 static ngx_int_t ngx_http_omni_proxy_metrics_handler(ngx_http_request_t *r)
@@ -1817,8 +1909,6 @@ static ngx_int_t omni_proxy_post_config(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
-    omni_proxy_init_apc_shm(cf);
-
     omni_proxy_init_req_groups(local_state.groups);
 
     ngx_http_core_main_conf_t *cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
@@ -1836,6 +1926,7 @@ static ngx_int_t omni_proxy_post_config(ngx_conf_t *cf)
     }
     *h = ngx_http_omni_proxy_health_status_handler;
     
+    ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0, "omni proxy post config finished");
     return NGX_OK;
 }
 
@@ -2035,7 +2126,11 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
         {
             // Re-initialize the radix tree for this upstream
             omni_radix_tree_destroy(prefill->radix_tree);
-            prefill->radix_tree = omni_radix_tree_init(prefill->radix_pool);
+            prefill->radix_tree = omni_radix_tree_init(g_state->shm);
+            if (prefill->radix_tree == NULL) {
+                ngx_log_error(NGX_LOG_EMERG, handler->log, 0,
+                              "Failed to create radix hash_tree in KV_EVENT_ALL_BLOCKS_CLEARED");
+            }
             break;
         }
         default:
@@ -2054,18 +2149,23 @@ static ngx_int_t omni_proxy_init_kv_listener(ngx_cycle_t *cycle)
     }
 
     ngx_core_conf_t *ccf = (ngx_core_conf_t *)ngx_get_conf(ngx_cycle->conf_ctx, ngx_core_module);
-    for (int i = 0; i < g_state->num_prefill_endpoints; i++)
-    {
+
+    uint16_t cnt = 0;
+    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < g_state->num_prefill_endpoints; i++) {
         omni_upstream_prefill_t *prefill = &g_state->prefill_states[i];
+        if (prefill->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
+
         prefill->kv_handler.index = i;
 
-        if (i % ccf->worker_processes == ngx_worker)
+        if (cnt % ccf->worker_processes == ngx_worker)
         {
-            prefill->radix_tree = omni_radix_tree_init(prefill->radix_pool);
             if (prefill->radix_tree == NULL)
             {
                 ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                              "Failed to create radix hash_tree");
+                              "radix hash_tree is NULL, idx=%ud", i);
                 return NGX_ERROR;
             }
 
@@ -2075,8 +2175,8 @@ static ngx_int_t omni_proxy_init_kv_listener(ngx_cycle_t *cycle)
 
             u_char *buf = ngx_palloc(cycle->pool, 64);
             u_char *last = ngx_snprintf((u_char *)buf, 64, "%s:%d",
-                                        prefill->address.ip,
-                                        prefill->address.port + local_state.loc_conf->vllm_kv_port_offset);
+                                        prefill->comm.address.ip,
+                                        prefill->comm.address.port + local_state.loc_conf->vllm_kv_port_offset);
 
             printf("address: %s\n", buf);
             ngx_str_t addr = {last - buf, buf};
@@ -2106,23 +2206,17 @@ static ngx_int_t omni_proxy_init_process(ngx_cycle_t *cycle)
     local_state.omni_proxy_timer_event.log = cycle->log;
     local_state.omni_proxy_timer_event.data = NULL;
 
-    if (ngx_http_omni_init_upstreams(cycle) != NGX_OK) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "Worker %ui: Failed to update global upstream states", ngx_worker);
-        return NGX_ERROR;
-    }
-
     if (omni_proxy_init_tokenizer_worker(cycle) != NGX_OK) {
         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
                       "Worker %ui: Failed to initialize tokenizer worker", ngx_worker);
         return NGX_ERROR;
     }
 
-    omni_register_worker(g_state, &g_state->shmtx);
+    omni_register_worker(g_state, &local_state);
 
     ngx_log_error(NGX_LOG_INFO, cycle->log, 0,
-              "Worker %ui: Init timer, pid: %P, g_state: %p",
-              ngx_worker, ngx_pid, g_state);
+              "Worker %ui: Init timer, pid: %P, g_state: %p, is_master_worker %d",
+              ngx_worker, ngx_pid, g_state, local_state.is_master_worker);
 
     ngx_add_timer(&local_state.omni_proxy_timer_event, TIMER_INTERVAL);
 
@@ -2144,7 +2238,7 @@ static void omni_proxy_exit_process(ngx_cycle_t *cycle)
         ngx_free_connection(local_state.tokenize_worker.resp_connection);
     }
 
-    if (local_state.loc_conf->model_path.len == 0)
+    if (local_state.loc_conf->model_path.len != 0)
     {
         omni_tokenizer_worker_exit(&local_state.tokenize_worker);
     }
@@ -2269,10 +2363,19 @@ static ngx_int_t ngx_http_omni_proxy_health_status_handler(ngx_http_request_t *r
     r->main->count++;
 
     // --- add r->connection->log ---
-    for (i = 0; i < gs->num_prefill_endpoints; i++) {
+    uint16_t cnt = 0;
+    for (i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < gs->num_prefill_endpoints; i++) {
+        if (gs->prefill_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         omni_run_single_health_check(job, r->connection->log, 0, i);
     }
-    for (i = 0; i < gs->num_decode_endpoints; i++) {
+    for (i = 0, cnt = 0; i < MAX_DECODE_UPSTREAMS && cnt < gs->num_decode_endpoints; i++) {
+        if (gs->decode_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        cnt++;
         omni_run_single_health_check(job, r->connection->log, 1, i);
     }
 
@@ -2507,7 +2610,7 @@ static ngx_command_t omni_proxy_commands[] = {
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, prefill_max_num_seqs),
      NULL},
-    
+
     {ngx_string("omni_proxy_decode_max_num_seqs"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_num_slot,
@@ -2528,7 +2631,7 @@ static ngx_command_t omni_proxy_commands[] = {
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, health_status_enabled),
      NULL},
-    
+
     {ngx_string("omni_proxy_schedule_algo"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_enum_slot,

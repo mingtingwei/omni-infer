@@ -57,13 +57,14 @@ typedef struct omni_worker_local_state_s
 {
     pid_t pid;
     uint32_t worker;
-
+    bool is_master_worker;
     uint32_t num_prefill_endpoints;
     uint32_t num_decode_endpoints;
 
     ngx_omni_tokenize_worker_t tokenize_worker;
     ngx_event_t omni_proxy_timer_event;
     ngx_http_output_body_filter_pt ngx_http_next_body_filter;
+    int32_t req_in_groups;
     omni_req_group_t groups[PHASE_MAX];
     ngx_http_omni_loc_conf_t *loc_conf;
 } omni_worker_local_state_t;
