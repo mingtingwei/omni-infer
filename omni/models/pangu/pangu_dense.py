@@ -26,6 +26,7 @@ from torch import nn
 import torch_npu
 from transformers import PretrainedConfig
 
+from vllm.forward_context import get_forward_context
 from vllm.attention import Attention, AttentionType, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -306,9 +307,14 @@ class PanguEmbeddedDecoderLayer(nn.Module):
                                     hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, next_layer=mlp_layer)
 
         # Fully Connected
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
+            is_prefill = True
+        else:
+            is_prefill = False
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, x_transform="AG", reduce_type="RS")
+        hidden_states = self.mlp(hidden_states, x_transform="AG", reduce_type="RS", is_prefill=is_prefill)
         return hidden_states, residual
 
 
