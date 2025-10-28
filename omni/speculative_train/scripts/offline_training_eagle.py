@@ -91,6 +91,9 @@ def parse_args():
         default=7,
         help="The length for Test-Time Training (TTT).",
     )
+    parser.add_argument("--use-topk-loss", action="store_true")
+    parser.add_argument("--topk", type=int, default=8)
+    parser.add_argument("--decay-factor", type=float, default=0.8)
     parser.add_argument("--draft-attention-backend", type=str, default="flex_attention")
     # data processing type
     parser.add_argument("--chat-template", type=str, default="llama3")
@@ -181,6 +184,7 @@ def parse_args():
     parser.add_argument("--profile-start-step", type=int, default=30)
     parser.add_argument("--profile-num-steps", type=int, default=4)
     parser.add_argument("--profile-record-shapes", action="store_true")
+    parser.add_argument("--profile-dir", type=str, default="./trace")
 
     args = parser.parse_args()
 
@@ -282,6 +286,7 @@ def main():
         draft_model=draft_model,
         length=args.ttt_length,
         attention_backend=args.draft_attention_backend,
+        topk=args.topk,
     )
     eagle_model = FSDP(
         eagle_model,
@@ -309,10 +314,7 @@ def main():
     )
     print_with_rank("Initialized optimizer and scheduler")
 
-
-
     last_time = time.time()
-
 
     # start running
     for epoch in range(args.num_epochs):
@@ -322,7 +324,7 @@ def main():
 
         epoch_acces = [[] for _ in range(args.ttt_length)]
         epoch_plosses = [[] for _ in range(args.ttt_length)]
-
+        epoch_topk_losses = [[] for _ in range(args.ttt_length)]
 
         if dist.get_rank() == 0:
             progress_bar = tqdm(
@@ -337,7 +339,7 @@ def main():
                 if batch_index == args.profile_start_step:
                     print("Start profile")
                     output_dir = os.path.join(
-                        os.environ.get("SGLANG_TORCH_PROFILER_DIR", "/data/d00646319/trace"),
+                        args.profile_dir,
                         f"debug_rank{torch.distributed.get_rank()}_{time.time()}/",
                     )
                     experimental_config = torch_npu.profiler._ExperimentalConfig(
@@ -358,14 +360,14 @@ def main():
                     torch_profiler.start()
                 if batch_index == args.profile_start_step + args.profile_num_steps:
                     output_path = os.path.join(
-                        os.environ.get("SGLANG_TORCH_PROFILER_DIR", "/data/d00646319/trace"),
+                        args.profile_dir,
                         f"debug_rank{torch.distributed.get_rank()}_{time.time()}.trace.json",
                     )
                     print(f"End profile {output_path=}")
                     torch_profiler.stop()
                     torch_profiler.export_chrome_trace(output_path)
 
-            plosses, acces = eagle_model(
+            plosses, acces, topk_losses = eagle_model(
                 input_ids=data["input_ids"].npu(),  # [B, S]
                 attention_mask=data["attention_mask"].npu(),  # [B, S]
                 loss_mask=data["loss_mask"].unsqueeze(-1).npu(),  # [B, S, 1] This is different from the online version
@@ -374,12 +376,20 @@ def main():
             acces = torch.stack(acces).cpu().tolist()
 
             # calculate weighted loss
-            ploss_weight = [0.8**i for i in range(len(plosses))]
-            ploss = (
-                sum([ploss_weight[i] * plosses[i] for i in range(len(plosses))])
-                / args.draft_accumulation_steps
-            )
-            ploss.backward()
+            
+            if args.use_topk_loss:
+                loss_weight = [args.decay_factor**i for i in range(len(topk_losses))]
+                loss = (
+                    sum([loss_weight[i] * topk_losses[i] for i in range(len(topk_losses))])
+                    / args.draft_accumulation_steps
+                )
+            else:
+                loss_weight = [args.decay_factor**i for i in range(len(plosses))]
+                loss = (
+                    sum([loss_weight[i] * plosses[i] for i in range(len(plosses))])
+                    / args.draft_accumulation_steps
+                )
+            loss.backward()
             log_dict["train/lr"] = optimizer.get_learning_rate()
             for i in range(len(plosses)):
                 log_dict[f"train/ploss_{i}"] += (
@@ -387,6 +397,10 @@ def main():
                 )
             for i in range(len(acces)):
                 log_dict[f"train/acc_{i}"] += acces[i] / args.draft_accumulation_steps
+            for i in range(len(topk_losses)):
+                log_dict[f"train/ploss_{i}"] += (
+                    topk_losses[i].item() / args.draft_accumulation_steps
+                )
             if batch_index % args.draft_accumulation_steps == 0:
                 optimizer.step()
                 global_step += 1
@@ -399,12 +413,18 @@ def main():
             epoch_plosses = [
                 epoch_plosses[i] + [plosses[i].item()] for i in range(len(plosses))
             ]
+            epoch_topk_losses = [
+                epoch_topk_losses[i] + [topk_losses[i].item()] for i in range(len(topk_losses))
+            ]
 
             if dist.get_rank() == 0:
                 avg_loss = sum(pl.item() for pl in plosses) / len(plosses)
+                avg_topk_loss = sum(pl.item() for pl in topk_losses) / len(topk_losses)
                 avg_acc = sum(acces) / len(acces)
                 progress_bar.set_postfix(
-                    {"loss": f"{avg_loss:.2f}", "acc": f"{avg_acc:.2f}"}
+                    {"loss": f"{avg_loss:.2f}`",
+                     "topk_loss": f"{avg_topk_loss:.2f}",
+                     "acc": f"{avg_acc:.2f}"}
                 )
 
         # Log epoch-level training metrics
@@ -424,6 +444,14 @@ def main():
             train_epoch_logdict[f"train/epoch_ploss_{i}"] = loss_i
             print_on_rank0(
                 f"Train Epoch [{epoch + 1}/{args.num_epochs}], position {i}, pLoss: {loss_i:.2f}"
+            )
+        for i in range(len(epoch_topk_losses)):
+            loss_i = torch.tensor(epoch_topk_losses[i]).npu().mean()
+            dist.all_reduce(loss_i)
+            loss_i = (loss_i / dist.get_world_size()).item()
+            train_epoch_logdict[f"train/epoch_ploss_{i}"] = loss_i
+            print_on_rank0(
+                f"Train Epoch [{epoch + 1}/{args.num_epochs}], position {i}, topkpLoss: {loss_i:.2f}"
             )
         tracker.log(train_epoch_logdict, step=global_step)
 

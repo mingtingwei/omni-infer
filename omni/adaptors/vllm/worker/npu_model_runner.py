@@ -38,6 +38,7 @@ from vllm.utils import (DeviceMemoryProfiler, is_pin_memory_available,
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -136,7 +137,7 @@ class NPUModelRunner(GPUModelRunner):
             from omni.adaptors.vllm.sample.validator import SimpleValidator, SparseRejectionSamplerValidator
             
             self.sampler = NewAscendSamplerV1(self)
-            self.rejection_sampler = SimpleValidator(self.sampler) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
+            self.rejection_sampler = SimpleValidator(self) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
             self.drafter = PostDrafter(vllm_config, device, self)
         else:
             from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
@@ -172,6 +173,16 @@ class NPUModelRunner(GPUModelRunner):
             (self.max_num_reqs * num_tokens_per_reqs_decode,
              (self.model_config.max_model_len + self.block_size - 1) // self.block_size),
             dtype=np.int32)
+
+        # cu_num_draft_tokens : self.max_num_reqs
+        # logits_indices : self.decode_max_num_tokens
+        # target_logits_indices : self.max_num_reqs
+        # bonus_logits_indices : self.max_num_reqs
+        self.buffer_spec_metadata = torch.zeros(
+            self.max_num_reqs + self.decode_max_num_tokens + self.max_num_reqs + self.max_num_reqs,
+            dtype=torch.int32, device=self.device,
+        )
+
         self.attn_mask = None
         self.attn_state = None
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
@@ -221,7 +232,95 @@ class NPUModelRunner(GPUModelRunner):
         if self.decode_gear_list is None:
             self.decode_gear_list = []
             self.decode_gear_list.append(self.max_batch_size)
-    
+
+    def _calc_spec_decode_metadata(
+        self,
+        num_draft_tokens: np.ndarray,
+        cu_num_scheduled_tokens: np.ndarray,
+    ) -> SpecDecodeMetadata:
+        # Inputs:
+        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
+        # num_draft_tokens:         [  3,   0,   2,   0,   1]
+        # Outputs:
+        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+        #                            206, 207, 208]
+        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+        # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+
+        # Compute the logits indices.
+        # [4, 1, 3, 1, 2]
+        num_sampled_tokens = num_draft_tokens + 1
+        # Step 1. [4, 5, 8, 9, 11]
+        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
+        total_num_sampled_tokens = cu_num_sampled_tokens[-1]
+        # Step 2. [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
+        cumsums_offsets = np.repeat(cu_num_sampled_tokens - num_sampled_tokens,
+                                    num_sampled_tokens)
+        # Step 3. [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        arange = self.arange_np[:total_num_sampled_tokens] - cumsums_offsets
+        # Step 4. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+        logits_indices = np.repeat(
+            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        # Step 5. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+        logits_indices += arange
+
+        # Compute the bonus logits indices.
+        bonus_logits_indices = cu_num_sampled_tokens - 1
+
+        # Compute the draft logits indices.
+        # [3, 3, 5, 5, 6]
+        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
+        total_num_draft_tokens = cu_num_draft_tokens[-1]
+        # [0, 0, 0, 3, 3, 5]
+        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens,
+                                    num_draft_tokens)
+        # [0, 1, 2, 0, 1, 0]
+        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # [0, 0, 0, 5, 5, 9]
+        target_logits_indices = np.repeat(
+            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        # [0, 1, 2, 5, 6, 9]
+        target_logits_indices += arange
+
+        # TODO: Optimize the CPU -> GPU copy.
+        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens)
+        logits_indices = torch.from_numpy(logits_indices)
+        target_logits_indices = torch.from_numpy(target_logits_indices)
+        bonus_logits_indices = torch.from_numpy(bonus_logits_indices)
+
+        all_info = torch.cat(
+            [cu_num_draft_tokens, logits_indices, target_logits_indices, bonus_logits_indices]
+        )
+        self.buffer_spec_metadata[:all_info.numel()].copy_(all_info, non_blocking=True)
+
+        start_index = 0
+        end_index = cu_num_draft_tokens.numel()
+        cu_num_draft_tokens = self.buffer_spec_metadata[start_index:end_index]
+        start_index = end_index
+        end_index += logits_indices.numel()
+        logits_indices = self.buffer_spec_metadata[start_index:end_index]
+        start_index = end_index
+        end_index += target_logits_indices.numel()
+        target_logits_indices = self.buffer_spec_metadata[start_index:end_index]
+        start_index = end_index
+        end_index += bonus_logits_indices.numel()
+        bonus_logits_indices = self.buffer_spec_metadata[start_index:end_index]
+
+        # Compute the draft token ids.
+        # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
+        draft_token_ids = self.input_ids[logits_indices]
+        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+
+        metadata = SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens.tolist(),
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            target_logits_indices=target_logits_indices,
+            bonus_logits_indices=bonus_logits_indices,
+            logits_indices=logits_indices,
+        )
+        return metadata
     
     def _prepare_inputs(
         self,

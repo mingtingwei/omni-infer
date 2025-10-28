@@ -9,7 +9,9 @@ from vllm.v1.sample.ops.penalties import apply_min_token_penalties
 from vllm.v1.sample.sampler import Sampler as SamplerV1
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
+from omni.models.config_loader.loader import model_extra_config
 from omni.layers.npu_sampler_cache import PenaltyCache, ProbCache
+from omni.layers.sampler import AscendTopKTopPSamplerV1
 
 _SAMPLING_EPS = 1e-5
 
@@ -106,6 +108,7 @@ class AscendSamplerV1(SamplerV1):
         self.sampler_preparing_stream = torch.npu.Stream()
         self.penalty_cache = PenaltyCache(runner.max_num_reqs, runner.input_batch.vocab_size, runner.device) if runner.use_penalty else None
         self.prob_cache = ProbCache(runner.max_num_reqs, runner.num_tokens_per_reqs_decode - 1, runner.topk, runner.input_batch.vocab_size, runner.device) if runner.use_rejection_sampler else None
+        self.topk_topp_sampler = AscendTopKTopPSamplerV1()
 
     def expand_sampling_metadata(
             self,
@@ -159,6 +162,7 @@ class AscendSamplerV1(SamplerV1):
         self,
         logits: torch.Tensor,
         min_p: torch.Tensor,
+        return_logits: bool = False,
     ) -> torch.Tensor:
         """
         Filters logits using adaptive probability thresholding.
@@ -173,9 +177,13 @@ class AscendSamplerV1(SamplerV1):
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison
         valid_token_mask = probability_values >= adjusted_min_p
-        # Apply mask using boolean indexing
-        probability_values[~valid_token_mask] = 0
-        return probability_values
+        if return_logits:
+            logits[~valid_token_mask] = -float('inf')
+            return logits
+        else:
+            # Apply mask using boolean indexing
+            probability_values[~valid_token_mask] = 0
+            return probability_values
 
     # only get probability and indices(if sort)
     def apply_sampling_params(
@@ -184,6 +192,7 @@ class AscendSamplerV1(SamplerV1):
             sampling_metadata: SamplingMetadata,
             spec_metadata: Optional[SpecDecodeMetadata] = None,
             input_ids: Optional[torch.Tensor] = None,
+            do_sample: bool = False,
     ) -> torch.Tensor:
         if spec_metadata is not None:
             sampling_metadata = self.expand_sampling_metadata(sampling_metadata, spec_metadata)
@@ -204,28 +213,52 @@ class AscendSamplerV1(SamplerV1):
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, spec_metadata, input_ids)
 
-        if sampling_metadata.all_random:
+        if not sampling_metadata.all_greedy:
+            use_npu_top_k_top_p_sample = model_extra_config.operator_opt_config.enable_topktoppsample_op
             # Apply temperature.
             logits = self.apply_temperature(logits, sampling_metadata.temperature)
-
             # Apply min_p.
             if sampling_metadata.min_p is not None:
-                logits_or_prob = self.apply_min_p(logits, sampling_metadata.min_p)
-                is_logits = False
+                logits_or_prob = self.apply_min_p(logits, sampling_metadata.min_p, return_logits=use_npu_top_k_top_p_sample)
+                is_logits = use_npu_top_k_top_p_sample
             else:
                 logits_or_prob = logits
                 is_logits = True
 
-            return apply_top_k_top_p(logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits)
+            if do_sample:
+                p = sampling_metadata.top_p
+                k = sampling_metadata.top_k
+                if use_npu_top_k_top_p_sample == False or p is None or k is None:
+                    probs, idx = apply_top_k_top_p(
+                        logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits,
+                    )
+                    return self.do_sample(
+                        probs, idx, sampling_metadata, spec_metadata,
+                    )
+                else:
+                    logits = logits_or_prob.type(torch.bfloat16)
+                    p = p.type(torch.bfloat16)
+                    k = k.type(torch.int32)
+                    q = self.generate_random_sequence(
+                        logits, sampling_metadata, spec_metadata,
+                    )
+                    res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
+                    return res[0]
+            else:
+                return apply_top_k_top_p(
+                    logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits
+                )
         else:
-            return logits
+            if do_sample:
+                return logits.argmax(dim=-1)
+            else:
+                return logits
 
-    def do_sample(
-            self,
-            probs: torch.Tensor,
-            idx: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
-            spec_metadata: Optional[SpecDecodeMetadata] = None,
+    def generate_random_sequence(
+        self,
+        probs: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        spec_metadata: Optional[SpecDecodeMetadata] = None,
     ):
         generators = sampling_metadata.generators
         batchsize = probs.shape[0] if spec_metadata is None else len(spec_metadata.num_draft_tokens)
@@ -248,6 +281,18 @@ class AscendSamplerV1(SamplerV1):
                 for i, generator in generators.items():
                     q[req_arange[i]:req_arange[i + 1]].exponential_(generator=generator)
         torch.npu.default_stream().wait_stream(self.sampler_preparing_stream)
+        return q
+
+    def do_sample(
+            self,
+            probs: torch.Tensor,
+            idx: Optional[torch.Tensor],
+            sampling_metadata: SamplingMetadata,
+            spec_metadata: Optional[SpecDecodeMetadata] = None,
+    ):
+        q = self.generate_random_sequence(
+            probs, sampling_metadata, spec_metadata,
+        )
         res = probs.div_(q).argmax(dim=-1).view(-1)
         if idx == None:
             return res

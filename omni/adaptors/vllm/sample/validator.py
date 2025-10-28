@@ -10,13 +10,15 @@ from omni.layers.sampler import random_choice
 
 class SimpleValidator(RejectionSamplerV1):
 
-    def __init__(self, main_sampler, *args, **kwargs) -> None:
+    def __init__(self, runner, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.previous_frequency_penalties = []
         self.previous_repetition_penalties = []
         self.previous_presence_penalties = []
-        self.main_sampler = main_sampler
+        self.main_sampler = runner.sampler
+        self.runner = runner
         self.minus_one = None
+        self.minus_ones = None
 
     def forward(self,
                 metadata: SpecDecodeMetadata,
@@ -31,25 +33,20 @@ class SimpleValidator(RejectionSamplerV1):
         if self.minus_one is None:
             # prepare const on npu
             self.minus_one = -torch.ones(1, 1, device=input_ids.device, dtype=input_ids.dtype)
+            self.minus_ones = -torch.ones(
+                (self.runner.max_num_reqs, self.runner.num_tokens_per_reqs_decode),
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
 
         batch_size = len(metadata.num_draft_tokens)
-        output_token_ids = torch.ones(
-            (batch_size, metadata.max_spec_len + 1),
-            dtype=input_ids.dtype,
-            device=input_ids.device,
-        ) * self.minus_one[0]
+        output_token_ids = self.minus_ones[:batch_size, :metadata.max_spec_len + 1].clone()
 
         key_tokens = input_ids[metadata.logits_indices]
 
-        output = self.main_sampler.apply_sampling_params(
-            logits, sampling_metadata, metadata, key_tokens
+        all_sampled_tokens = self.main_sampler.apply_sampling_params(
+            logits, sampling_metadata, metadata, key_tokens, do_sample=True,
         )
-        if isinstance(output, tuple):
-            probs, idx = output
-            all_sampled_tokens = self.main_sampler.do_sample(probs, idx, sampling_metadata, metadata)
-        else:
-            # ALL GREEDY
-            all_sampled_tokens = output.argmax(dim=-1)
 
         indices = metadata.bonus_logits_indices - metadata.cu_num_draft_tokens
         indices[1:] += metadata.cu_num_draft_tokens[:-1]

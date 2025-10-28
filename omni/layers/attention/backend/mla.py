@@ -608,7 +608,9 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 block_table = block_table[:self._num_decodes, ...]
                 # has speculative tokens
                 if self._num_decode_tokens > self._num_decodes:
-                    block_table = block_table.repeat_interleave(self.decode_num_tokens[:self._num_decodes], dim=0)
+                    block_table = block_table.repeat_interleave(
+                        self.decode_num_tokens[:self._num_decodes], dim=0, output_size=self._num_decode_tokens
+                    )
                 block_table = torch.cat([block_table,
                                          torch.zeros(
                                             (graph_pad_size, ) + block_table.shape[1:],

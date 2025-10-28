@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List
 
 
-def _compute_target_p(target, loss_mask, pad_length):
+def _compute_target_p(target, loss_mask, pad_length, topk):
     target_head = target
     target_head = target_head.float()
     target_p = nn.Softmax(dim=2)(target_head)
@@ -25,7 +25,8 @@ def _compute_target_p(target, loss_mask, pad_length):
     )
 
     target_p_padded = target_p_padded.detach()
-    return target_p_padded, loss_mask_padded
+    _, target_p_padded_topk = target_p_padded.topk(topk, dim=-1)
+    return target_p_padded, loss_mask_padded, target_p_padded_topk.detach()
 
 class OfflineEagleModel(nn.Module):
     """
@@ -34,7 +35,11 @@ class OfflineEagleModel(nn.Module):
     """
 
     def __init__(
-        self, target_head, draft_model, length: int = 1, attention_backend="sdpa"
+        self,
+        target_head, draft_model,
+        length: int = 1,
+        attention_backend="sdpa",
+        topk=8,
     ):
         """
         Args:
@@ -48,6 +53,7 @@ class OfflineEagleModel(nn.Module):
         # TODO to support TTT
         self.length = length
         self.attention_backend = attention_backend
+        self.topk = topk
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # norm_hidden_states = self.norm(hidden_states)
@@ -63,10 +69,11 @@ class OfflineEagleModel(nn.Module):
         target = self.target_head(hidden_states.roll(-1, -2))
         # Step 0: handle vocab size
         with torch.no_grad():
-            target_p_padded, loss_mask_padded = _compute_target_p(
+            target_p_padded, loss_mask_padded, target_p_topk_padded = _compute_target_p(
                 target=target,
                 loss_mask=loss_mask,
                 pad_length=self.length - 1,
+                topk=self.topk,
             )
         del target
 
@@ -87,9 +94,11 @@ class OfflineEagleModel(nn.Module):
         
         plosses = []
         acces = []
+        topk_losses = []
         cache_hidden = ([], [])
         for i in range(self.length):
             target_p = target_p_padded[:, i : seq_length + i]
+            target_p_topk = target_p_topk_padded[:, i : seq_length + i]
             loss_mask = loss_mask_padded[:, i : seq_length + i]
             # Step 5.1: embed the input ids
             inputs_embeds = self.draft_model.embed_input_ids(input_ids.roll(-i, -1))
@@ -109,11 +118,14 @@ class OfflineEagleModel(nn.Module):
             logits = logits.float()
             out_logp = nn.LogSoftmax(dim=2)(logits)
             plogp = target_p * out_logp
+            plogp_topk = plogp.gather(-1, target_p_topk)
             loss = -torch.sum(loss_mask * plogp, 2).mean()
+            topk_loss = -torch.sum(loss_mask * plogp_topk, 2).mean()
             with torch.no_grad():
                 acc = ((logits.argmax(-1) == target_p.argmax(-1)) * loss_mask.squeeze(-1)).sum() / loss_mask.sum().clamp_min(1e-6)
 
             plosses.append(loss)
             acces.append(acc)
+            topk_losses.append(topk_loss)
 
-        return plosses, acces
+        return plosses, acces, topk_losses

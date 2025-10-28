@@ -1,14 +1,14 @@
 #!/bin/bash
-IP=7.150.13.75
-PORT=7000
-MODEL_NAME=qwen
+IP=server_ip
+PORT=server_port
+MODEL_NAME=server_model_name
 
 INPUT_KEY=input
 MAX_TOKENS=3072
 MAX_CONCURRENCY=64
 TEMPERATURE=0.6
-BASIC_DIR=/data/d00646319/offline-dataset/death-no-end-1024_2048-3072
-DATAFILE=$BASIC_DIR/3906.json
+BASIC_DIR=/path/of/basic/dir
+DATAFILE=$BASIC_DIR/file_name
 TOKEN_OUTPUT=$BASIC_DIR/token_output.json
 TOKEN_SAVED_DIR=$BASIC_DIR/tokens
 HIDDENSTATES_OUTPUT=$BASIC_DIR/hidden_states_output.json
