@@ -438,7 +438,7 @@ class BaiLingModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            layer_id = i - 3
+            layer_id = i - self.first_k_dense_replace
 
             hidden_states, residual = layer(positions,
                                             hidden_states,
