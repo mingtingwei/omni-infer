@@ -123,6 +123,7 @@ targets:
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
       self.execute_model_start_time = time.time()
+      args[0].engine_core_str = f'{os.getpid()}-{self.execute_model_start_time}'
       for req in args[0].scheduled_new_reqs:
           if os.getenv('ROLE') == "prefill":
               safe_print(trace_output_directory, f"<<<Action: Prefill start execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
@@ -135,6 +136,70 @@ targets:
       for req in args[0].scheduled_new_reqs:
           if os.getenv('ROLE') == "prefill":
               safe_print(trace_output_directory, f"<<<Action: Prefill done execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:NPUModelRunner" 
+    function_name: _execute_model
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      for req in args[0].scheduled_new_reqs:
+          if os.getenv('ROLE') == "prefill":
+              safe_print(trace_output_directory, f"<<<Action: Prefill start execute main model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+      # step
+      self.main_model_start_time = time.time()                   
+    exit_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      self.execute_model_end_time = time.time()
+      scheduler_output = args[0]
+      for req in scheduler_output.scheduled_new_reqs:
+          if os.getenv('ROLE') == "prefill":
+              safe_print(trace_output_directory, f"<<<Action: Prefill done execute main model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+      # step
+      if scheduler_output.total_num_scheduled_tokens != 0:
+          self.drafter.self_scheduler_output = scheduler_output
+
+      if scheduler_output.total_num_scheduled_tokens != 0 and os.getenv('ROLE') != "prefill":
+          main_model_end_time = time.time() 
+          execute_model_cost_time = (main_model_end_time - self.main_model_start_time) * 1000
+          engine_core_str = scheduler_output.engine_core_str
+          safe_print(trace_output_directory, f"profile_mainmodel: {os.getenv('ROLE')}_{ip_str}|{self.main_model_start_time}|"
+              f"{main_model_end_time}|{execute_model_cost_time}|{engine_core_str}"
+          )
+
+  - module: "omni.adaptors.vllm.spec_decode.post_drafter:PostDrafter"  
+    function_name: propose
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      if self.self_scheduler_output is not None:
+          for req in self.self_scheduler_output.scheduled_new_reqs:
+              if os.getenv('ROLE') == "prefill":
+                  safe_print(trace_output_directory, f"<<<Action: Prefill start execute mtp model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+          # step
+          self.mtp_model_start_time = time.time()
+    exit_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      self.execute_model_end_time = time.time()
+      scheduler_output = self.self_scheduler_output
+      if scheduler_output is not None:
+          for req in scheduler_output.scheduled_new_reqs:
+              if os.getenv('ROLE') == "prefill":
+                  safe_print(trace_output_directory, f"<<<Action: Prefill done execute mtp model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+          # step
+          if scheduler_output.total_num_scheduled_tokens != 0 and os.getenv('ROLE') != "prefill":
+              mtp_model_end_time = time.time() 
+              execute_model_cost_time = (mtp_model_end_time - self.mtp_model_start_time) * 1000
+              engine_core_str = scheduler_output.engine_core_str
+              safe_print(trace_output_directory, f"profile_mtpmodel: {os.getenv('ROLE')}_{ip_str}|{self.mtp_model_start_time}|"
+                  f"{mtp_model_end_time}|{execute_model_cost_time}|{engine_core_str}"
+              )
+          self.self_scheduler_output = None
 
   - module: "vllm.v1.engine.core:EngineCoreProc"
     function_name: process_input_socket
@@ -173,6 +238,33 @@ targets:
           queue.get = patch_get
           return queue
       self.output_queue = patch_queue_get(self.output_queue)
+
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: __init__
+    exit_operation: |
+      self.engine_core_str = ""
+
+  - module: "vllm.v1.core.sched.output:SchedulerOutput"  
+    function_name: __init__
+    exit_operation: |
+      self.engine_core_str = ""
+
+  - module: "vllm.v1.core.sched.output:SchedulerOutput"
+    function_name: __init__
+    exit_operation: |
+      self.scheduler_output = None 
+      self.main_model_info = {}
+
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:NPUModelRunner"
+    function_name: __init__
+    exit_operation: |
+      self.engine_core_str = ""
+
+  - module: "omni.adaptors.vllm.spec_decode.post_drafter:PostDrafter"
+    function_name: __init__
+    exit_operation: |
+      self.engine_core_str = ""
+      self.self_scheduler_output = None
 
 # engine step profiling
   - module: "vllm.v1.engine.core:EngineCore"
