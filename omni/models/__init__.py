@@ -116,6 +116,10 @@ def register_model():
     ModelRegistry.register_model(
         "BailingMoeV2ForCausalLM",
         "omni.models.bailing.bailing:BailingMoeV2ForCausalLM")
+		
+    ModelRegistry.register_model(
+        "GlmForCausalLM",
+        "omni.models.glm.glm:GlmForCausalLM")
 
     if (
         int(os.getenv("RANDOM_MODE", default='0')) or
