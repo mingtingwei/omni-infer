@@ -245,6 +245,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.decode_gear_list is None or len(self.decode_gear_list) == 0:
                 raise RuntimeError("When enable adaptive speculative decoding, decode_gear_list must be set.")
             self.max_batch_size = self.decode_gear_list[0]
+        self.is_pd_seperate_d = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        self.is_hybrid_chunked_prefill_graph_mode = self.enable_torchair_graph_mode and not self.is_pd_seperate_d and \
+            not self.vllm_config.additional_config.get("enable_hybrid_graph_mode", False) and self.vllm_config.scheduler_config.enable_chunked_prefill
+        if self.is_hybrid_chunked_prefill_graph_mode:    
+            self.max_batch_size = self.max_num_tokens
 
         if self.decode_gear_list is None:
             self.decode_gear_list = []
@@ -408,16 +413,25 @@ class NPUModelRunner(GPUModelRunner):
         else:
             attn_state = AscendAttentionState.ChunkedPrefill
 
+        if self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.DecodeOnly:
+            attn_state = AscendAttentionState.ChunkedPrefill
+
         self.attn_state = attn_state
 
         # calculate max_batch_size and padding size
         graph_pad_size = 0
-        if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly and len(self.decode_gear_list) > 1:
-            self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, num_reqs)
+        if self.enable_torchair_graph_mode and len(self.decode_gear_list) > 1:
+            if attn_state == AscendAttentionState.DecodeOnly:
+                self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, num_reqs)
+            elif self.is_hybrid_chunked_prefill_graph_mode and attn_state ==  AscendAttentionState.ChunkedPrefill:
+                self.max_batch_size = self._get_closest_gear(num_input_tokens)
+
         if attn_state == AscendAttentionState.DecodeOnly:
             if total_num_scheduled_tokens > self.max_batch_size:
                 raise RuntimeError("num_reqs is bigger than max_batch_size")
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
+        elif attn_state == AscendAttentionState.ChunkedPrefill:
+            graph_pad_size = self.max_batch_size - total_num_scheduled_tokens    
         else:
             # The reduce_scatter in the TP communication domain after embedding, P goes through this
             graph_pad_size = _get_pad_size(num_input_tokens)
@@ -568,7 +582,7 @@ class NPUModelRunner(GPUModelRunner):
             if kv_cache_group_id == 0:
                 self.full_attn_metadata = attn_metadata_i
 
-            if self.enable_torchair_graph_mode and self.attn_state == AscendAttentionState.DecodeOnly:
+            if (self.enable_torchair_graph_mode and self.attn_state == AscendAttentionState.DecodeOnly) or self.is_hybrid_chunked_prefill_graph_mode:
                 self.attn_metadata_builders[kv_cache_group_id].mark_static_for_attn_metadata(attn_metadata_i)
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -630,7 +644,7 @@ class NPUModelRunner(GPUModelRunner):
             input_ids = None
         else:
             if graph_pad_size >= 0:
-                if attn_state == AscendAttentionState.DecodeOnly:
+                if attn_state == AscendAttentionState.DecodeOnly or (self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill):
                     padding = torch.zeros(graph_pad_size, dtype=input_ids.dtype, device=input_ids.device)
                 else:
                     vocab_size = self.model_config.get_vocab_size()
@@ -657,7 +671,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.planner.place_experts()
                 _GLOBAL_STEP = _GLOBAL_STEP + 1 if not is_prompt else 0
 
-            if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly:
+            if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly or \
+                (self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill):
                 start_debug = time.time()
                 logger.debug("Start running compiled model.")
                 if not self.model_mark_static:
@@ -1072,6 +1087,9 @@ class NPUModelRunner(GPUModelRunner):
             fake_positions = torch.zeros(self.max_batch_size, dtype=input_ids.dtype, device=input_ids.device)
             input_ids, positions = fake_input, fake_positions
         self.attn_state = AscendAttentionState.DecodeOnly
+
+        if self.is_hybrid_chunked_prefill_graph_mode:
+            self.attn_state = AscendAttentionState.ChunkedPrefill
 
         # Build dummy attn_metadata
         attn_metadata = {}

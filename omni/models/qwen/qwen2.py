@@ -32,7 +32,7 @@ from transformers import Qwen2Config
 import torchair as tng
 from vllm.forward_context import get_forward_context
 from vllm.attention import Attention, AttentionType, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, CompilationLevel
 from vllm.compilation.decorators import support_torch_compile
 from omni.models.config_loader.loader import model_extra_config
 from vllm.distributed import (
@@ -65,6 +65,7 @@ from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+from vllm.utils import supports_dynamo
 from omni.layers.layernorm import RMSNormFlashComm
 from omni.layers.linear import (
     RowParallelFlashCommLinear,
@@ -921,6 +922,12 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        
+        self.enable_torchair_graph_mode = (
+                    vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
+        self.is_pd_seperate_d = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        self.is_hybrid_chunked_prefill_graph_mode = self.enable_torchair_graph_mode and not self.is_pd_seperate_d and \
+            not vllm_config.additional_config.get("enable_hybrid_graph_mode", False) and vllm_config.scheduler_config.enable_chunked_prefill
 
     def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -978,4 +985,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             return True
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+        if self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return False
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

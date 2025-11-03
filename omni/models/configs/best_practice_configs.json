@@ -218,6 +218,16 @@
       "decode_config_file": "qwen3_235b_w8a8c16_a3_2p1d_d.json"
    },
    {
+      "model": "qwen2",
+      "hardware": "A3",
+      "precision": "bf16",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": false,
+      "prefill_config_file": "qwq_a3_hybrid_chunked_prefill_bf16.json",
+      "decode_config_file": "qwq_a3_hybrid_chunked_prefill_bf16.json"
+   },
+   {
       "model": "qwen3-235B",
       "hardware": "A3",
       "precision": "w8a8",

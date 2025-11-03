@@ -9,6 +9,9 @@ from torchair import patch_for_hcom
 
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import supports_dynamo
+
+from omni.models.config_loader.loader import model_extra_config
 
 logger = init_logger(__name__)
 
@@ -17,12 +20,16 @@ MAX_GEAR_NUM = 6
 BLOCK_NUM_FLOATING_RANGE = 30
 
 
-def get_torchair_config():
+def get_torchair_config(vllm_config: VllmConfig):
     patch_for_hcom()
     config = torchair.CompilerConfig()
     if os.environ.get("FROZEN_PARAMETER_DISABLED", "0") == "0":
         config.experimental_config.frozen_parameter = True
     config.experimental_config.tiling_schedule_optimize = True
+    is_pd_seperate_d = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+    enable_torchair_graph_mode = (vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
+    if enable_torchair_graph_mode and not is_pd_seperate_d and model_extra_config.operator_opt_config.use_tnd_pa:
+       config.experimental_config.tiling_schedule_optimize = False
     torch.npu.set_compile_mode(jit_compile=False)
     return config
 
@@ -93,22 +100,24 @@ class NPUCompilationConfig:
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         use_spec_decode = vllm_config.speculative_config is not None
         enable_adaptive = use_spec_decode and vllm_config.speculative_config.enable_adaptive
-        max_batch_size = max_num_reqs if not use_spec_decode else max_num_reqs * (1 + vllm_config.speculative_config.num_speculative_tokens)
-
+        max_gear_size = vllm_config.scheduler_config.max_num_batched_tokens
+        if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer" or vllm_config.additional_config.get("enable_hybrid_graph_mode", False):
+            max_gear_size = max_num_reqs if not use_spec_decode else max_num_reqs * (1 + vllm_config.speculative_config.num_speculative_tokens)
+    
         if self.decode_gear_list is not None and len(self.decode_gear_list) > MAX_GEAR_NUM:
             raise ValueError(f"Max gear num supported is {MAX_GEAR_NUM} now.")
 
-        if self.decode_gear_list and max(self.decode_gear_list) > max_batch_size:
-            decode_gear_list = [gear for gear in self.decode_gear_list if gear <= max_batch_size]
+        if self.decode_gear_list and max(self.decode_gear_list) > max_gear_size:
+            decode_gear_list = [gear for gear in self.decode_gear_list if gear <= max_gear_size]
             logger.warning(
-                f"PTA_TORCHAIR_DECODE_GEAR_LIST({self.decode_gear_list}) becomes ({decode_gear_list}) due to max_batch_size({max_batch_size})")
+                f"PTA_TORCHAIR_DECODE_GEAR_LIST({self.decode_gear_list}) becomes ({decode_gear_list}) due to max_batch_size({max_gear_size})")
             self.decode_gear_list = decode_gear_list
 
         if not self.decode_gear_list:
-            self.decode_gear_list = [max_batch_size]
+            self.decode_gear_list = [max_gear_size]
 
-        if (not enable_adaptive and len(self.decode_gear_list) < MAX_GEAR_NUM and max(self.decode_gear_list) < max_batch_size):
-            self.decode_gear_list.append(max_batch_size)
+        if (not enable_adaptive and len(self.decode_gear_list) < MAX_GEAR_NUM and max(self.decode_gear_list) < max_gear_size):
+            self.decode_gear_list.append(max_gear_size)
 
     def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -118,7 +127,7 @@ class NPUCompilationConfig:
             CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
         ]:
             if not self.backend or self.backend == "":
-                config = get_torchair_config()
+                config = get_torchair_config(vllm_config)
                 npu_backend = torchair.get_npu_backend(compiler_config=config)
                 logger.info(f"Using torchair backend!")
                 return npu_backend

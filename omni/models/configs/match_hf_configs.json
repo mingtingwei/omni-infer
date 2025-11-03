@@ -76,6 +76,15 @@
         "n_shared_experts": null,
         "moe_intermediate_size": 2048
     },
+    "qwq-32B":{
+        "model_type": "qwen2",
+        "hidden_size": 5120,
+        "num_attention_heads": 40,
+        "max_position_embeddings": 131072,
+        "vocab_size": 152064,
+        "intermediate_size": 27648,
+        "num_hidden_layers": 64
+    },
     "qwen3_30b_a3b":{
         "model_type": "qwen3_moe",
         "hidden_size": 2048,

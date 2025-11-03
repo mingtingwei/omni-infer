@@ -52,7 +52,7 @@ class TorchNpuCompilerWrapperWithCustomDispatcher:
                 self.__dict__[new_forward_proxy_name] = new_func.__get__(self, nn.Module)
                 self.cached_compiled_models[gear_size] = torchair.inference.cache_compile(
                     self.__dict__[new_forward_proxy_name],
-                    config=get_torchair_config(),
+                    config=get_torchair_config(self.vllm_config),
                     dynamic=False,
                     ge_cache=True,
                     fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,

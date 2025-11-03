@@ -303,6 +303,25 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             block_table = self._get_graph_runner_block_tables(
                 self._num_decode_tokens, block_table)
             kv_index = None
+        elif self.runner.is_hybrid_chunked_prefill_graph_mode and self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
+            kv_index = None
+            seq_lens = seq_lens.to(self.runner.device)
+            query_lens = query_lens.to(self.runner.device)
+            padding_token_num = (graph_pad_size + num_actual_tokens) - torch.sum(query_lens)
+            seq_padding_size = (self.runner.max_num_reqs + 1) - num_reqs
+            seq_padding = torch.zeros((seq_padding_size,), dtype=seq_lens.dtype, device=self.runner.device)
+            seq_lens = torch.cat([seq_lens, seq_padding], dim=0)
+            query_padding = torch.zeros((seq_padding_size,), dtype=query_lens.dtype, device=self.runner.device)
+            query_lens = torch.cat([query_lens, query_padding], dim=0)
+            query_lens[-1] = padding_token_num
+            seq_lens[-1] = padding_token_num
+            
+            block_table = self.block_table.get_device_tensor()
+            block_table_padding = torch.zeros(
+                (1,) + block_table.shape[1:],
+                dtype=block_table.dtype,
+                device=block_table.device)
+            block_table = torch.cat([block_table, block_table_padding], dim=0)
         elif model_extra_config.operator_opt_config.use_tnd_pa:
             kv_index = None
             if graph_pad_size > 0:
@@ -364,6 +383,8 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                                    device=self.runner.device)
         if isinstance(self.runner.graph_block_tables, np.ndarray):
             graph_block_tables = torch.zeros((max_pad_size, self.runner.graph_block_tables.shape[1]))
+            if self.runner.is_hybrid_chunked_prefill_graph_mode:
+                graph_block_tables = torch.zeros((self.runner.max_num_reqs + 1, self.runner.graph_block_tables.shape[1]))
         block_table = graph_block_tables.to(
             device=self.runner.device,
             dtype=self.runner.input_batch.block_table[0].get_device_tensor().dtype
@@ -371,6 +392,11 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         query_lens = torch.ones(max_pad_size, dtype=torch.long, device=self.runner.device, pin_memory=True)
         seq_lens = query_lens * 2
+
+        if self.runner.is_hybrid_chunked_prefill_graph_mode:
+            query_lens = torch.zeros(self.runner.max_num_reqs + 1, dtype=torch.long, device=self.runner.device, pin_memory=True)
+            query_lens[0] = max_pad_size
+            seq_lens = query_lens + 1
 
         slot_indices = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], dim=1)
 
@@ -464,6 +490,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         cur_vllm_config = get_current_vllm_config()
         self.enable_graph_mode = (cur_vllm_config.npu_compilation_config.level >  \
                                   CompilationLevel.NO_COMPILATION and supports_dynamo())
+        
+        self.is_pd_seperate_d = cur_vllm_config.kv_transfer_config is not None and cur_vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        self.is_hybrid_chunked_prefill_graph_mode = self.enable_graph_mode and not self.is_pd_seperate_d and \
+            not cur_vllm_config.additional_config.get("enable_hybrid_graph_mode", False) and cur_vllm_config.scheduler_config.enable_chunked_prefill
 
         if AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE is None:
             AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE = ~torch.tril(
@@ -518,19 +548,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
             block_size = kv_cache[0].shape[-2]
             assert block_size == 128, f"{block_size}"
-            torch_npu.npu_scatter_pa_kv_cache(
-                key,
-                value,
-                kv_cache[0],
-                kv_cache[1],
-                attn_metadata.slot_mapping
-            )
+            cast_key = key.reshape(-1, self.num_kv_heads * self.head_size)
+            cast_value = value.reshape(-1, self.num_kv_heads * self.head_size)
+            slots = attn_metadata.slot_indices
+            torch_npu.npu_scatter_nd_update_(kv_cache[0], slots, cast_key)
+            torch_npu.npu_scatter_nd_update_(kv_cache[1], slots, cast_value)
 
-        if self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+        if (self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly) or (self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill):
             attn_output = tng.ops.npu_fused_infer_attention_score_v2(
                 query,
-                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
-                kv_cache[1].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[0],
+                kv_cache[1],
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
@@ -545,8 +573,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             attn_output = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
-                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
-                kv_cache[1].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[0],
+                kv_cache[1],
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
@@ -807,10 +835,7 @@ class AscendAttentionBackend(AttentionBackend):
             num_kv_heads: int,
             head_size: int,
     ) -> Tuple[int, ...]:
-        if model_extra_config.operator_opt_config.use_tnd_pa:
-            return (2, num_blocks, num_kv_heads * head_size // NZ_DIM, block_size, NZ_DIM)
-        else:
-            return (2, num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def swap_blocks(
