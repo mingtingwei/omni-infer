@@ -542,39 +542,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size).contiguous()
         key = key.view(-1, self.num_kv_heads, self.head_size).contiguous()
         value = value.view(-1, self.num_kv_heads, self.head_size).contiguous()
+        num_batch = attn_metadata.seq_lens.shape[0]
         # value = value.contiguous()
 
         # update kv cache
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
             block_size = kv_cache[0].shape[-2]
             assert block_size == 128, f"{block_size}"
-            cast_key = key.reshape(-1, self.num_kv_heads * self.head_size)
-            cast_value = value.reshape(-1, self.num_kv_heads * self.head_size)
-            slots = attn_metadata.slot_indices
-            torch_npu.npu_scatter_nd_update_(kv_cache[0], slots, cast_key)
-            torch_npu.npu_scatter_nd_update_(kv_cache[1], slots, cast_value)
+            torch_npu.npu_scatter_pa_kv_cache(
+                key,
+                value,
+                kv_cache[0],
+                kv_cache[1],
+                attn_metadata.slot_mapping
+            )         
 
         if (self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly) or (self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill):
             attn_output = tng.ops.npu_fused_infer_attention_score_v2(
-                query,
-                kv_cache[0],
-                kv_cache[1],
+                torch.transpose(query.view(num_batch, -1, self.num_heads, self.head_size), 1, 2),
+                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[1].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
+                input_layout="BNSD",
                 softmax_scale=self.scale,
                 block_table=attn_metadata.block_tables,
                 block_size=block_size,
                 sparse_mode=3,
                 atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
-                actual_seq_qlen=attn_metadata.query_lens.cumsum(dim=0),
                 actual_seq_kvlen=attn_metadata.seq_lens,
+                inner_precise=1
             )[0]
         else:
             attn_output = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
-                kv_cache[0],
-                kv_cache[1],
+                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[1].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
@@ -835,7 +838,10 @@ class AscendAttentionBackend(AttentionBackend):
             num_kv_heads: int,
             head_size: int,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads * head_size)
+        if model_extra_config.operator_opt_config.use_tnd_pa:
+            return (2, num_blocks, num_kv_heads * head_size // NZ_DIM, block_size, NZ_DIM)
+        else:
+            return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def swap_blocks(
