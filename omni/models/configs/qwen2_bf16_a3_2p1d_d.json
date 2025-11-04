@@ -1,0 +1,8 @@
+{
+    "model_parallel_config": {
+        "dense_mlp_tp_size": 16
+    },
+    "operator_optimizition_config": {
+        "use_super_kernel": true
+    }
+}
