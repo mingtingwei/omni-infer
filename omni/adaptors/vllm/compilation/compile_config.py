@@ -128,8 +128,6 @@ class NPUCompilationConfig:
         ]:
             if not self.backend or self.backend == "":
                 config = get_torchair_config(vllm_config)
-                if model_extra_config.operator_opt_config.inplace_add_rms_norm_fustion_pass:
-                    config.ge_config.optimization_switch = "InplaceAddRmsNormFusionPass:off"
                 npu_backend = torchair.get_npu_backend(compiler_config=config)
                 logger.info(f"Using torchair backend!")
                 return npu_backend
