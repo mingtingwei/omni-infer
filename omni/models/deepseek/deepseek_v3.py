@@ -828,7 +828,9 @@ class DeepseekV3ForCausalLM(nn.Module):
 
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = DeepseekV3Model(vllm_config=vllm_config, prefix="model")
+        self.vllm_config = vllm_config
+        
+        self.model = self.get_model()
 
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
@@ -854,6 +856,14 @@ class DeepseekV3ForCausalLM(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
+    def get_model(self):
+        if model_extra_config.task_config.hardware_platform.startswith("A2") and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
+            from omni.models.deepseek.deepseek_v3_a2 import DeepseekV3Model as DeepseekV3Model_A2
+            return DeepseekV3Model_A2(vllm_config=self.vllm_config, prefix="model")
+        else:
+            return DeepseekV3Model(vllm_config=self.vllm_config, prefix="model")
+        
+
     def forward(
             self,
             input_ids: torch.Tensor,
@@ -865,7 +875,11 @@ class DeepseekV3ForCausalLM(nn.Module):
             inputs_embeds = None,
             **kwargs
     ) -> Optional[torch.Tensor]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
+        if model_extra_config.task_config.hardware_platform.startswith(f"A2") and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
+            hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors)
+        else:
+            hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors, self.max_num_token)
         
         if self.is_ffn_die:
