@@ -16,7 +16,6 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
 )
 from torch.nn import Parameter
 
-
 class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
     _kernel_backends_being_used: set[str] = set()
 

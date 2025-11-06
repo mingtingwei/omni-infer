@@ -1,0 +1,51 @@
+Subject: [PATCH] sglang_model_param_adjust
+---
+Index: python/sglang/srt/model_executor/model_runner.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+--- a/python/sglang/srt/model_executor/model_runner.py	(revision 9f7be89415373d7509f1758fd219d1f6b94df741)
++++ b/python/sglang/srt/model_executor/model_runner.py	(date 1761216056536)
+@@ -123,6 +123,7 @@
+     set_cpu_offload_max_bytes,
+     set_cuda_arch,
+ )
++from omni.models.config_loader.loader import call_config_updater
+ 
+ _is_hip = is_hip()
+ _is_npu = is_npu()
+@@ -243,6 +244,8 @@
+         # Model-specific adjustment
+         self.model_specific_adjustment()
+ 
++        self._init_model_best_practice_configs()
++
+         if server_args.show_time_cost:
+             enable_show_time_cost()
+ 
+@@ -415,6 +418,23 @@
+             self.profiler = self._init_profiler()
+             self.profiling_init = True
+ 
++    def _init_model_best_practice_configs(self):
++        hardware_platform = "A2" if torch_npu.npu.get_device_name(0).startswith("Ascend910B") else "A3"
++        is_pd_disaggregation = False
++        is_prefill_node = None
++        if os.getenv('ROLE', None):
++            is_pd_disaggregation = True
++            is_prefill_node = True if os.getenv('ROLE', None) == 'prefill' else False
++        call_config_updater(
++            config_updater_name='update_task_config',
++            hf_config=self.model_config.hf_config,
++            hardware_platform=hardware_platform,
++            is_pd_disaggregation=is_pd_disaggregation,
++            is_prefill_node=is_prefill_node,
++            prefill_nodes_num=int(os.getenv("PREFILL_POD_NUM", 1)),
++            decode_nodes_num=int(os.getenv("DECODE_POD_NUM", 1))
++        )
++
+     def model_specific_adjustment(self):
+         server_args = self.server_args
+ 

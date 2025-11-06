@@ -11,7 +11,7 @@ from datetime import timedelta
 from multiprocessing import shared_memory
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
-
+from omni.models.config_loader.loader import model_extra_config
 import torch
 import torch.distributed
 from sglang.srt.distributed.parallel_state import (
@@ -72,7 +72,7 @@ def initialize_mlp_tp_group(backend, tensor_model_parallel_size, dp_size) -> Non
 
     world_size: int = torch.distributed.get_world_size()
     rank: int = torch.distributed.get_rank()
-    mlp_tp_size_str = os.getenv("MLP_TP_SIZE")
+    mlp_tp_size_str = model_extra_config.parall_config.dense_mlp_tp_size
     if mlp_tp_size_str is None:
         mlp_tp_size = tensor_model_parallel_size
     else:
@@ -105,7 +105,7 @@ def initialize_o_proj_tp_group(backend, tensor_model_parallel_size, dp_size) -> 
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    o_proj_tp_size_str = os.getenv("O_PROJ_TP_SIZE")
+    o_proj_tp_size_str = model_extra_config.parall_config.o_proj_tp_size
     if o_proj_tp_size_str is None:
         o_proj_tp_size = tensor_model_parallel_size // dp_size
     else:
@@ -140,7 +140,7 @@ def initialize_o_proj_dp_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    o_proj_tp_size = int(os.getenv("O_PROJ_TP_SIZE", "1"))
+    o_proj_tp_size = model_extra_config.parall_config.o_proj_tp_size
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     dp_size: int = world_size // o_proj_tp_size
