@@ -112,6 +112,11 @@ def register_model():
     ModelRegistry.register_model(
         "GlmForCausalLM",
         "omni.models.glm.glm:GlmForCausalLM")
+    
+    ModelRegistry.register_model(
+        "OpenPanguVLForConditionalGeneration",
+        "omni.models.pangu.modeling_openpangu_vl:OpenPanguVLForConditionalGeneration",
+    )
 
     if (
         int(os.getenv("RANDOM_MODE", default='0')) or

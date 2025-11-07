@@ -54,7 +54,7 @@ from omni.layers.linear import (
     RowParallelFlashCommLinear,
     QKVParallelFlashCommLinear
 )
-from omni.layers.rotary_embedding import get_rope, QwenRotaryEmbedding
+from omni.layers.rotary_embedding import get_rope, QwenRotaryEmbedding, QwenMRotaryEmbedding
 
 DEFAULT_ROPE_THETA = 1000000
 # if use weight nz, this config must be True
@@ -177,7 +177,10 @@ class PanguEmbeddedAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states, x_transform=x_transform)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k, cos, sin)
+        if type(self.rotary_emb) is QwenMRotaryEmbedding:
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, k = self.rotary_emb(positions, q, k, cos, sin)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output, reduce_type="RS", next_layer=next_layer)
         return output
@@ -395,9 +398,12 @@ class PanguEmbeddedModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
-        cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-        sin = torch.index_select(self.full_sin, dim=0, index=positions)
+        if type(self.layers[0].self_attn.rotary_emb) is QwenMRotaryEmbedding:
+            cos = None
+            sin = None
+        else:
+            cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
+            sin = torch.index_select(self.full_sin, dim=0, index=positions)
 
         aux_hidden_states = []
         for idx, layer in enumerate(
