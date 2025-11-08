@@ -473,7 +473,7 @@ class NPUModelRunner(GPUModelRunner):
             if total_num_scheduled_tokens > self.max_batch_size:
                 raise RuntimeError("num_reqs is bigger than max_batch_size")
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
-        elif attn_state == AscendAttentionState.ChunkedPrefill:
+        elif self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill:
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens    
         else:
             # The reduce_scatter in the TP communication domain after embedding, P goes through this
