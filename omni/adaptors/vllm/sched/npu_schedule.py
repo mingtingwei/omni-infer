@@ -117,6 +117,10 @@ class NpuHybridScheduler(Scheduler):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
 
+        # Encoder-related.
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
+        encoder_budget = self.max_num_encoder_input_tokens
+
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -176,6 +180,20 @@ class NpuHybridScheduler(Scheduler):
                 skip_cur_request()
                 continue
             assert num_new_tokens > 0
+
+            # Schedule encoder inputs.
+            encoder_inputs_to_schedule = None
+            new_encoder_budget = encoder_budget
+            if request.has_encoder_inputs:
+                (encoder_inputs_to_schedule, num_new_tokens,
+                    new_encoder_budget
+                    ) = self._try_schedule_encoder_inputs(
+                        request, num_computed_tokens, num_new_tokens,
+                        encoder_budget)
+                if num_new_tokens == 0:
+                    # The request cannot be scheduled.
+                    break
+            
             new_blocks = self.kv_cache_manager.allocate_slots(
                 request, num_new_tokens, num_computed_tokens, computed_blocks)
             if new_blocks is None:
@@ -204,6 +222,14 @@ class NpuHybridScheduler(Scheduler):
             token_budget -= num_new_tokens
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens
+            # Encoder-related.
+            if encoder_inputs_to_schedule:
+                scheduled_encoder_inputs[request.request_id] = (
+                    encoder_inputs_to_schedule)
+                # Allocate the encoder cache.
+                for i in encoder_inputs_to_schedule:
+                    self.encoder_cache_manager.allocate(request, i)
+                encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -320,7 +346,7 @@ class NpuHybridScheduler(Scheduler):
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
-            scheduled_encoder_inputs={},
+            scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
