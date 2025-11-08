@@ -39,3 +39,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/adapt_chat_template_kwargs.patch
 git apply --whitespace=nowarn $PATCH_ROOT/enable_max_tokens_exclude_reasoning.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_bugs_first_token.patch
 git apply --whitespace=nowarn $PATCH_ROOT/guided_decoding_adapt_prefilled_token.patch
+git apply --whitespace=nowarn $PATCH_ROOT/patch_reasoning_thinking_bug.patch
