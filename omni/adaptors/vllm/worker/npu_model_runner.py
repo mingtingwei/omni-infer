@@ -695,9 +695,9 @@ class NPUModelRunner(GPUModelRunner):
                     vocab_size = self.model_config.get_vocab_size()
                     padding = torch.randint(1, vocab_size, (graph_pad_size,), dtype=input_ids.dtype, device=input_ids.device)
                 input_ids = torch.cat([input_ids, padding])
-                
+
             inputs_embeds = None
-            
+
         model_kwargs["selected_indices"] = sample_indices if attn_state != AscendAttentionState.DecodeOnly else None
 
         start_fc = time.time()
