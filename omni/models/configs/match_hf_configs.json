@@ -43,6 +43,17 @@
         "n_shared_experts": 1,
         "moe_intermediate_size": 2048
     },
+    "kimi-k2-thinking":{
+        "model_type": "kimi-k2-thinking",
+        "hidden_size": 7168,
+        "num_attention_heads": 64,
+        "max_position_embeddings": 262144,
+        "vocab_size": 163840,
+        "intermediate_size": 18432,
+        "n_routed_experts": 384,
+        "n_shared_experts": 1,
+        "moe_intermediate_size": 2048
+    },
     "pangu-7B":{
         "model_type": "PanguEmbeded",
         "hidden_size": 4096,
