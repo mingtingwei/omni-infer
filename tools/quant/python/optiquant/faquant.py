@@ -8,7 +8,7 @@ def cal_scale(faquant_path, layer_idx, method='max'):
 
     # 遍历路径下的所有 .pth 文件
     for fname in os.listdir(faquant_path):
-        if fname.endswith(f"_{layer_idx}pth"):
+        if fname.endswith(f"_{layer_idx}.pth"):
             fpath = os.path.join(faquant_path, fname)
             t = torch.load(fpath, map_location="cpu")
 
