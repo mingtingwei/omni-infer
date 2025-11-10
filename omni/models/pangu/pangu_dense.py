@@ -28,6 +28,7 @@ from transformers import PretrainedConfig
 
 from vllm.forward_context import get_forward_context
 from vllm.attention import Attention, AttentionType, AttentionMetadata
+from omni.layers.attention.layer import attention_init_c8
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
@@ -55,6 +56,7 @@ from omni.layers.linear import (
     QKVParallelFlashCommLinear
 )
 from omni.layers.rotary_embedding import get_rope, QwenRotaryEmbedding, QwenMRotaryEmbedding
+from omni.models.config_loader.loader import model_extra_config
 
 DEFAULT_ROPE_THETA = 1000000
 # if use weight nz, this config must be True
@@ -154,17 +156,32 @@ class PanguEmbeddedAttention(nn.Module):
         else:
             sliding_window = None
 
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            per_layer_sliding_window=sliding_window,
-            attn_type=attn_type,
-            prefix=f"{prefix}.attn",
-        )
+        if model_extra_config.operator_opt_config.fa_quant:
+            Attention.__init__ = attention_init_c8
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=sliding_window,
+                attn_type=attn_type,
+                prefix=f"{prefix}.attn",
+                total_num_kv_heads=self.total_num_kv_heads
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=sliding_window,
+                attn_type=attn_type,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -453,8 +470,6 @@ class PanguEmbeddedModel(nn.Module):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue

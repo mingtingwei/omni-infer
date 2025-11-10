@@ -37,7 +37,11 @@ from omni.adaptors.vllm.utils import ASCEND_COMPRESSED_TENSORS
 from .schemes.compressed_tensors_w8a8_int8 import AscendCompressedTensorsW8A8Int8LinearMethod
 from .schemes.compressed_tensors_w4a8_int8 import AscendCompressedTensorsW4A8Int8LinearMethod
 from .compressed_tensors_moe import AscendCompressedTensorsW8A8Int8MoEMethod, AscendCompressedTensorsW4A8Int8MoEMethod
+from omni.models.config_loader.loader import model_extra_config
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 
+SUPPORTED_KV_QUANT_STRATEGY = [QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL]
 
 @register_quantization_config(ASCEND_COMPRESSED_TENSORS)
 class AscendCompressedTensorsConfig(CompressedTensorsConfig):
@@ -258,6 +262,7 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
         if isinstance(layer, LinearBase):
             if self.get_weights_bits(layer=layer, layer_name=prefix) == 16:
                 return AscendUnquantizedLinearMethod()
@@ -271,11 +276,28 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
             moe_method, weight_num_bits = self.get_moe_method(prefix)
             layer.weight_num_bits = weight_num_bits
             return moe_method
+        elif isinstance(layer, Attention) and model_extra_config.operator_opt_config.fa_quant:
+            return AscendCompressedTensorsKVCacheMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Check whether the param name matches the format for k/v cache scales
+        in compressed-tensors. If this is the case, return its equivalent
+        param name expected by vLLM
+
+        :param name: param name
+        :return: matching param name for KV cache scale in vLLM
+        """
+        if name.endswith(".kv_cache_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.kv_cache_scale", ".attn.k_scale")
+        if name.endswith(".kv_cache_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.kv_cache_scale", ".attn.v_scale")
+        # If no matches, return None
+        return None
 
 class AscendCompressedTensorsLinearMethod(CompressedTensorsLinearMethod):
     def apply(self,
@@ -298,3 +320,94 @@ class AscendCompressedTensorsLinearMethod(CompressedTensorsLinearMethod):
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, x, bias=bias, module_name=module_name,
                                     x_transform=x_transform, is_prefill=is_prefill)
+
+class AscendCompressedTensorsKVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from compressed-tensors
+    checkpoints.
+    """
+
+    def __init__(self, quant_config: CompressedTensorsConfig):
+        self.validate_kv_cache_scheme(quant_config.kv_cache_scheme)
+        super().__init__(quant_config)
+
+    @staticmethod
+    def validate_kv_cache_scheme(kv_cache_scheme: Optional[dict[str, Any]]):
+        """
+        Validator for the kv cache scheme. Useful for controlling the
+        kv cache quantization schemes, that are being supported in vLLM
+        :param kv_cache_scheme: the compressed-tensors kv cache scheme
+        """
+
+        if kv_cache_scheme is None:
+            raise ValueError("When enable quant cache, " 
+                "kv_cache_scheme must not be null in config.json")
+
+        type_ = kv_cache_scheme.get("type")
+        num_bits = kv_cache_scheme.get("num_bits")
+
+        if type_ != "int" and num_bits != 8:
+            raise NotImplementedError(
+                "Currently supported kv cache quantization is "
+                "num_bits=8, type=int, however "
+                f"received num_bits={num_bits}, type={type_}")
+
+        strategy = kv_cache_scheme.get("strategy")
+        if strategy not in SUPPORTED_KV_QUANT_STRATEGY:
+            raise NotImplementedError(
+                f"Only support {SUPPORTED_KV_QUANT_STRATEGY} scaling factor "
+                f"for compressed-tensors KV cache, found strategy: {strategy}")
+
+        is_symmetric = kv_cache_scheme.get("symmetric")
+        if not is_symmetric:
+            raise NotImplementedError(
+                "Only support symmetric scaling factor "
+                "for compressed-tensors KV cache. "
+                f"However found symmetric: {is_symmetric}")
+
+    def create_weights(self, layer: torch.nn.Module, total_num_kv_heads: int, head_size: int):
+        """
+        Create "weight" (aka k_scale and v_scale)
+        for an attention layer.
+        """
+        if self.quant_config.kv_cache_scheme is not None:
+            if self.quant_config.kv_cache_scheme.get("strategy") == QuantizationStrategy.TENSOR:
+                layer.k_scale = torch.nn.Parameter(torch.ones(1, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(torch.ones(1, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+            else:
+                self.total_num_kv_heads = total_num_kv_heads
+                scale_num = total_num_kv_heads * head_size
+                layer.k_scale = torch.nn.Parameter(torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.quant_config.kv_cache_scheme is not None:
+            scale_num = layer.k_scale.shape[0]
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+
+            slice_size = scale_num // min(self.total_num_kv_heads, tp_size)
+            num_kv_head_replicas = tp_size // self.total_num_kv_heads if tp_size >= self.total_num_kv_heads else 1
+            local_index = tp_rank // num_kv_head_replicas
+            slice_start = local_index * slice_size
+            slice_end = slice_start + slice_size
+
+            if self.quant_config.kv_cache_scheme.get("strategy") == QuantizationStrategy.CHANNEL:
+                layer.k_scale = torch.nn.Parameter(layer.k_scale[slice_start:slice_end].view(1, -1),
+                                                requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(layer.v_scale[slice_start:slice_end].view(1, -1),
+                                                requires_grad=False)
+            else:
+                layer.k_scale = torch.nn.Parameter(layer.k_scale.expand(1, slice_size), requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(layer.v_scale.expand(1, slice_size), requires_grad=False)
+
+            layer.k_scale_reciprocal = torch.nn.Parameter(1/layer.k_scale.to(torch.float32),
+                                                        requires_grad=False)
+            layer.v_scale_reciprocal = torch.nn.Parameter(1/layer.v_scale.to(torch.float32),
+                                                        requires_grad=False)
+

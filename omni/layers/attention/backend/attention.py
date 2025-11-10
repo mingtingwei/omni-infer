@@ -640,6 +640,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         "encoder/decoder cross-attention "
                                         "are not implemented for "
                                         "PallasAttentionBackendImpl")
+        if model_extra_config.operator_opt_config.fa_quant:
+            k_scale = layer.k_scale
+            v_scale = layer.v_scale
+
         # View q k v to BSH.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -652,14 +656,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             block_size = self.key_cache.shape[1]
 
-            cast_key = key.reshape(-1, 1, self.num_kv_heads * self.head_size)
-            cast_value = value.reshape(-1, 1, self.num_kv_heads * self.head_size)
-
             if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
                 # if prefill does not use paged attention,
                 # (1) saving keys and values into kv_cache, and
                 # (2) GQA
                 # can run simultaneously in two streams
+                if model_extra_config.operator_opt_config.fa_quant:
+                    quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
+                    quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
+                    quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
+                    quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
+
                 if self.kv_stream is not None and not hasattr(layer, 'quant_method') and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                     stream_for_reshape_and_cache = self.kv_stream
                     self.kv_stream.wait_stream(torch.npu.current_stream())
@@ -667,20 +674,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     stream_for_reshape_and_cache = torch.npu.current_stream()
                 with torch.npu.stream(stream_for_reshape_and_cache):
                     torch_npu._npu_reshape_and_cache(
-                        key,
-                        value,
+                        key if not model_extra_config.operator_opt_config.fa_quant else quant_key,
+                        value if not model_extra_config.operator_opt_config.fa_quant else quant_value,
                         self.key_cache.view(self.key_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
                         self.value_cache.view(self.value_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
                         attn_metadata.slot_mapping.int()
                     )
             else:
-                torch_npu.scatter_update_(self.key_cache, attn_metadata.slot_indices, cast_key, -2)
-                torch_npu.scatter_update_(self.value_cache, attn_metadata.slot_indices, cast_value, -2)
+                if model_extra_config.operator_opt_config.fa_quant:
+                    torch_npu.npu_quant_scatter_(self.key_cache, attn_metadata.slot_indices, key.view(-1, 1, self.num_kv_heads * self.head_size), k_scale.view(-1), axis=-2, quant_axis=-1)
+                    torch_npu.npu_quant_scatter_(self.value_cache, attn_metadata.slot_indices, value.view(-1, 1, self.num_kv_heads * self.head_size), v_scale.view(-1), axis=-2, quant_axis=-1)
+                else:
+                    cast_key = key.reshape(-1, 1, self.num_kv_heads * self.head_size)
+                    cast_value = value.reshape(-1, 1, self.num_kv_heads * self.head_size)
+                    torch_npu.scatter_update_(self.key_cache, attn_metadata.slot_indices, cast_key, -2)
+                    torch_npu.scatter_update_(self.value_cache, attn_metadata.slot_indices, cast_value, -2)
 
-        if hasattr(layer, 'quant_method'):
-            pass
         # V0-Style scheduler situation.
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:             
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:             
             if not (os.getenv("ENABLE_PREFILL_TND", "0") == "1"):
                 if attn_metadata is None:
                     raise RuntimeError("attn_metadata must not be None")
@@ -758,6 +769,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     input_layout="BNSD",
                     scale=self.scale,
+                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    key_antiquant_mode=0,
+                    value_antiquant_mode=0,
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
                     block_table=block_tables,
                     block_size=block_size,
@@ -772,6 +787,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     input_layout="BSH",
                     scale=self.scale,
+                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    key_antiquant_mode=0,
+                    value_antiquant_mode=0,
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
                     block_table=block_tables,
                     block_size=block_size,
@@ -879,7 +898,7 @@ class AscendAttentionBackend(AttentionBackend):
         # KVCache needs to store the shape of the reduced dimension [num_blocks, block_size, 1, kv_lora_rank] [num_blocks, block_size, 1, rope_dim]
         # The shape of the augmented dimension is [num_blocks, block_size, head_num, head_dim]
         layer_kv_caches = torch.zeros(kv_cache_shape,
-                                      dtype=dtype,
+                                      dtype=dtype if not model_extra_config.operator_opt_config.fa_quant else torch.int8,
                                       device=device)
         if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
             torch_npu.npu_format_cast(layer_kv_caches, 2)
