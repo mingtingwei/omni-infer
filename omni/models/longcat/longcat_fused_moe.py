@@ -58,7 +58,7 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
         if self.warm_up:
             # This is forced balancing, the goal is to reduce peak memory
             global_rank = get_world_group().rank_in_group
-            step = hidden_states.shape[0] * topk_ids.shape[1]  # topk 8 expert
+            step = hidden_states.shape[0] * topk_ids.shape[1]
             cur_topk_list = [
                 (i + global_rank // 1) % 512 for i in range(
                     global_rank // 1 * step, (global_rank // 1 + 1) * step)]

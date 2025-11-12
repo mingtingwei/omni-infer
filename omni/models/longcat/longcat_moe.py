@@ -257,12 +257,11 @@ class LongcatFlashMoE(nn.Module):
     def _forward_decode_dispatch_combine(self, hidden_states: torch.Tensor, attn_metadata: AttentionMetadata) -> torch.Tensor:
         router_logits, _ = self.router.forward(hidden_states.float())
         topk_weights, topk_ids = self.router.get_topk_indices(router_logits)
-        zero_expert_output, topk_ids, topk_weights = self.compute_zero_experts(hidden_states, topk_weights, topk_ids)
 
         mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
         layer = self.experts
-
-        max_num_deployed_expert = self.local_expert_num * get_dp_group().world_size
+        
+        max_num_deployed_expert = self.local_expert_num * get_ep_group().world_size
         act_dtype = hidden_states.dtype
         shared_expert_rank_num = 0
         kwargs = {
@@ -291,6 +290,9 @@ class LongcatFlashMoE(nn.Module):
             "tp_world_size": experts_tp_size,
             "tp_rank_id": global_rank % experts_tp_size,
             "x_active_mask": mc2_mask,
+            "zero_expert_num": 256,
+            "copy_expert_num": 0,
+            "const_expert_num": 0,
         })
 
         output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs)
@@ -334,11 +336,11 @@ class LongcatFlashMoE(nn.Module):
             "tp_world_size": experts_tp_size,
             "tp_rank_id": global_rank % experts_tp_size,
             "x_active_mask": mc2_mask,
+            "zero_expert_num": 256,
+            "copy_expert_num": 0,
+            "const_expert_num": 0,
         }
         kwargs.update(stage3_kwargs)
 
-
-        hidden_states_route = torch_npu.npu_moe_distribute_combine_v2(**kwargs)
-
-        final_hidden_states = (hidden_states_route, zero_expert_output)
+        final_hidden_states = torch_npu.npu_moe_distribute_combine_v2(**kwargs)
         return final_hidden_states

@@ -25,12 +25,11 @@
 """Inference-only Longcat-Flash model."""
 from typing import Iterable, List, Optional, Set, Tuple, Union
 import torch
-import torch.distributed as dist
 from torch import nn
+import torchair as tng
 from transformers import PretrainedConfig
 torch._logging.set_logs(recompiles=True)
 # vllm adaptor
-from omni.layers.rotary_embedding import LongcatRotaryEmbedding
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.attention import AttentionMetadata
@@ -104,6 +103,7 @@ class LongcatFlashDecoderLayer(nn.Module):
                     kv_lora_rank=config.kv_lora_rank,
                     rope_theta=rope_theta,
                     rope_scaling=None,
+                    rope_is_neox_style=True,
                     max_position_embeddings=max_position_embeddings,
                     cache_config=cache_config,
                     quant_config=quant_config,
@@ -112,14 +112,6 @@ class LongcatFlashDecoderLayer(nn.Module):
                 for i in range(2)
             ]
         )
-        for i in range(2):
-            self.self_attn[i].rotary_emb = LongcatRotaryEmbedding(
-                head_size=config.qk_rope_head_dim,
-                rotary_dim=config.qk_rope_head_dim,
-                max_position_embeddings=max_position_embeddings,
-                base=rope_theta,
-                is_neox_style=True
-            )
 
         self.input_layernorm = nn.ModuleList(
             [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
@@ -176,14 +168,15 @@ class LongcatFlashDecoderLayer(nn.Module):
         )
         hidden_states, residual = self.post_attention_layernorm[0](hidden_states, residual)
 
-        moe_hidden_states = hidden_states.clone()
-
-        moe_hidden_states = self.mlp(moe_hidden_states, attn_metadata)
+        moe_hidden_states = self.mlp(hidden_states, attn_metadata)
         if isinstance(moe_hidden_states, (tuple, list)):
             assert len(moe_hidden_states) == 2
             # 0 is the shared expert hidden_states, 1 is the routing expert hidden_states, add operation cannot be placed in the super kernel
             moe_hidden_states = moe_hidden_states[0] + moe_hidden_states[1]
-
+        try:
+            tng.scope.npu_wait_tensor(hidden_states, moe_hidden_states)
+        except:
+            pass
         hidden_states, residual = self.mlps[0](hidden_states, residual, attn_metadata)
 
         if residual is None:
@@ -194,7 +187,7 @@ class LongcatFlashDecoderLayer(nn.Module):
             # Combines residual add and rmsnorm
             hidden_states, residual = self.input_layernorm[1](
                 hidden_states, residual, quant_symbol=(not model_extra_config.operator_opt_config.use_mlaprolog and self.quant_symbol))
-        
+
         assert hidden_states.shape[0] > 0
         hidden_states = self.self_attn[1](
             positions=positions,
@@ -510,15 +503,14 @@ class LongcatFlashForCausalLM(nn.Module):
         return loaded_params
 
     def should_use_eager_mode(self, *args, **kwargs):
-        # attn_metadata = kwargs.get("attn_metadata", None)
-        # if not attn_metadata:
-        #     return True
+        attn_metadata = kwargs.get("attn_metadata", None)
+        if not attn_metadata:
+            return True
 
-        # if isinstance(attn_metadata, dict):
-        #     attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
 
-        # if attn_metadata.prefill:
-        #     return True
+        if attn_metadata.prefill:
+            return True
 
-        # return False
-        return True
+        return False

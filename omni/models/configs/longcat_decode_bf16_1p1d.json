@@ -1,13 +1,12 @@
 {
     "model_parallel_config": {
         "dense_mlp_tp_size": 4,
-        "o_proj_tp_size": 16,
-        "dp_size": 64
+        "o_proj_tp_size": 16
     },
     "operator_optimization_config": {
         "enable_kv_rmsnorm_rope_cache": true,
         "prefill_moe_all_to_all": true,
-        "moe_multi_stream_tune": true,
+        "moe_multi_stream_tune": false,
         "best_ep": false,
         "merge_qkv": false,
         "gmm_nz": false,
@@ -18,8 +17,9 @@
         "opt_w2_scale_cast": true,
         "control_accept_rate": -1,
         "use_prefetch": false,
-        "expert_gate_up_prefetch": 50,
+        "expert_gate_up_prefetch": 0,
         "expert_down_prefetch": 0,
-        "attn_prefetch": 96
+        "attn_prefetch": 0,
+        "inplace_add_rms_norm_fustion_pass": true
     }
 }
