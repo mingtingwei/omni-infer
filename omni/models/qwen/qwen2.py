@@ -572,10 +572,6 @@ class Qwen2Model(nn.Module):
             assert layer.mlp.intermediate_size == self.layers[layer_idx].mlp.intermediate_size
             assert layer.self_attn.attn.num_heads == self.layers[layer_idx].self_attn.attn.num_heads
             assert layer.self_attn.attn.head_size == self.layers[layer_idx].self_attn.attn.head_size
-        intermediate_states_up_mb0_buffer = torch.empty((split_sizes[0], intermediate_size), dtype=dtype, device=device)
-        intermediate_states_up_mb1_buffer = torch.empty((split_sizes[1], intermediate_size), dtype=dtype, device=device)
-        intermediate_states_down_mb0_buffer = torch.empty((split_sizes[0], hidden_size), dtype=dtype, device=device)
-        intermediate_states_down_mb1_buffer = torch.empty((split_sizes[1], hidden_size), dtype=dtype, device=device)
         attn_output_buffer = torch.empty((n_tokens, layer.self_attn.attn.num_heads,
                                           layer.self_attn.attn.head_size),
                                           dtype=dtype,
@@ -613,7 +609,7 @@ class Qwen2Model(nn.Module):
             hidden_states_mb0_handle.wait()
             with torch.npu.stream(self.micro_stream):
                 torch.npu.current_stream().wait_stream(main_stream)
-                qkv_mb0 = torch.addmm(layer.self_attn.qkv_proj.bias, hidden_states_mb0, layer.self_attn.qkv_proj.weight, out=qkv_mb0_buffer)
+                qkv_mb0 = layer.self_attn.qkv_proj.forward(hidden_states_mb0, is_prefill=True)[0]
             if hidden_states_mb1_handle is not None:
                 hidden_states_mb1_handle.wait()
             if isinstance(layer.input_layernorm, nn.Identity):
@@ -627,7 +623,7 @@ class Qwen2Model(nn.Module):
             q_mb0, k_mb0, v_mb0 = qkv_mb0.split([layer.self_attn.q_size, layer.self_attn.kv_size, layer.self_attn.kv_size], dim=-1)
             q_mb0, k_mb0 = layer.self_attn.rotary_emb.forward(None, q_mb0, k_mb0, cos_mb0, sin_mb0)
             hidden_states_mb1_handle.wait()
-            qkv_mb1 = torch.addmm(layer.self_attn.qkv_proj.bias, hidden_states_mb1, layer.self_attn.qkv_proj.weight, out=qkv_mb1_buffer)
+            qkv_mb1 = layer.self_attn.qkv_proj.forward(hidden_states_mb1, is_prefill=True)[0]
             q_mb1, k_mb1, v_mb1 = qkv_mb1.split([layer.self_attn.q_size, layer.self_attn.kv_size, layer.self_attn.kv_size], dim=-1)
             q_mb1, k_mb1 = layer.self_attn.rotary_emb.forward(None, q_mb1, k_mb1, cos_mb1, sin_mb1)
 
@@ -654,11 +650,11 @@ class Qwen2Model(nn.Module):
             hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().all_gather_async(hidden_states_mb0, dim=0, output_tensor=hidden_states_mb0_buffer)
 
             hidden_states_mb1_handle.wait()
-            hidden_states_mb1 = torch.matmul(hidden_states_mb1, layer.mlp.gate_up_proj.weight, out=intermediate_states_up_mb1_buffer)
+            hidden_states_mb1 = layer.mlp.gate_up_proj.forward(hidden_states_mb1, is_prefill=True)[0]
             hidden_states_mb0_handle.wait()
-            hidden_states_mb0 = torch.matmul(hidden_states_mb0, layer.mlp.gate_up_proj.weight, out=intermediate_states_up_mb0_buffer)
+            hidden_states_mb0 = layer.mlp.gate_up_proj.forward(hidden_states_mb0, is_prefill=True)[0]
             hidden_states_mb0 = layer.mlp.act_fn(hidden_states_mb0)
-            hidden_states_mb0 = torch.matmul(hidden_states_mb0, layer.mlp.down_proj.weight, out=intermediate_states_down_mb0_buffer)
+            hidden_states_mb0 = layer.mlp.down_proj.forward(hidden_states_mb0, reduce_type=None)[0]
             hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().reduce_scatter_async(hidden_states_mb0, output_tensor=hidden_states_mb0_scatter_buffer)
             hidden_states_mb1 = layer.mlp.act_fn(hidden_states_mb1)
             if layer_idx != self.end_layer - 1:
@@ -672,11 +668,11 @@ class Qwen2Model(nn.Module):
                     else:
                         hidden_states_mb0, residual_mb0 = next_layer.input_layernorm.forward_with_residual(hidden_states_mb0, residual_mb0)
                     hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().all_gather_async(hidden_states_mb0, dim=0, output_tensor=hidden_states_mb0_buffer)
-                hidden_states_mb1 = torch.matmul(hidden_states_mb1, layer.mlp.down_proj.weight, out=intermediate_states_down_mb1_buffer)
+                hidden_states_mb1 = layer.mlp.down_proj.forward(hidden_states_mb1, reduce_type=None)[0]
                 hidden_states_mb1, hidden_states_mb1_handle = get_tp_group().reduce_scatter_async(hidden_states_mb1, output_tensor=hidden_states_mb1_scatter_buffer)
                 torch.npu.current_stream().wait_stream(self.micro_stream)
             else:
-                hidden_states_mb1 = torch.matmul(hidden_states_mb1, layer.mlp.down_proj.weight, out=intermediate_states_down_mb1_buffer)
+                hidden_states_mb1 = layer.mlp.down_proj.forward(hidden_states_mb1, reduce_type=None)[0]
                 hidden_states_mb1, hidden_states_mb1_handle = get_tp_group().reduce_scatter_async(hidden_states_mb1, output_tensor=hidden_states_mb1_scatter_buffer)
         hidden_states_mb0, hidden_states_mb0_handle = get_tp_group().all_gather_async(hidden_states_mb0, dim=0, output_tensor=hidden_states_mb0_buffer)
         hidden_states_mb1, hidden_states_mb1_handle = get_tp_group().all_gather_async(hidden_states_mb1, dim=0, output_tensor=hidden_states_mb1_buffer)
