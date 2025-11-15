@@ -54,6 +54,9 @@ HCCL_BUFFSIZE=0
 HCCL_OP_EXPANSION_MODE=""
 NUM_SPECULATIVE_TOKENS=1
 LLM_WAITING_OUT=3600
+RAY_PORT=6379
+RAY_MIN_WORKER_PORT=10002
+RAY_MAX_WORKER_PORT=19999
 
 # Help information
 print_help() {
@@ -241,6 +244,15 @@ parse_long_option() {
             ;;
         --num-speculative-tokens)
             NUM_SPECULATIVE_TOKENS="$2"
+            ;;
+        --ray-port)
+            RAY_PORT="$2"
+            ;;
+        --ray-min-worker-port)
+            RAY_MIN_WORKER_PORT="$2"
+            ;;
+        --ray-max-worker-port)
+            RAY_MAX_WORKER_PORT="$2"
             ;;
         --help)
             print_help
@@ -446,14 +458,14 @@ if [ $(echo -n "$NODE_IP_LIST" | tr -cd ',' | wc -c) -ge 1 ]; then
   setup_multi_server_ray_backend_logging_config
   if [ "$IP" = "$HOST_IP" ]; then
     export RAY_USAGE_STATS_ENABLED=0
-    ray start --head
+    ray start --head --port=$RAY_PORT --min-worker-port=$RAY_MIN_WORKER_PORT --max-worker-port=$RAY_MAX_WORKER_PORT
     sleep 10s
     # install ray log rotate script
     start_ray_log_rotate
     common_operations
   else
     sleep 5s
-    command="ray start --address='$HOST_IP:6379' &> /dev/null"
+    command="ray start --address='$HOST_IP:$RAY_PORT' --min-worker-port=$RAY_MIN_WORKER_PORT --max-worker-port=$RAY_MAX_WORKER_PORT &> /dev/null"
     echo $command
     cost_time=0
     end_time=300
