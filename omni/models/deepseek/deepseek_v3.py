@@ -281,7 +281,7 @@ class DeepseekDecoderLayer(nn.Module):
 
         # Perform full hidden splitting to avoid OOM
         if (get_dp_group().world_size  > 1  or DeepseekDecoderLayer.is_split_hidden_states) and is_prefill \
-            and not model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+            and not model_extra_config.task_config.enable_attn_ffn_disaggregation:
             # During prefill, chunk is only triggered when an extremely large number of identical tokens is detected — to prevent GMM from OOM. 
             # Prefill performance may degrade slightly as a trade-off. 
             # For longer sequences (e.g., >256K or 512K tokens), consider adjusting SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER to optimize memory usage or avoid OOM.
@@ -459,7 +459,7 @@ class DeepseekV3Model(nn.Module):
 
     def is_ffn_die_in_afd(self) -> bool:
         flag = False
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
             ffn_dies = get_ep_group().world_size - model_extra_config.parall_config.attn_dies
             if get_ep_group().rank_in_group < ffn_dies:
                 flag = True
@@ -836,7 +836,7 @@ class DeepseekV3ForCausalLM(nn.Module):
                                       self.config.hidden_size,
                                       quant_config=self.quant_config,
 									  parallel_lmhead=(get_dp_group().world_size > 1 \
-                                        and not model_extra_config.parall_config.enable_attn_ffn_disaggregation))
+                                        and not model_extra_config.task_config.enable_attn_ffn_disaggregation))
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 logits_as_input=True)
         self.sampler = Sampler()
@@ -847,7 +847,7 @@ class DeepseekV3ForCausalLM(nn.Module):
         self.max_num_token = vllm_config.scheduler_config.max_num_batched_tokens
 
         is_ffn_die = False
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
             ffn_dies = get_ep_group().world_size - model_extra_config.parall_config.attn_dies
             if get_ep_group().rank_in_group < ffn_dies:
                 is_ffn_die = True

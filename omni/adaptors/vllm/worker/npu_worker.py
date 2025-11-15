@@ -181,6 +181,7 @@ class NPUWorker(WorkerBase):
         if self.vllm_config.additional_config is not None:
             enable_omni_placement = self.vllm_config.additional_config.get("enable_omni_placement", False)
             enable_pd_elastic_scaling = self.vllm_config.additional_config.get("enable_pd_elastic_scaling", False)
+            enable_attn_ffn_disaggregation = self.vllm_config.additional_config.get("enable_attn_ffn_disaggregation", False)
         else:
             enable_omni_placement = False
             enable_pd_elastic_scaling = False
@@ -202,7 +203,8 @@ class NPUWorker(WorkerBase):
             enable_omni_placement = enable_omni_placement,
             enable_pd_elastic_scaling = enable_pd_elastic_scaling,
             decode_gear_list=self.decode_gear_list,
-            enable_graph_mode=self.enable_torchair_graph_mode
+            enable_graph_mode=self.enable_torchair_graph_mode,
+            enable_attn_ffn_disaggregation=enable_attn_ffn_disaggregation
         )
     
     def _init_omni_placement_configs(self)-> None:

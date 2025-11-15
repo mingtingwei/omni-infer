@@ -98,7 +98,7 @@ class ReplicatedDeepseekMLP(nn.Module):
         self.quant_symbol = True if quant_config else False
         self.tp_size = 1
         self.quant_mode = DYNAMIC_QUANT_MODE if quant_config else UNQUANT_MODE
-        if model_extra_config.parall_config.redundancy_shared_expert_num > 0 and model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
+        if model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             # Adapt the dispatch combine operator
             self.ep_size = get_ep_group().world_size
             self.global_rank = get_world_group().rank_in_group
@@ -229,16 +229,28 @@ class DeepseekMoE(nn.Module):
         self.attn_prefetch = None
         self.is_attn_die = False
 
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
             ffn_dies = get_ep_group().world_size - model_extra_config.parall_config.attn_dies
             self.is_attn_die = False if get_ep_group().rank_in_group < ffn_dies else True
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation and self.is_attn_die:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation and self.is_attn_die:
             self.fake_experts = FakeMoe(
                 num_experts=self.n_routed_experts,
                 top_k=self.top_k,
                 hidden_size=config.hidden_size,
                 quant_config=quant_config
             )
+            if self.redundancy_shared_expert_num <= 0:
+                intermediate_size = config.moe_intermediate_size * self.n_shared_experts
+                self.shared_experts = ReplicatedDeepseekMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
+                self.gate_up_prefetch_size = model_extra_config.operator_opt_config.shared_expert_gate_up_prefetch * 1024 * 1024
+                self.down_prefetch_size = model_extra_config.operator_opt_config.shared_expert_down_prefetch * 1024 * 1024
         else:
             if self.global_rank >= self.redundancy_shared_expert_num:
                 moe_prefix = f"{prefix}.experts"
@@ -272,7 +284,8 @@ class DeepseekMoE(nn.Module):
                     first_k_dense_replace=self.first_k_dense_replace
                 )
             if self.n_shared_experts is not None and \
-                (self.redundancy_shared_expert_num == 0 or self.global_rank < self.redundancy_shared_expert_num):
+                (self.redundancy_shared_expert_num == 0 or self.global_rank < self.redundancy_shared_expert_num) and \
+                (not model_extra_config.task_config.enable_attn_ffn_disaggregation or self.redundancy_shared_expert_num > 0):
                 intermediate_size = config.moe_intermediate_size * self.n_shared_experts
                 # omni placement for redundancy shared experts
                 if self.redundancy_shared_expert_num > 0 and model_extra_config.task_config.enable_omni_placement:
@@ -293,6 +306,8 @@ class DeepseekMoE(nn.Module):
                     reduce_results=False,
                     prefix=f"{prefix}.shared_experts",
                 )
+                self.gate_up_prefetch_size = model_extra_config.operator_opt_config.shared_expert_gate_up_prefetch * 1024 * 1024
+                self.down_prefetch_size = model_extra_config.operator_opt_config.shared_expert_down_prefetch * 1024 * 1024
             
             if model_extra_config.task_config.enable_omni_placement:
                 self.n_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
@@ -325,8 +340,8 @@ class DeepseekMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
                     (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
-            return self.forward_separate_expert_decode(hidden_states, residual, attn_metadata)
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
+            return self.forward_afd_expert_decode(hidden_states, residual, attn_metadata, next_attention_weights)
         elif self.redundancy_shared_expert_num > 0:
             if is_prefill:
                 return self.forward_separate_expert_prefill(hidden_states, residual, attn_metadata)
@@ -738,23 +753,68 @@ class DeepseekMoE(nn.Module):
                                                                           is_prefill=False)
                 max_num_deployed_expert_per_rank = self.planner.get_max_num_deployed_expert_per_rank()
                 max_num_deployed_expert = max_num_deployed_expert_per_rank * (self.ep_size - self.redundancy_shared_expert_num)
-        
-        if model_extra_config.operator_opt_config.best_ep and hasattr(attn_metadata, "decode") and attn_metadata.decode.best_topk is not None:
+        if model_extra_config.operator_opt_config.best_ep and attn_metadata.decode.best_topk is not None:
             fake_topk_ids = attn_metadata.decode.best_topk
             topk_ids = tng.scope.npu_wait_tensor(fake_topk_ids, topk_ids)
-        
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
-            ep_world_size = get_ep_group().world_size
-            ffn_dies = ep_world_size - model_extra_config.parall_config.attn_dies
-            max_num_deployed_expert = int((self.n_routed_experts / (ffn_dies - self.redundancy_shared_expert_num))) * (ep_world_size - self.redundancy_shared_expert_num)
-
-        hidden_states = fused_experts_moe_dispatch_combine(self.shared_experts or self.experts or self.fake_experts,
+        hidden_states = fused_experts_moe_dispatch_combine(self.shared_experts or self.experts,
                                                                 hidden_states,
                                                                 topk_weights,
                                                                 topk_ids,
                                                                 max_num_deployed_expert=max_num_deployed_expert,
                                                                 is_prefill=False,
                                                                 is_route_expert=self.experts is not None)
+        return hidden_states, residual
+
+    def forward_afd_expert_decode(self,
+                                  hidden_states: torch.Tensor,
+                                  residual: torch.Tensor,
+                                  attn_metadata: AttentionMetadata,
+                                  next_attention_weights: Optional[dict]=None) -> torch.Tensor:
+        router_logits, _ = self.gate.forward(hidden_states.float())
+        
+        hidden_states_3d = hidden_states.unsqueeze(1)
+        hidden_states = hidden_states_3d.squeeze(1)
+
+        if self.experts is not None:
+            if self.w13_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w13_weight, hidden_states, self.w13_prefetch_size)
+            if self.w2_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w2_weight, hidden_states, self.w2_prefetch_size)
+        if self.shared_experts is not None:
+            if self.gate_up_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.shared_experts.gate_up_proj.weight, hidden_states, self.gate_up_prefetch_size)
+            if self.down_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.shared_experts.down_proj.weight, hidden_states, self.down_prefetch_size)
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(hidden_states, router_logits,
+                                                            self.top_k, self.use_grouped_topk,
+                                                            self.renormalize,
+                                                            self.topk_group, self.num_expert_group,
+                                                            self.custom_routing_function,
+                                                            self.scoring_func,
+                                                            self.gate.e_score_correction_bias if self.gate.e_score_correction_bias is not None else self.gate.expert_bias,
+                                                            self.routed_scaling_factor,
+                                                            layer=self.experts)
+        
+        if model_extra_config.operator_opt_config.best_ep and hasattr(attn_metadata, "decode") and attn_metadata.decode.best_topk is not None:
+            fake_topk_ids = attn_metadata.decode.best_topk
+            topk_ids = tng.scope.npu_wait_tensor(fake_topk_ids, topk_ids)
+        
+        max_num_deployed_expert=self.n_routed_experts
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
+            ep_world_size = get_ep_group().world_size
+            ffn_dies = ep_world_size - model_extra_config.parall_config.attn_dies
+            max_num_deployed_expert = int((self.n_routed_experts // (ffn_dies - self.redundancy_shared_expert_num))) * (ep_world_size - self.redundancy_shared_expert_num)
+
+        hidden_states = fused_experts_moe_dispatch_combine(self.experts or self.shared_experts or self.fake_experts,
+                                                                hidden_states,
+                                                                topk_weights,
+                                                                topk_ids,
+                                                                max_num_deployed_expert=max_num_deployed_expert,
+                                                                is_prefill=False,
+                                                                is_route_expert=self.experts is not None,
+                                                                next_attention_weights=next_attention_weights,
+                                                                quant_symbol=self.quant_symbol)
         return hidden_states, residual
 
     def forward_separate_expert_prefill(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata) -> torch.Tensor:

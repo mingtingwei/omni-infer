@@ -212,7 +212,7 @@ class DeepseekMultiTokenPredictor(nn.Module):
         self.num_mtp_layers = self.config.num_nextn_predict_layers
         self.ignore_share_weight = True # TODO get from config
         kwargs = {}
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation:
             if os.getenv("ASCEND_PLATFORM", "A3") == "A2":
                 raise NotImplementedError("Attention FFN disaggregation on A2 is not supported")
             else:

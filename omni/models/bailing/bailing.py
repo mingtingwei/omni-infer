@@ -336,7 +336,7 @@ class BaiLingDecoderLayer(nn.Module):
 
         # Perform full hidden splitting to avoid OOM
         if get_dp_group().world_size > 1 and is_prefill \
-            and not model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+            and not model_extra_config.task_config.enable_attn_ffn_disaggregation:
             # During prefill, chunk is only triggered when an extremely large number of identical tokens is detected — to prevent GMM from OOM. 
             # Prefill performance may degrade slightly as a trade-off. 
             # For longer sequences (e.g., >256K or 512K tokens), consider adjusting SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER to optimize memory usage or avoid OOM.

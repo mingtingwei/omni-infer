@@ -193,7 +193,7 @@ class FusedMoE(torch.nn.Module):
         self.expert_mapping = kwargs.get("expert_mapping", None)
         ep_size = get_ep_group().world_size
         if ep_size > 1:
-            if model_extra_config.parall_config.enable_attn_ffn_disaggregation:
+            if model_extra_config.task_config.enable_attn_ffn_disaggregation:
                 ep_size = ep_size - model_extra_config.parall_config.attn_dies
             ep_size = ep_size - model_extra_config.parall_config.redundancy_shared_expert_num
             num_experts = int(num_experts / ep_size)
@@ -547,7 +547,7 @@ class FakeMoe():
         self.num_experts = num_experts
         self.top_k = top_k
         
-        if model.extra_config.operator_opt_config.decode_moe_dispatch_combine:
+        if model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             # 适配dispatch combine算子
             self.ep_size = get_ep_group().world_size
             self.global_rank = get_world_group().rank_in_group

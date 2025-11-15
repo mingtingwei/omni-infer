@@ -909,6 +909,8 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
                                             max_num_deployed_expert: int,
                                             is_prefill: bool,
                                             is_route_expert: bool,
+                                            next_attention_weights: Optional[dict]=None,
+                                            quant_symbol: bool=True
                                             ):
     expert_parallel_size = get_ep_group().world_size
 
@@ -938,9 +940,9 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
         all_to_all_group_size = world_size // experts_tp_size
 
         ffn_dies = world_size - model_extra_config.parall_config.attn_dies \
-            if model_extra_config.parall_config.enable_attn_ffn_disaggregation else world_size
+            if model_extra_config.task_config.enable_attn_ffn_disaggregation else world_size
         
-        if model_extra_config.parall_config.enable_attn_ffn_disaggregation and global_rank < ffn_dies:
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation and global_rank < ffn_dies:
             mc2_mask = torch.zeros([hidden_states.shape[0]], dtype=torch.bool, device=hidden_states.device)
 
         kwargs.update({
@@ -978,7 +980,9 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
                             :len(layer.w13_weight)]  # Adapt to redundant and non-redundant layers, #ENABLE_OMNI_PLANNER
                 hidden_states_experts = moe_expert_quant_forward(layer, expand_x, group_list, act_dtype, dynamic_scale)
         else:
-            hidden_states = torch.zeros_like(expand_x).to(torch.bfloat16)
+            if shared_expert_rank_num <= 0:
+                hidden_states_shared_experts = layer(hidden_states)
+            hidden_states_experts = torch.zeros_like(expand_x).to(torch.bfloat16)
             ep_recv_counts = torch.zeros_like(ep_recv_counts)
 
         # moeCombine
@@ -1006,7 +1010,18 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
         }
         kwargs.update(stage3_kwargs)
 
+        if model_extra_config.operator_opt_config.attn_prefetch > 0 and next_attention_weights is not None and next_attention_weights['q_a_proj_weight'] is not None:
+            attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
+            torch_npu.npu_prefetch(next_attention_weights['q_a_proj_weight'], hidden_states_experts, attn_prefetch_size)
+            if quant_symbol:
+                torch_npu.npu_prefetch(next_attention_weights['kv_a_proj_with_mqa_weight'], hidden_states_experts, attn_prefetch_size)
+            torch_npu.npu_prefetch(next_attention_weights['q_b_proj_weight'], hidden_states_experts, attn_prefetch_size)
+            torch_npu.npu_prefetch(next_attention_weights['W_UK'], hidden_states_experts, attn_prefetch_size)
+
         hidden_states_route = torch_npu.npu_moe_distribute_combine_v2(**kwargs)
+
+        if shared_expert_rank_num <= 0 and global_rank >= ffn_dies:
+            hidden_states_route = hidden_states_route + hidden_states_shared_experts
     else:
         raise ValueError("ep number should be greater than 1.")
     return hidden_states_route

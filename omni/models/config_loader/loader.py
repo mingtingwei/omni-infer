@@ -45,6 +45,7 @@ class TaskConfig:
     decode_gear_list: list[int] = field(default_factory = lambda: [1])
     enable_chunked_prefill: bool = False
     enable_graph_mode: bool = True
+    enable_attn_ffn_disaggregation: bool = False
 
 
 @dataclass
@@ -53,7 +54,6 @@ class ModelParallelConfig:
     o_proj_tp_size: int = 1
     attn_sp_size: int = 1
     redundancy_shared_expert_num: int = 0
-    enable_attn_ffn_disaggregation: bool = False
     attn_dies: int = 0
 
  
@@ -82,6 +82,8 @@ class ModelOperatorOptConfig:
     expert_gate_up_prefetch: int = 50 # 默认预取大小为 50Mb；如果是权重是BF16型，设置为 30Mb
     expert_down_prefetch: int = 28 # 当权重是w8a8且ep_size > 64 时，默认预取大小为 28Mb，否则为0
     attn_prefetch: int = 96 # 默认预取大小为 96Mb
+    shared_expert_gate_up_prefetch: int = 28
+    shared_expert_down_prefetch: int = 14
 
     enable_round_pipeline_comm: bool = False
     enable_pipeline_comm: bool = False
@@ -248,7 +250,7 @@ def _load_best_practice_config():
     config_map = {
         (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
         (c["prefill_config_file"], c["decode_config_file"])
-        for c in configs_data if c.get("pd_disaggregation") is not None
+        for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is None
     }
 
     node_elasticly_config_map = {
@@ -257,14 +259,24 @@ def _load_best_practice_config():
         for c in configs_data if c.get("enable_pd_elastic_scaling") is not None
     }
 
-    return config_map, node_elasticly_config_map
+    afd_config_map = {
+        (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
+        (c["prefill_config_file"], c["decode_config_file"])
+        for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is not None
+    }
+
+    return config_map, node_elasticly_config_map, afd_config_map
 
 
 
 def _get_best_practice_config(task_config):
-    config_map, node_elasticly_config_map = _load_best_practice_config()
+    config_map, node_elasticly_config_map, afd_config_map = _load_best_practice_config()
 
-    if not task_config.enable_pd_elastic_scaling:
+    if task_config.enable_attn_ffn_disaggregation:
+        best_practice_model_config_path = afd_config_map.get((task_config.model_name,
+            task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
+            task_config.prefill_node_num,task_config.decode_node_num), None)
+    elif not task_config.enable_pd_elastic_scaling:
         best_practice_model_config_path = config_map.get((task_config.model_name,
             task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
             task_config.prefill_node_num,task_config.decode_node_num), None)
