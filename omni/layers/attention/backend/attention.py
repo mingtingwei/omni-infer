@@ -123,6 +123,7 @@ class AscendMetadata:
     sin: Optional[torch.Tensor] = None
     is_pd_seperate_d: bool = False
     kv_index: Optional[torch.Tensor] = None
+    mc2_mask: Optional[torch.Tensor] = None
 
     @staticmethod
     def advance_step(metadata, positions, block_size, pad_mask, model_layer):
@@ -145,6 +146,10 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         self.kv_cache_spec = kv_cache_spec
         self.block_size = runner.block_size
         self.block_table = block_table
+        self.decode_gear_list = model_extra_config.task_config.decode_gear_list
+        self.mc2_mask = None
+        if self.decode_gear_list:
+            self.mc2_mask = torch.zeros(self.decode_gear_list[-1], dtype=torch.bool, device=current_platform.device_type)
 
         self.decode_num_tokens = torch.zeros(
             runner.max_num_reqs, dtype=torch.int32, device=runner.device
@@ -159,6 +164,14 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                 current_layers_names = kv_cache_group.layer_names
         self.is_spec_metadata = hasattr(self.runner, "drafter") \
             and sorted(self.runner.drafter.attn_layer_names) == sorted(current_layers_names)
+
+    def generate_activate_mask(self, actual_seqs_num, batch_size):
+        if len(self.decode_gear_list) > 1:
+            gear = next((g for g in self.decode_gear_list if g >= batch_size), self.decode_gear_list[-1])
+            self.mc2_mask = torch.zeros(gear, dtype=torch.bool, device=current_platform.device_type)
+        else:
+            self.mc2_mask.zero_()
+        self.mc2_mask[:actual_seqs_num].fill_(True)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -286,6 +299,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             input_positions = torch.cat([input_positions, padding_0])
 
         if self.runner.attn_state == AscendAttentionState.DecodeOnly:
+            self.generate_activate_mask(num_actual_tokens, num_actual_tokens + graph_pad_size)
             seq_lens = (input_positions + 1).to(seq_lens.dtype)
             query_lens = torch.ones_like(seq_lens)
             block_table = block_table[:self._num_decodes, ...]
@@ -372,12 +386,14 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                                        cos=cos,
                                        sin=sin,
                                        is_pd_seperate_d=is_pd_seperate_d,
-                                       kv_index=kv_index)
+                                       kv_index=kv_index,
+                                       mc2_mask=self.mc2_mask)
         return attn_metadata
 
     def build_dummy(self, num_tokens: int, max_pad_size: int = -1) -> AscendMetadata:
         if max_pad_size == -1:
             max_pad_size = self.runner.max_batch_size
+        self.generate_activate_mask(0, max_pad_size)
         slot_mapping = torch.zeros(max_pad_size,
                                    dtype=self.runner.slot_mapping_cpu.dtype,
                                    device=self.runner.device)
@@ -430,7 +446,8 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             attn_state=self.runner.attn_state,
             cos=cos,
             sin=sin,
-            is_pd_seperate_d=is_pd_seperate_d
+            is_pd_seperate_d=is_pd_seperate_d,
+            mc2_mask=self.mc2_mask
         )
 
     def mark_static_for_attn_metadata(self, attn_metadata):
@@ -446,6 +463,8 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                 torch._dynamo.mark_static(attn_metadata.cos)
             if attn_metadata.sin is not None:
                 torch._dynamo.mark_static(attn_metadata.sin)
+            if attn_metadata.mc2_mask is not None:
+                torch._dynamo.mark_static(attn_metadata.mc2_mask)
 
 
 class AscendAttentionBackendImpl(AttentionImpl):

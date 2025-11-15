@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.forward_context import ForwardContext, get_forward_context
 
 from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
@@ -187,12 +188,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             tokens_per_expert_group.view(ep_size, -1)
         )
         group_list = tokens_per_local_expert.to(torch.int64)
-        if model_extra_config.task_config.enable_omni_placement:
-            layer.planner.record_activation(
-                layer.moe_layer_idx,
-                group_list,
-                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
-            )
 
         gate_up_proj = torch_npu.npu_grouped_matmul(
             [hidden_states_sorted_by_experts],
@@ -228,6 +223,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             export_for_source_row=None,
             drop_pad_mode=2
         )
+
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                group_list,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+            )
+
         return new_x
 
     def alltoall_prefill_microbatch(self, layer: torch.nn.Module,
@@ -286,6 +289,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             )
         topk_weights = topk_weights.to(x.dtype)
         topk_ids = topk_ids.int()
+        topk_ids = layer.apply_expert_load_balance(
+            topk_ids=topk_ids,
+            best_topk_ids=None
+        )
 
         # 需保证chunk_size不为0， 即num_tokens > 1,当前入口处已有判断拦截
         hidden_states_micro[0] = x[:chunk_size, :]
@@ -513,18 +520,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                 expert_shard_type=0,
                 shared_expert_rank_num=0,
                 moe_expert_num=global_num_experts,
+                x_active_mask=layer.mc2_mask,
                 scales=None,
                 quant_mode=0,  # 0: 非量化; 1: 静态量化; 2: 动态量化
                 global_bs=0
             )
             group_list = expert_token_nums.to(torch.int64)
-            if model_extra_config.task_config.enable_omni_placement:
-                layer.planner.record_activation(
-                    layer.moe_layer_idx,
-                    group_list,
-                    support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
-                )
-
             gate_up_proj = torch_npu.npu_grouped_matmul(
                 [expand_x],
                 [layer.w13_weight],
@@ -567,7 +568,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                 expert_shard_type=0,
                 shared_expert_rank_num=0,
                 moe_expert_num=global_num_experts,
+                x_active_mask=layer.mc2_mask,
                 global_bs=0,
+            )
+        
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                group_list,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
             )
 
         return output_combine
@@ -672,13 +681,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             quant_mode=-1,
             row_idx_type=1
         )
-        
-        if model_extra_config.task_config.enable_omni_placement:
-            layer.planner.record_activation(
-                layer.moe_layer_idx,
-                expert_tokens,
-                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
-            )
 
         gate_up_proj = torch_npu.npu_grouped_matmul(
             [sorted_tokens],
@@ -733,6 +735,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             y = y_output
         else:
             y = get_ep_group().reduce_scatter(y)
+
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                expert_tokens,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+            )
 
         return y
 
@@ -903,15 +912,15 @@ class FusedMoE(torch.nn.Module):
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
         
-        num_of_redundant_experts = 0
+        self.num_of_redundant_experts = 0
         if model_extra_config.task_config.enable_omni_placement:
-            num_of_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
-                                                                                 num_expert_per_device_origin=self.local_num_experts,
-                                                                                 rank_device=get_ep_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num)
+            self.num_of_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
+                                                                                      num_expert_per_device_origin=self.local_num_experts,
+                                                                                      rank_device=get_world_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num)
         
 
         moe_quant_params = {
-            "num_experts": self.local_num_experts + num_of_redundant_experts,
+            "num_experts": self.local_num_experts + self.num_of_redundant_experts,
             "hidden_size": hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
@@ -920,6 +929,8 @@ class FusedMoE(torch.nn.Module):
         }
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        self.mc2_mask = None
 
     @property
     def tp_size(self):
@@ -1195,6 +1206,14 @@ class FusedMoE(torch.nn.Module):
 
         assert self.quant_method is not None
 
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[next(iter(attn_metadata))]
+        if attn_metadata is not None and attn_metadata.mc2_mask is not None:
+            mc2_mask_slice_size = hidden_states.shape[0]
+            mc2_mask_slice_id = get_tp_group().rank_in_group
+            self.mc2_mask = attn_metadata.mc2_mask[mc2_mask_slice_id * mc2_mask_slice_size : (mc2_mask_slice_id + 1) * mc2_mask_slice_size]
+
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
@@ -1202,7 +1221,7 @@ class FusedMoE(torch.nn.Module):
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
+            global_num_experts=self.global_num_experts + get_world_group().world_size * self.num_of_redundant_experts,
             expert_range=self.expert_range,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
