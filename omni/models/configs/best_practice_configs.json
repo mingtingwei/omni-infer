@@ -438,5 +438,15 @@
       "pd_disaggregation": false,
       "prefill_config_file": "qwen3_32b_bf16_a3_hybrid.json",
       "decode_config_file": "qwen3_32b_bf16_a3_hybrid.json"
+   },
+   {
+      "model": "deepseek_vl_v2",
+      "hardware": "A2",
+      "precision": "bf16",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": false,
+      "prefill_config_file": "ds_vl2_a2_bf16.json",
+      "decode_config_file": "ds_vl2_a2_bf16.json"
    }
 ]

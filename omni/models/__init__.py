@@ -42,6 +42,14 @@ def register_model():
         "omni.models.deepseek.deepseek_mtp:DeepseekV3MTPTres")
 
     ModelRegistry.register_model(
+        "DeepseekForCausalLM",
+        "omni.models.deepseek.deepseek:DeepseekForCausalLM")
+    
+    ModelRegistry.register_model(
+        "DeepseekOCRForCausalLM",
+        "omni.models.deepseek.deepseek_ocr:DeepseekOCRForCausalLM")
+
+    ModelRegistry.register_model(
             "LongcatFlashForCausalLM",
             "omni.models.longcat.longcat_flash:LongcatFlashForCausalLM")
 

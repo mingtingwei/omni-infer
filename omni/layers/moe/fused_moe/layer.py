@@ -31,9 +31,10 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
     LAST_SEQ_LEN = None
     BEST_EXPERT_TOKENS = None
 
-    def __init__(self):
+    def __init__(self, max_num_deployed_expert=256):
         super().__init__(None)
         self.warm_up = True
+        self.max_num_deployed_expert = max_num_deployed_expert
 
     def apply(
             self,
@@ -62,17 +63,20 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
         _, h = x.shape
         hidden_states = x.view(-1, h)
         topk_weight = topk_weight.to(x.dtype)
+
+        max_num_deployed_expert = self.max_num_deployed_expert
+
         if self.warm_up:
             # This is forced balancing, the goal is to reduce peak memory
             global_rank = get_world_group().rank_in_group
-            step = hidden_states.shape[0] * 8  # topk 8 expert
+            step = hidden_states.shape[0] * topk_ids.shape[1]
             cur_topk_list = [
-                (i + global_rank // 1) % 256 for i in range(
+                (i + global_rank // 1) % max_num_deployed_expert for i in range(
                     global_rank // 1 * step, (global_rank // 1 + 1) * step)]
             topk_ids = torch.Tensor(cur_topk_list).int().view(hidden_states.shape[0], -1).npu()
         else:
             topk_ids = topk_ids.int()
-        max_num_deployed_expert = 256
+
         if model_extra_config.task_config.enable_omni_placement and layer.moe_layer_idx < 58:
             max_num_deployed_expert = layer.planner.get_max_num_deployed_expert_per_rank() * get_world_group().world_size
         expert_range = [0, max_num_deployed_expert]
@@ -219,7 +223,7 @@ class FusedMoE(torch.nn.Module):
         self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod())
+                UnquantizedFusedMoEMethod(max_num_deployed_expert=self.num_experts))
             self.quant_mode = UNQUANT_MODE
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
@@ -339,7 +343,7 @@ class FusedMoE(torch.nn.Module):
                     group_count=num_expert_group,  # fix 8
                     group_select_mode=1,  # 0: maximum in group; 1: topk2.sum(fix)
                     renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-                    norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+                    norm_type=(0 if scoring_func == "softmax" else 1),  # 0: softmax; 1: sigmoid(fix)
                     routed_scaling_factor=routed_scaling_factor,
                     eps=float(1e-20))
             row_idx = torch.arange(topk_ids.numel(), device=current_platform.device_type, dtype=torch.int32).view(
