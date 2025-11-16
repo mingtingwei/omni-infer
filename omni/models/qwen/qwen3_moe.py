@@ -500,6 +500,15 @@ class Qwen3MoeModel(nn.Module):
             ### The weight_scale often has shape (n,1)
             if 'weight_scale' in name:
                 loaded_weight = loaded_weight.view(-1)
+
+            num_mtp_layers = getattr(self.config, "num_nextn_predict_layers", 0)
+
+            if self.config.architectures[0] == "Qwen3MoeForCausalLM" and num_mtp_layers > 0:
+                mtp_prefix = [f"layers.{self.config.num_hidden_layers+layer_idx}" for layer_idx in range(num_mtp_layers)]
+
+                if name.startswith(tuple(mtp_prefix)):
+                    continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
 
                 if weight_name not in name:
@@ -526,6 +535,8 @@ class Qwen3MoeModel(nn.Module):
 
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
@@ -537,6 +548,8 @@ class Qwen3MoeModel(nn.Module):
                 else:
 
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
