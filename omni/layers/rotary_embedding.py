@@ -181,11 +181,14 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
         return q_embed.flatten(-2), k_embed.flatten(-2)
 
     # use torch_npu fused ops
-    def _forward_fused_ops(self, position_ids, query, key, layer_name: Optional[str] = None):
+    def _forward_fused_ops(self, position_ids, query, key, cos=None, sin=None):
         # adapt to TND format
-        cos = torch.index_select(self.cos, dim=0, index=position_ids.view(-1)).unsqueeze(1)
-        sin = torch.index_select(self.sin, dim=0, index=position_ids.view(-1)).unsqueeze(1)
-
+        if cos is None or sin is None:
+            cos = torch.index_select(self.cos, dim=0, index=position_ids.view(-1)).unsqueeze(1)
+            sin = torch.index_select(self.sin, dim=0, index=position_ids.view(-1)).unsqueeze(1)
+        else:
+            cos = cos.squeeze(2)
+            sin = sin.squeeze(2)
         # head_dim use class variable, repair head_dim convert to symbol in dynamo
         query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
         key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
@@ -200,7 +203,7 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
         return q_embed_flat, k_embed_flat
 
 
-    def forward(self, position_ids, query, key, layer_name: Optional[str] = None):
+    def forward(self, position_ids, query, key, cos=None, sin=None):
         # adapt chatglm : dim = head_size / 2
         if self.rotary_dim < self.head_size:
             q_embed, k_embed = self._forward_native(position_ids, query, key)
@@ -208,7 +211,7 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
             # use ascend_ops to deal with torch_npu.npu_apply_rotary_pos_emb last dim is not 128 bug
             q_embed, k_embed = self._forward_ascend_ops_and_small_ops(position_ids, query, key)
         else:
-            q_embed, k_embed = self._forward_fused_ops(position_ids, query, key, layer_name)
+            q_embed, k_embed = self._forward_fused_ops(position_ids, query, key, cos, sin)
         return q_embed, k_embed
 
 

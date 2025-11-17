@@ -73,7 +73,7 @@ from omni.layers.linear import (
     ColumnParallelFlashCommLinear,
     MergedColumnParallelFlashCommLinear,
 )
-from omni.layers.rotary_embedding import get_rope, QwenRotaryEmbedding, QwenMRotaryEmbedding
+from omni.layers.rotary_embedding import get_rope, QwenRotaryEmbedding, QwenMRotaryEmbedding, YaRNScalingRotaryEmbedding
 from omni.layers.fused_mlp import FusedMLP, UnquantizedFusedMLPMethod, FusedMLPMethodBase
 from omni.layers.attention.backend.attention import AscendAttentionState
 
@@ -211,7 +211,10 @@ class Qwen2Attention(nn.Module):
 
         if rope_scaling is None:
             rope_scaling = {'factor': '0'}
-        rope_scaling["rope_type"] = 'qwen'
+
+        if rope_scaling.get('rope_type') != 'yarn':
+            rope_scaling['rope_type'] = 'qwen'
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -448,12 +451,6 @@ class Qwen2Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        base = getattr(config, "rope_theta", 1000000)
-        rotary_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        max_len = config.max_position_embeddings
-        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(base, rotary_dim, max_len)
-        self.register_buffer("full_cos", full_cos, persistent=False)
-        self.register_buffer("full_sin", full_sin, persistent=False)
         self.kv_stream = torch.npu.Stream()
         self.micro_stream = torch.npu.Stream()
         # Use the provided decoder layer type or default to Qwen2DecoderLayer
@@ -504,9 +501,16 @@ class Qwen2Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         cos, sin = None, None
-        if type(self.layers[0].self_attn.rotary_emb) is not QwenMRotaryEmbedding:
-            cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-            sin = torch.index_select(self.full_sin, dim=0, index=positions)
+        if type(self.layers[0].self_attn.rotary_emb) is QwenMRotaryEmbedding:
+            hidden_states, residual, aux_hidden_states = self.forward_layers(positions, hidden_states, residual, kv_caches, cos, sin)
+        else:
+            if attn_metadata is None :
+                cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+            else :
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[next(iter(attn_metadata))]
+                cos = attn_metadata.cos
+                sin = attn_metadata.sin
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
                 n_tokens = hidden_states.shape[0]
@@ -516,8 +520,6 @@ class Qwen2Model(nn.Module):
                     hidden_states, residual, aux_hidden_states = self.forward_layers_prefill_microbatch_tp8_all_to_all(positions, hidden_states, residual, kv_caches, cos, sin)
             else:
                 hidden_states, residual, aux_hidden_states = self.forward_layers(positions, hidden_states, residual, kv_caches, cos, sin)
-        else:
-            hidden_states, residual, aux_hidden_states = self.forward_layers(positions, hidden_states, residual, kv_caches, cos, sin)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
