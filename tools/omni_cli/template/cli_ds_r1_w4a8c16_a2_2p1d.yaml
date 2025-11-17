@@ -28,6 +28,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
@@ -159,6 +163,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
@@ -290,6 +298,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
@@ -421,6 +433,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
@@ -554,6 +570,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../tests/test_config/ep_ds_r1_w4a8c16_a2_2p1d_p.npy"
@@ -685,6 +705,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../tests/test_config/ep_ds_r1_w4a8c16_a2_2p1d_p.npy"

@@ -32,6 +32,10 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
@@ -163,6 +167,10 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
@@ -293,6 +301,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: false
             enable-mtp: ''
             base-api-port: $API_PORT
@@ -417,6 +429,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: false
             enable-mtp: ''
             base-api-port: $API_PORT
@@ -541,6 +557,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: false
             enable-mtp: ''
             base-api-port: $API_PORT
@@ -665,6 +685,10 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
               enable_omni_placement: false
             enable-mtp: ''
             base-api-port: $API_PORT
