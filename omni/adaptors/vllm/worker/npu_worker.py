@@ -187,6 +187,7 @@ class NPUWorker(WorkerBase):
         else:
             enable_omni_placement = False
             enable_pd_elastic_scaling = False
+            enable_attn_ffn_disaggregation = False
         max_num_reqs = self.scheduler_config.max_num_seqs
         self.decode_gear_list = self.vllm_config.npu_compilation_config.decode_gear_list
         if self.decode_gear_list is None:
