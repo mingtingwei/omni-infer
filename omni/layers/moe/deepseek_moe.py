@@ -346,7 +346,7 @@ class DeepseekMoE(nn.Module):
             if is_prefill:
                 return self.forward_separate_expert_prefill(hidden_states, residual, attn_metadata)
             else:
-                return self.forward_separate_expert_decode(hidden_states, residual, attn_metadata)
+                return self.forward_separate_expert_decode(hidden_states, residual, attn_metadata, next_attention_weights)
         else:
             if not self.is_init_gate:
                 self.gate.weight.data = torch_npu.npu_format_cast(self.gate.weight.data, 2)
@@ -726,12 +726,25 @@ class DeepseekMoE(nn.Module):
     def forward_separate_expert_decode(self,
                                        hidden_states: torch.Tensor,
                                        residual: torch.Tensor,
-                                       attn_metadata: AttentionMetadata) -> torch.Tensor:
+                                       attn_metadata: AttentionMetadata,
+                                       next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         router_logits, _ = self.gate.forward(hidden_states.float())
         
         # Here, we do a 2D to 3D conversion, and then convert back to 2D to trigger the fusion rule, fusing add rms and cast into AddRmsNormCast.
         hidden_states_3d = hidden_states.unsqueeze(1)
         hidden_states = hidden_states_3d.squeeze(1)
+
+        # expert weight prefetch
+        if self.experts is not None:
+            if self.w13_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w13_weight, router_logits, self.w13_prefetch_size)
+            if self.w2_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w2_weight, router_logits, self.w2_prefetch_size)
+        if self.shared_experts is not None:
+            if self.gate_up_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.shared_experts.gate_up_proj.weight, router_logits, self.gate_up_prefetch_size)
+            if self.down_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.shared_experts.down_proj.weight, router_logits, self.down_prefetch_size)
 
         topk_weights, topk_ids, _ = FusedMoE.select_experts(hidden_states, router_logits,
                                                             self.top_k, self.use_grouped_topk,
@@ -763,7 +776,9 @@ class DeepseekMoE(nn.Module):
                                                                 topk_ids,
                                                                 max_num_deployed_expert=max_num_deployed_expert,
                                                                 is_prefill=False,
-                                                                is_route_expert=self.experts is not None)
+                                                                is_route_expert=self.experts is not None,
+                                                                next_attention_weights=next_attention_weights,
+                                                                quant_symbol=self.quant_symbol)
         return hidden_states, residual
 
     def forward_afd_expert_decode(self,
