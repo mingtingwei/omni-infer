@@ -202,8 +202,7 @@ class W8A8DynamicFusedMLPMethod(FusedMLPMethodBase):
                     with torchair.ops.NpuStreamSwitch('scale'):  # CANN包多流接口
                         x_scale = get_tp_group().all_to_all(x_scale, transpose=False)
                 x = get_tp_group().all_to_all(x)
-        use_super_kernel = int(os.environ.get('USE_SUPER_KERNEL',"1"))
-        if not is_prefill and use_super_kernel and os.getenv("ASCEND_PLATFORM", "A2")=="A3":
+        if not is_prefill and model_extra_config.operator_opt_config.use_super_kernel and model_extra_config.task_config.hardware_platform=="A3":
             with torchair.scope.super_kernel("quant_mlp", 'stream-fusion=1'):
                 return self._apply(layer, x, x_scale)
         else:

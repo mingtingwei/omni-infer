@@ -298,9 +298,12 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         sin: torch.Tensor,
         next_layer: torch.nn.Module = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        use_prefetch = int(os.environ.get('USE_WEIGHT_PREFETCH',"1"))
-        
-        if use_prefetch:
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
+            is_prefill = True
+        else:
+            is_prefill = False       
+        if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
             mlp_layer = [self.mlp.gate_up_proj, self.mlp.down_proj]
             attn_layer = [next_layer.self_attn.qkv_proj, next_layer.self_attn.o_proj] if next_layer else None
         else:
@@ -318,20 +321,15 @@ class PanguEmbeddedDecoderLayer(nn.Module):
                 hidden_states, residual)
             x_transform = "AG"
         
-        if use_prefetch and attn_layer:
-            MAX_PREFETCH_SIZE = 90000000
+        if model_extra_config.operator_opt_config.use_prefetch and attn_layer and not is_prefill:
+            attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
             for layer in attn_layer:
-                torch_npu.npu_prefetch(layer.weight, hidden_states, MAX_PREFETCH_SIZE)
+                torch_npu.npu_prefetch(layer.weight, hidden_states, attn_prefetch_size)
 
         hidden_states = self.self_attn(positions=positions,
                                     hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, next_layer=mlp_layer)
 
         # Fully Connected
-        attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
-            is_prefill = True
-        else:
-            is_prefill = False
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states, x_transform="AG", reduce_type="RS", is_prefill=is_prefill)
@@ -457,6 +455,10 @@ class PanguEmbeddedModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if name.startswith("language_model."):
+                name = name[len("language_model."):]
+            if "visual." in name:
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name

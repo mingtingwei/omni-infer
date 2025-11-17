@@ -31,7 +31,7 @@ import torch_npu
 from einops import rearrange
 
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.models.interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -121,9 +121,11 @@ class OpenPanguVisionAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        x = x.view(-1, x.shape[-1])
         x, bias = self.qkv(x)
         if bias is not None:
             x = x + bias
+        x = x.unsqueeze(1)
         q, k, v = x.chunk(3, dim=2)
         batch_size = q.shape[1]
 
@@ -149,12 +151,11 @@ class OpenPanguVisionAttention(nn.Module):
             num_kv_heads=self.num_attention_heads_per_partition,
             out=attn_out)
 
-        attn_out = rearrange(attn_out, "(b s) h d -> s b (h d)", b=batch_size).contiguous()
-
+        attn_out = rearrange(attn_out, "(b s) h d -> (s b) (h d)", b=batch_size).contiguous()
         output, bias = self.proj(attn_out)
         if bias is not None:
             output = output + bias
-        return output
+        return output.unsqueeze(1)
 
 
 class OpenPanguVisionMLP(nn.Module):
@@ -194,6 +195,7 @@ class OpenPanguVisionMLP(nn.Module):
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
+        x = x.view(-1, x.shape[-1])
         if self.hidden_act == "silu":
             x, _ = self.gate_up_proj(x)
             x = torch_npu.npu_swiglu(x)
@@ -201,7 +203,7 @@ class OpenPanguVisionMLP(nn.Module):
             x, _ = self.up_proj(x)
             x = self.act_fn(x)
         x, _ = self.down_proj(x)
-        return x
+        return x.unsqueeze(1)
 
 
 class OpenPanguVisionBlock(nn.Module):
@@ -303,31 +305,47 @@ class OpenPanguVisionPatchMerger(nn.Module):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         spatial_merge_size: int = 2,
         quant_config: Optional[QuantizationConfig] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        merge_parallel: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        self.merge_parallel = merge_parallel
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = norm_layer(context_dim)
-        self.mlp = nn.Sequential(
-            ColumnParallelLinear(self.hidden_size,
-                                 self.hidden_size,
-                                 bias=True,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.mlp.0",
-                                 return_bias=False),
+        self.mlp = nn.ModuleList(
+            [ColumnParallelFlashCommLinear(self.hidden_size,
+                                        self.hidden_size,
+                                        tp_size=tp_size,
+                                        tp_rank=tp_rank,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.mlp.0"),
             nn.GELU(),
-            RowParallelLinear(self.hidden_size,
-                              d_model,
-                              bias=True,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.mlp.2",
-                              return_bias=False),
+            RowParallelFlashCommLinear(self.hidden_size,
+                            d_model,
+                            tp_size=tp_size,
+                            tp_rank=tp_rank,
+                            bias=True,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.mlp.2")]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(self.ln_q(x).view(-1, self.hidden_size))
+        x = self.ln_q(x)
+        x = x.view(-1, self.hidden_size)
+
+        mlp_fc1, mlp_act, mlp_fc2 = self.mlp
+        x, _ = mlp_fc1(x)
+        x = mlp_act(x)
+        if self.merge_parallel:
+            out, _ = mlp_fc2(x, reduce_type=None)
+        else:
+            out, _ = mlp_fc2(x)
+        return out
 
 
 class OpenPanguVisionTransformer(nn.Module):
@@ -388,6 +406,15 @@ class OpenPanguVisionTransformer(nn.Module):
             self.select_index = [vision_config.depth + i for i in self.select_layer]
             self.select_index = self.select_index[::-1]
             self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
+            self.num_merger = len(self.select_layer)
+            self.rank = torch.distributed.get_rank()
+            self.world_size = torch.distributed.get_world_size()
+            merge_parallel = False
+            if self.world_size % self.num_merger == 0:
+                merge_parallel = True
+                self.tp_size = self.world_size // self.num_merger
+                self.tp_rank = self.rank % self.tp_size
+            self.local_merger = None
             
             self.take_indices = self.select_index
 
@@ -400,18 +427,24 @@ class OpenPanguVisionTransformer(nn.Module):
                         norm_layer=norm_layer,
                         spatial_merge_size=self.spatial_merge_size,
                         quant_config=quant_config,
+                        tp_size = self.tp_size,
+                        tp_rank = self.tp_rank,
+                        merge_parallel = merge_parallel,
                         prefix=f"{prefix}.merger",
                     )
                     for i in range(len(self.select_layer))
                 ]
             )
+            if merge_parallel:
+                self.merger_idx = self.rank // self.tp_size
+                self.local_merger = self.merger[self.merger_idx]
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
 
     @property
     def device(self) -> torch.device:
-        return self.patch_embed.proj.weight.devic
+        return self.patch_embed.proj.weight.device
 
     def cal_cos_sin(self, rotary_pos_emb):
         cos = rotary_pos_emb.cos()
@@ -536,21 +569,35 @@ class OpenPanguVisionTransformer(nn.Module):
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
 
         x = x.unsqueeze(1)
-        intermediates = []
-        for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-            else:
-                cu_seqlens_now = cu_window_seqlens
-            x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
-            if layer_num in self.take_indices:
-                ln_hs = self.final_layernorm(x)
-                intermediates.append(ln_hs)
+        if self.local_merger:
+            #enable merger parallel
+            for layer_num, blk in enumerate(self.blocks):
+                if layer_num in self.fullatt_block_indexes:
+                    cu_seqlens_now = cu_seqlens
+                else:
+                    cu_seqlens_now = cu_window_seqlens
+                x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                if layer_num == self.take_indices[self.select_layer[self.merger_idx]]:
+                    local_feather = self.final_layernorm(x)
+            x = self.local_merger(local_feather)
+            if self.world_size > 1:
+                x = tensor_model_parallel_all_reduce(x)
+        else:
+            intermediates = []
+            for layer_num, blk in enumerate(self.blocks):
+                if layer_num in self.fullatt_block_indexes:
+                    cu_seqlens_now = cu_seqlens
+                else:
+                    cu_seqlens_now = cu_window_seqlens
+                x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                if layer_num in self.take_indices:
+                    ln_hs = self.final_layernorm(x)
+                    intermediates.append(ln_hs)
 
-        image_embeddings_list = []
-        for idx, sl in enumerate(self.select_layer):
-            image_embeddings_list.append(self.merger[idx](intermediates[sl]))
-        x = sum(image_embeddings_list)
+            image_embeddings_list = []
+            for idx, sl in enumerate(self.select_layer):
+                image_embeddings_list.append(self.merger[idx](intermediates[sl]))
+            x = sum(image_embeddings_list)
 
         reverse_indices = torch.argsort(window_index)
         x = x[reverse_indices, :]
@@ -598,6 +645,8 @@ class OpenPanguVisionTransformer(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)

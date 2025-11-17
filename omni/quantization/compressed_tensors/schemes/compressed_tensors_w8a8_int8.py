@@ -64,6 +64,7 @@ class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(weight_scale, {"is_2_dims": True})
         layer.register_parameter("weight_offset", weight_offset)
+        set_weight_attrs(weight_offset, {"is_2_dims": True})
         self.params_dtype = params_dtype
         layer.orig_dtype = self.params_dtype
 
@@ -107,7 +108,6 @@ class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
         elif x_transform == 'A2A':
             pertoken_scale = get_tp_group().all_to_all(pertoken_scale, dim=0)
             x_int8 = get_tp_group().all_to_all(x_int8, dim=0)
-
 
         throw_dequant = getattr(layer, 'throw_dequant', False)
         if throw_dequant and bias is None:
