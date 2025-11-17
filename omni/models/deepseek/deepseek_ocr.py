@@ -392,8 +392,8 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return DeepseekOCRImagePixelInputs(
                 type="pixel_values",
                 data=flatten_bn(pixel_values),
-                images_crop=flatten_bn(images_crop),
-                images_spatial_crop=flatten_bn(images_spatial_crop),
+                images_crop=flatten_bn(images_crop, concat=True),
+                images_spatial_crop=flatten_bn(images_spatial_crop, concat=True),
                 resolve_bindings={
                     "base_size": base_size,
                 },
