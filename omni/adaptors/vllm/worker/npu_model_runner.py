@@ -132,16 +132,17 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_per_reqs_decode = 1 if not self.use_spec_decode else (1 + self.speculative_config.num_speculative_tokens)
         self.num_tokens_per_reqs_decode = num_tokens_per_reqs_decode
         self.decode_max_num_tokens = self.max_num_reqs * self.num_tokens_per_reqs_decode
-        if self.use_spec_decode:
-            from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
-            from omni.adaptors.vllm.sample.validator import SimpleValidator, SparseRejectionSamplerValidator
-            
-            self.sampler = NewAscendSamplerV1(self)
-            self.rejection_sampler = SimpleValidator(self) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
-            self.drafter = PostDrafter(vllm_config, device, self)
-        else:
-            from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
-            self.sampler = NewAscendSamplerV1(self)
+        if get_pp_group().is_last_rank:
+            if self.use_spec_decode:
+                from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
+                from omni.adaptors.vllm.sample.validator import SimpleValidator, SparseRejectionSamplerValidator
+                
+                self.sampler = NewAscendSamplerV1(self)
+                self.rejection_sampler = SimpleValidator(self) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
+                self.drafter = PostDrafter(vllm_config, device, self)
+            else:
+                from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
+                self.sampler = NewAscendSamplerV1(self)
 
         self._init_graph_options()
 
@@ -611,7 +612,8 @@ class NPUModelRunner(GPUModelRunner):
                 input_positions = positions[:total_num_scheduled_tokens]
                 attn_metadata_i.decode.input_positions[:total_num_scheduled_tokens] = input_positions
                 attn_metadata_i.decode.seq_lens[:total_num_scheduled_tokens] = (input_positions + 1).to(self.seq_lens.dtype)
-                cos, sin = self.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(attn_metadata_i.decode.input_positions)
+                first_layer_ind = self.model.model.start_layer
+                cos, sin = self.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(attn_metadata_i.decode.input_positions)
                 attn_metadata_i.decode.cos = cos
                 attn_metadata_i.decode.sin = sin
             else:
@@ -896,6 +898,17 @@ class NPUModelRunner(GPUModelRunner):
                         sampled_tokens, spec_tokens_tensor, accepted_num)
             hidden_states, raw_hidden_states, input_ids, temp_finished_sending, temp_finished_recving = self._execute_model(scheduler_output,
                                                    attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
+            if temp_finished_sending is not None:
+                finished_sending.update(temp_finished_sending)
+            if temp_finished_recving is not None:
+                finished_recving.update(temp_finished_recving)
+            tmp_loading_kv_failure = self.get_loading_kv_failure_req_ids()
+            if tmp_loading_kv_failure is not None:
+                loading_kv_failure.update(tmp_loading_kv_failure)
+
+            if not get_pp_group().is_last_rank:
+                return hidden_states
+
             sampling_metadata = self.input_batch.sampling_metadata
             if self.curr_step == 0:
                 self.sampler.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
@@ -1074,11 +1087,12 @@ class NPUModelRunner(GPUModelRunner):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
+            intermediate_num_tokens = num_tokens // get_tensor_model_parallel_world_size() if get_pp_group().world_size > 1 else num_tokens
             if self.intermediate_tensors is None:
                 self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                    batch_size=num_tokens, dtype=self.dtype, device=self.device)
+                    batch_size=intermediate_num_tokens, dtype=self.dtype, device=self.device)
             intermediate_tensors = IntermediateTensors({
-                k: v[:num_tokens] for k, v in self.intermediate_tensors.items()
+                k: v[:intermediate_num_tokens] for k, v in self.intermediate_tensors.items()
             })
 
         positions = self.mrope_positions[:, :num_tokens] if self.uses_mrope else self.positions[:num_tokens]
@@ -1098,7 +1112,7 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     hidden_states = forward_results
                     raw_hidden_states = forward_results
-                if self.use_spec_decode:
+                if self.use_spec_decode and get_pp_group().is_last_rank:
                     self.drafter.propose(
                         num_tokens=num_tokens,
                         positions=positions,
@@ -1178,7 +1192,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = forward_results
                 raw_hidden_states = forward_results
-            if self.use_spec_decode:
+            if self.use_spec_decode and get_pp_group().is_last_rank:
                 self.drafter.prepare_dummy_input(input_ids)
                 self.drafter.propose(
                     num_tokens=input_ids.numel(),

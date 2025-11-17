@@ -4,13 +4,16 @@
 import torch
 import torchair as tng
 from typing import Optional
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tp_group, get_ep_group
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 
 from omni.adaptors.vllm.distributed.parallel_state import (
     get_world_group_from_list,
     get_local_group_from_list,
     get_cross_group_from_list,
     get_far_cross_group_from_list,
+    get_mlp_world_group,
+    get_pipeline_parallel_world_size,
     get_round_cross_group_from_list,
     get_near_cross_group_from_list,
     get_mlp_tp_group,
@@ -19,7 +22,25 @@ from omni.adaptors.vllm.distributed.parallel_state import (
 from omni.models.config_loader.loader import model_extra_config
 
 
+def expert_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
+    return get_ep_group().all_reduce(input_)
+
+
+def expert_parallel_all_gather(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    return get_ep_group().all_gather(input_, dim)
+
+
+def expert_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
+    return get_ep_group().reduce_scatter(input_)
+
+
+def tensor_model_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
+    return get_tp_group().reduce_scatter(input_)
+
+
 def reduce_scatter_two_stage(input_: torch.Tensor, idx: int, reverse=False) -> torch.Tensor:
+    if get_pipeline_parallel_world_size() > 1:
+        return expert_parallel_reduce_scatter(input_)
     if model_extra_config.operator_opt_config.two_stage_comm == 0:
         return get_world_group_from_list(idx).reduce_scatter(input_)
     if reverse:
@@ -30,6 +51,8 @@ def reduce_scatter_two_stage(input_: torch.Tensor, idx: int, reverse=False) -> t
 
 
 def all_gather_two_stage(input_: torch.Tensor, idx: int, dim=-1, reverse=False) -> torch.Tensor:
+    if get_pipeline_parallel_world_size() > 1:
+        return expert_parallel_all_gather(input_, dim)
     if model_extra_config.operator_opt_config.two_stage_comm == 0:
         return get_world_group_from_list(idx).all_gather(input_, dim)
     if reverse:
@@ -56,6 +79,8 @@ def all_gather_cross(input_: torch.Tensor, idx: int, dim=-1) -> torch.Tensor:
 
 
 def mlp_all_gather(input_: torch.Tensor, dim=-1, comm_group: Optional[GroupCoordinator] = None):
+    if get_pipeline_parallel_world_size() > 1:
+        return tensor_model_parallel_all_gather(input_, dim)
     if comm_group is None:
         return get_mlp_tp_group().all_gather(input_, dim)
     else:
@@ -63,6 +88,8 @@ def mlp_all_gather(input_: torch.Tensor, dim=-1, comm_group: Optional[GroupCoord
 
 
 def mlp_reduce_scatter(input_: torch.Tensor, comm_group: Optional[GroupCoordinator] = None) -> torch.Tensor:
+    if get_pipeline_parallel_world_size() > 1:
+        return tensor_model_parallel_reduce_scatter(input_)
     if comm_group is None:
         return get_mlp_tp_group().reduce_scatter(input_)
     else:

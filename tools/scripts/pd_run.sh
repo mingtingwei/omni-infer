@@ -35,6 +35,8 @@ VLLM_USE_V1=1
 VLLM_WORKER_MULTIPROC_METHOD="fork"
 MODEL_PATH="/home/dsv3/models/DeepSeek-V3-w8a8-0423"
 TP=4
+PP=1
+DISTRIBUTED_EXECUTOR_BACKEND="None"
 SERVED_MODEL_NAME="deepseek"
 MAX_MODEL_LEN=4096
 LOG_DIR="apiserverlog"
@@ -45,6 +47,9 @@ KV_ROLE="kv_producer"
 KV_RANK=0
 KV_ENGINE_ID=0
 KV_PARALLEL_SIZE=2
+KV_PRODUCER_DP_SIZE=1
+KV_PRODUCER_PP_SIZE=1
+VLLM_PP_LAYER_PARTITION="null"
 
 GPU_UTIL=0.9
 EXTRA_ARGS=""
@@ -91,6 +96,8 @@ print_help() {
     echo "  --model-path                     vLLM framework: Model path (default: $MODEL_PATH)"
     echo "  --max-model-len                  vLLM framework: Maximum model length (default: $MAX_MODEL_LEN)"
     echo "  --tp                             vLLM framework: Tensor parallel (default: $TP)"
+    echo "  --pp                             vLLM framework: Pipeline parallel (default: $PP)"
+    echo "  --distributed-executor-backend   vLLM framework: Distributed executor backend (default: $DISTRIBUTED_EXECUTOR_BACKEND)"
     echo "  --served-model-name              vLLM framework: Served model name (default: $SERVED_MODEL_NAME)"
     echo "  --log-dir                        vLLM framework: Log directory (default: $LOG_DIR)"
     echo "  --kv-connector                   vLLM framework: PD separation parameter, kv connector name (default: $KV_CONNECTOR)"
@@ -99,6 +106,8 @@ print_help() {
     echo "  --kv-rank                        vLLM framework: PD separation parameter, kv rank (p_num/d_num-1) (default: $KV_RANK)"
     echo "  --kv-engine-id                   vLLM framework: PD separation parameter, kv engine ID (default: $KV_ENGINE_ID)"
     echo "  --kv-parallel-size               vLLM framework: PD separation parameter, kv parallel size (equal to num_p + num_d) (default: $KV_PARALLEL_SIZE)"
+    echo "  --kv-producer-dp-size            vLLM framework: PD separation parameter, kv producer dp size (default: $KV_PRODUCER_DP_SIZE)"
+    echo "  --kv-producer-pp-size            vLLM framework: PD separation parameter, kv producer pp size (default: $KV_PRODUCER_PP_SIZE)"
     echo "  --llm-waiting-out                vLLM framework: PD separation parameter, P instance requests waiting time out (default: $LLM_WAITING_OUT)"
     echo "  --extra-args                     vLLM framework: Additional VLLM arguments (space-separated, e.g., '--enable-expert-parallel') (default: $EXTRA_ARGS)"
     echo "  --additional-args                vLLM framework: Additional VLLM arguments"
@@ -106,6 +115,7 @@ print_help() {
     echo "  --hccl-op-expansion-mode         vLLM framework: HCCL_OP_EXPANSION_MODE"
     echo "  --hccl-buffsize                  vLLM framework: HCCL_BUFFSIZE"
     echo "  --num-speculative-tokens         vLLM framework: Speculative decoding parameter, number of speculative tokens per step (default: $NUM_SPECULATIVE_TOKENS)"
+    echo "  --pp-layer-partition             vLLM framework: pp layer partition (default: $VLLM_PP_LAYER_PARTITION)"
     exit 0
 }
 
@@ -197,6 +207,12 @@ parse_long_option() {
         --tp)
             TP="$2"
             ;;
+        --pp)
+            PP="$2"
+            ;;
+        --distributed-executor-backend)
+            DISTRIBUTED_EXECUTOR_BACKEND="$2"
+            ;;
         --served-model-name)
             SERVED_MODEL_NAME="$2"
             ;;
@@ -221,6 +237,12 @@ parse_long_option() {
         --kv-parallel-size)
             KV_PARALLEL_SIZE="$2"
             ;;
+        --kv-producer-dp-size)
+            KV_PRODUCER_DP_SIZE="$2"
+            ;;
+        --kv-producer-pp-size)
+            KV_PRODUCER_PP_SIZE="$2"
+            ;;
         --llm-waiting-out)
             LLM_WAITING_OUT="$2"
             ;;
@@ -244,6 +266,9 @@ parse_long_option() {
             ;;
         --num-speculative-tokens)
             NUM_SPECULATIVE_TOKENS="$2"
+            ;;
+        --pp-layer-partition)
+            VLLM_PP_LAYER_PARTITION="$2"
             ;;
         --ray-port)
             RAY_PORT="$2"
@@ -291,7 +316,8 @@ KV_TRANSFER_CONFIG=$(cat <<EOF
     "kv_role": "$KV_ROLE",
     "kv_rank": $KV_RANK,
     "engine_id": $KV_ENGINE_ID,
-    "kv_parallel_size": $KV_PARALLEL_SIZE
+    "kv_parallel_size": $KV_PARALLEL_SIZE,
+    "kv_connector_extra_config": {"kv_producer_dp_size": $KV_PRODUCER_DP_SIZE, "kv_producer_pp_size": $KV_PRODUCER_PP_SIZE, "kv_producer_pp_partitions": "$VLLM_PP_LAYER_PARTITION"}
 }
 EOF
 )
@@ -355,6 +381,10 @@ export TASK_QUEUE_ENABLE=2
 # enable to overwrite request IDs
 export ENABLE_OVERWRITE_REQ_IDS=1
 
+if [[ "$VLLM_PP_LAYER_PARTITION" != "null" ]] && [ "$PP" -gt 1 ]; then
+    export VLLM_PP_LAYER_PARTITION
+fi
+
 # enable kv event
 export ENABLE_APC_EVENT=0
 
@@ -394,6 +424,8 @@ echo "VLLM_WORKER_MULTIPROC_METHOD: $VLLM_WORKER_MULTIPROC_METHOD"
 echo "MODEL_PATH: $MODEL_PATH"
 echo "MAX_MODEL_LEN: $MAX_MODEL_LEN"
 echo "TP: $TP"
+echo "PP: $PP"
+echo "DISTRIBUTED_EXECUTOR_BACKEND: $DISTRIBUTED_EXECUTOR_BACKEND"
 echo "SERVED_MODEL_NAME: $SERVED_MODEL_NAME"
 echo "LOG_DIR: $LOG_DIR"
 echo "KV_TRANSFER_CONFIG: $KV_TRANSFER_CONFIG"
@@ -428,6 +460,8 @@ common_operations() {
     --master-port "$MASTER_PORT" \
     --base-api-port "$BASE_API_PORT" \
     --tp "$TP" \
+    --pp "$PP" \
+    --distributed-executor-backend "$DISTRIBUTED_EXECUTOR_BACKEND" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --log-dir "$LOG_DIR" \
     --kv-transfer-config "$KV_TRANSFER_CONFIG" \

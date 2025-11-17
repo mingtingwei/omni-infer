@@ -258,7 +258,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
     def get_kv_index(self, seq_lens: torch.Tensor, block_tables: torch.Tensor, block_size: int):
         num_reqs = seq_lens.shape[0]
         if block_tables.shape[0] != num_reqs:
-            raise RuntimeError(f"block_tables and seq_lens do not match. {seq_lens.shape=}, {block_tables.shape=}")
+            raise RuntimeError(f"block_tables and seq_lens do not match. seq_lens.shape={seq_lens.shape}, block_tables.shape={block_tables.shape}")
         slots = block_tables[..., None] * block_size + torch.arange(block_size)
         slots = slots.reshape(num_reqs, -1)
         kv_index = torch.empty(seq_lens.sum(), dtype=slots.dtype)
@@ -359,16 +359,18 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         slot_indices = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], dim=1)
 
         if hasattr(self.runner.model, 'language_model') and hasattr(self.runner.model.language_model, 'model'):
+            first_layer_ind = self.runner.model.language_model.model.start_layer
             Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding]
-            if type(self.runner.model.language_model.model.layers[0].self_attn.rotary_emb) in Rotary_List:
+            if type(self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb) in Rotary_List:
                 cos, sin = None, None
             else:
-                cos, sin = self.runner.model.language_model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
+                cos, sin = self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(input_positions)
         else:
+            first_layer_ind = self.runner.model.model.start_layer
             if self.is_spec_metadata:
-                cos, sin = self.runner.drafter.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
+                cos, sin = self.runner.drafter.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(input_positions)
             else:
-                cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(input_positions)
+                cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(input_positions)
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'
@@ -419,16 +421,18 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         fake_positions = torch.zeros(max_pad_size, dtype=torch.int64, device=self.device)
 
         if hasattr(self.runner.model, 'language_model') and hasattr(self.runner.model.language_model, 'model'):
+            first_layer_ind = self.runner.model.language_model.model.start_layer
             Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding]
-            if type(self.runner.model.language_model.model.layers[0].self_attn.rotary_emb) in Rotary_List:
+            if type(self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb) in Rotary_List:
                 cos, sin = None, None
             else:
-                cos, sin = self.runner.model.language_model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
+                cos, sin = self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(fake_positions)
         else:
+            first_layer_ind = self.runner.model.model.start_layer
             if self.is_spec_metadata:
-                cos, sin = self.runner.drafter.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
+                cos, sin = self.runner.drafter.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(fake_positions)
             else:
-                cos, sin = self.runner.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(fake_positions)
+                cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(fake_positions)
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'

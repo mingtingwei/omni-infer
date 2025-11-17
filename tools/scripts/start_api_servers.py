@@ -84,6 +84,8 @@ def start_single_node_api_servers(
     gpu_util,
     block_size,
     tp,
+    pp,
+    distributed_executor_backend,
     served_model_name,
     server_offset=0,
     kv_transfer_config=None,
@@ -150,6 +152,7 @@ def start_single_node_api_servers(
             "--gpu-memory-utilization", str(gpu_util),
             "--block_size", str(block_size),
             "--tensor-parallel-size", str(tp),
+            "--pipeline-parallel-size", str(pp),
             "--data-parallel-size", str(dp_per_server),   # one engine core for one dp
             "--data-parallel-size-local", "1",            # 'Number of data parallel replicas '
             "--data-parallel-address", master_ip,         # 'Address of data parallel cluster '
@@ -158,6 +161,8 @@ def start_single_node_api_servers(
             "--served-model-name", served_model_name,
             "--max-model-len", str(max_tokens)
         ]
+        if distributed_executor_backend is not None and distributed_executor_backend != "None":
+            cmd.extend(["--distributed-executor-backend", str(distributed_executor_backend)])
         if enable_mtp:
             cmd.extend(["--speculative_config", '{"method": "deepseek_mtp", "num_speculative_tokens": ' + str(num_speculative_tokens) + '}'])
         if kv_transfer_config:
@@ -288,6 +293,8 @@ if __name__ == "__main__":
         help="GPU memory utilization")
     parser.add_argument("--block-size", type=int, default=128, help="Block size for VLLM")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallelism size")
+    parser.add_argument("--pp", type=int, default=1, help="Pipeline parallelism size")
+    parser.add_argument("--distributed-executor-backend", type=str, default="None", help="Distributed executor backend used for multi-nodes")
     parser.add_argument("--served-model-name", type=str, required=True, help="Name of the served model")
     parser.add_argument("--max-model-len", default=16384, type=int, help="max number of tokens")
     parser.add_argument("--max-port-attempts", type=int, default=20, help="Max attempts to find an available port")
@@ -334,6 +341,8 @@ if __name__ == "__main__":
         gpu_util=args.gpu_util,
         block_size=args.block_size,
         tp=args.tp,
+        pp=args.pp,
+        distributed_executor_backend=args.distributed_executor_backend,
         served_model_name=args.served_model_name,
         log_dir=args.log_dir,
         max_port_attempts=args.max_port_attempts,

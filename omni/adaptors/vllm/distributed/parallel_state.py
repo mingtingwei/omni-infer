@@ -24,6 +24,7 @@ from vllm.distributed import (
     parallel_state,
     init_model_parallel_group,
     get_world_group,
+    get_pp_group,
     get_ep_group
 )
 from vllm.logger import logger
@@ -286,6 +287,10 @@ def initial_scale_parallel_group(backend: Optional[str] = None):
                                     backend,
                                     use_message_queue_broadcaster=False,
                                     group_name="scale_parallel")
+
+
+def get_mlp_world_group():
+    return get_local_group_from_list(0)
 
 
 def _init_parallel_group_factory(
@@ -644,6 +649,10 @@ def get_near_cross_group_from_list(idx: int) -> GroupCoordinator:
 
 def get_far_cross_group_from_list(idx: int) -> GroupCoordinator:
     return _CROSS_FAR_COMM_LIST[idx]
+
+
+def get_pipeline_parallel_world_size():
+    return get_pp_group().world_size
 
 
 def get_local_group_size():

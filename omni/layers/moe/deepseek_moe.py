@@ -397,7 +397,8 @@ class DeepseekMoE(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             pertoken_scale=global_pertoken_scale,
-            attn_metadata=attn_metadata
+            attn_metadata=attn_metadata,
+            comm_group=get_ep_group()
         )
 
         if model_extra_config.operator_opt_config.prefill_moe_all_to_all:

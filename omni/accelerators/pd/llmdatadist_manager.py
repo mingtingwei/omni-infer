@@ -5,6 +5,7 @@ import json
 import time
 from collections import defaultdict, namedtuple
 from functools import cached_property
+from typing import Optional
 
 import llm_datadist
 import torch
@@ -55,6 +56,29 @@ RETRYABLE_CODES = [
 ]
 
 
+def get_kv_producer_pp_partitions(num_hidden_layers: int, pp_size: int, num_mtp_layers: int = 0, kv_producer_pp_partitions_str: Optional[str] = None) -> list[int]:
+    if kv_producer_pp_partitions_str is not None and kv_producer_pp_partitions_str != "null":
+        try:
+            partitions = [
+                int(layer) for layer in kv_producer_pp_partitions_str.split(",")
+            ]
+        except ValueError as err:
+            raise ValueError("Invalid partition string: {}".format(kv_producer_pp_partitions_str)) from err
+        if len(partitions) != pp_size:
+            raise ValueError(f"len(partitions)={len(partitions)} does not match pp_size={pp_size}")
+        if sum(partitions) != num_hidden_layers:
+            raise ValueError(f"sum(partitions)={sum(partitions)} does not match num_hidden_layers={num_hidden_layers}")
+    else:
+        layers_per_partition = num_hidden_layers // pp_size
+        partitions = [layers_per_partition for _ in range(pp_size)]
+        remaining_layers = num_hidden_layers % pp_size
+        if remaining_layers:
+            for i in range(2, remaining_layers + 2):
+                partitions[-i] += 1
+    partitions[-1] += num_mtp_layers
+    return partitions
+
+
 class LLMDataDistConfig:
     """
     Configuration for the separate deployment.
@@ -93,6 +117,13 @@ class LLMDataDistConfig:
             self.cluster_id = self.local_group.device_list[self.rank].cluster_id
         self.kv_parallel_size = self.kv_transfer_config.kv_parallel_size
         self.kv_producer_dp_size = self.kv_transfer_config.kv_connector_extra_config.get("kv_producer_dp_size", 1)
+        self.kv_producer_pp_size = self.kv_transfer_config.kv_connector_extra_config.get("kv_producer_pp_size", 1)
+        hf_config = vllm_config.model_config.hf_config
+        num_mtp_layers = getattr(hf_config, 'num_nextn_predict_layers', getattr(hf_config, 'num_mtp_layers', getattr(hf_config, 'n_predict', 0)))
+        self.kv_producer_pp_partitions = get_kv_producer_pp_partitions(hf_config.num_hidden_layers,
+                                                                       self.kv_producer_pp_size,
+                                                                       num_mtp_layers,
+                                                                       self.kv_transfer_config.kv_connector_extra_config.get("kv_producer_pp_partitions", None))
 
     @cached_property
     def role(self):
@@ -159,20 +190,39 @@ class LLMDataDistManager:
         # spec model.
         flatten_kv_caches = maybe_split_kv_caches_for_spec_layers(flatten_kv_caches)
 
+        if self.data_dist_config.is_prefill:
+            self._register_caches_prefill(flatten_kv_caches)
+        else:
+            self._register_caches_decode(flatten_kv_caches)
+        logger.error(f" ***** registered_kv_caches num:{len(self.registered_kv_caches)}")
+
+    def _register_caches_prefill(self, flatten_kv_caches):
         for model_id, sub_kv_caches in enumerate(flatten_kv_caches):
             cache_desc = CacheDesc(num_tensors=len(sub_kv_caches), shape=tuple(sub_kv_caches[0].shape),
                                    data_type=TORCH_DTYPE_TO_NPU_DTYPE[sub_kv_caches[0].dtype])
 
             cache_addrs = [int(item.data_ptr()) for item in sub_kv_caches]
 
-            if self.data_dist_config.is_prefill:
-                cache_key = BlocksCacheKey(self.data_dist_engine.cluster_id, model_id=model_id)
-            else:
-                cache_key = None
+            cache_key = BlocksCacheKey(self.data_dist_engine.cluster_id, model_id=model_id)
 
             cache = self.data_dist_engine.cache_manager.register_blocks_cache(cache_desc, cache_addrs, cache_key)
             self.registered_kv_caches.append(cache)
-        logger.debug(f" ***** registered_kv_caches num:{len(self.registered_kv_caches)}")
+
+
+    def _register_caches_decode(self, flatten_kv_caches):
+        prefill_pp_partitions = self.data_dist_config.kv_producer_pp_partitions
+        cnt_layer_num = 0
+        for cur_pp_stage_layer_num in prefill_pp_partitions:
+            cur_pp_stage_kv_caches = []
+            for origin_sub_kv_caches in flatten_kv_caches:
+                sub_kv_caches = origin_sub_kv_caches[cnt_layer_num : cnt_layer_num + cur_pp_stage_layer_num]
+                cache_desc = CacheDesc(num_tensors=len(sub_kv_caches), shape=tuple(sub_kv_caches[0].shape), data_type=TORCH_DTYPE_TO_NPU_DTYPE[sub_kv_caches[0].dtype])
+                cache_addrs = [int(item.data_ptr()) for item in sub_kv_caches]
+                cache = self.data_dist_engine.cache_manager.register_blocks_cache(cache_desc, cache_addrs, None)
+                cur_pp_stage_kv_caches.append(cache)
+            self.registered_kv_caches.append(cur_pp_stage_kv_caches)
+            cnt_layer_num += cur_pp_stage_layer_num
+
 
     def _pull_blocks(self, src_cache_key, dst_cache, src_blocks, dst_blocks):
         for _ in range(KV_CACHE_RETRY_TIMES):
@@ -200,11 +250,19 @@ class LLMDataDistManager:
         # If this line is not added, the fx mode will report an error.
         # The preliminary reason is that the context is lost when multiple coroutines pull kv.
         torch.npu.set_device(f"npu:{self.local_rank}")
-        for model_id, kv_cache in enumerate(self.registered_kv_caches):
-            prompt_cache_key = BlocksCacheKey(
-                prompt_cluster_id=prompt_cluster_id, model_id=model_id)
-            self._pull_blocks(prompt_cache_key, kv_cache,
-                              src_blocks, tgt_blocks)
+        if self.data_dist_config.is_prefill:
+            prefill_server_groups = [self.data_dist_config.local_group]
+        else:
+            prefill_server_groups = self.data_dist_config.global_rank_table.prefill_group
+        prefill_tp_dp_size = len(prefill_server_groups[0].device_list) // self.data_dist_config.kv_producer_pp_size
+        for pp_stage_ind, cur_pp_stage_kv_caches in enumerate(self.registered_kv_caches):
+            for model_id, kv_cache in enumerate(cur_pp_stage_kv_caches):
+                cluster_id_pp_offset = pp_stage_ind * prefill_tp_dp_size
+                prompt_cache_key = BlocksCacheKey(
+                    prompt_cluster_id=prompt_cluster_id +cluster_id_pp_offset, model_id=model_id
+                )
+                self._pull_blocks(prompt_cache_key, kv_cache,
+                                  src_blocks, tgt_blocks)
 
     def register_link(self):
 
@@ -215,8 +273,9 @@ class LLMDataDistManager:
             prefill_server_groups = self.data_dist_config.global_rank_table.prefill_group
             decode_server_groups = [self.data_dist_config.local_group]
 
-        prefill_tp_size = len(prefill_server_groups[0].device_list) // self.data_dist_config.kv_producer_dp_size
+        prefill_tp_size = len(prefill_server_groups[0].device_list) // self.data_dist_config.kv_producer_dp_size // self.data_dist_config.kv_producer_pp_size
         prefill_dp_size = self.data_dist_config.kv_producer_dp_size
+        prefill_pp_size = self.data_dist_config.kv_producer_pp_size
 
         decode_tp_size = self.data_dist_config.kv_parallel_size
         decode_dp_size = len(decode_server_groups[0].device_list) // decode_tp_size
@@ -231,32 +290,33 @@ class LLMDataDistManager:
                     # compute p_rank with dp_size=1, and expand to dp_size>1.
                     p_rank_start = get_p_start_rank(prefill_tp_size, 1, decode_tp_size, decode_dp_size,
                                               decode_num, decode_id, d_rank)
+                    decode_cluster_id = decode_device.cluster_id
 
                     pd_pairs = [(p_rank_start + dp_idx * prefill_tp_size, d_rank) for dp_idx in range(prefill_dp_size)]
 
-                    for prefill_dp_rank, (p_rank, d_rank) in enumerate(pd_pairs):
-                        prefill_cluster_id = prefill_server_group.device_list[p_rank].cluster_id
-                        decode_cluster_id = decode_device.cluster_id
+                    for prefill_dp_rank, (p_rank_pp_start, d_rank) in enumerate(pd_pairs):
+                        for prefill_pp_rank in range(prefill_pp_size):
+                            p_rank = p_rank_pp_start + prefill_pp_rank * prefill_tp_size * prefill_dp_size
+                            prefill_cluster_id = prefill_server_group.device_list[p_rank].cluster_id
+                            if self.multi_rank_pull_kv:
+                                # first kv link
+                                link_num = self._create_kv_link(prefill_server_group, decode_server_group, p_rank, d_rank,
+                                                                prefill_cluster_id, decode_cluster_id, link_num)
+                                # second kv link
+                                second_p_rank = (p_rank + 1) % prefill_tp_size
+                                second_prefill_cluster_id = prefill_server_group.device_list[second_p_rank].cluster_id
 
-                        if self.multi_rank_pull_kv:
-                            # first kv link
-                            link_num = self._create_kv_link(prefill_server_group, decode_server_group, p_rank, d_rank,
-                                                            prefill_cluster_id, decode_cluster_id, link_num)
-                            # second kv link
-                            second_p_rank = (p_rank + 1) % prefill_tp_size
-                            second_prefill_cluster_id = prefill_server_group.device_list[second_p_rank].cluster_id
+                                link_num = self._create_kv_link(prefill_server_group, decode_server_group, second_p_rank, d_rank,
+                                                               second_prefill_cluster_id, decode_cluster_id, link_num)
 
-                            link_num = self._create_kv_link(prefill_server_group, decode_server_group, second_p_rank, d_rank,
-                                                           second_prefill_cluster_id, decode_cluster_id, link_num)
+                                prefill_cluster_id_list = [prefill_cluster_id, second_prefill_cluster_id]
+                            else:
+                                link_num = self._create_kv_link(prefill_server_group, decode_server_group, p_rank, d_rank,
+                                                                prefill_cluster_id, decode_cluster_id, link_num)
+                                prefill_cluster_id_list = [prefill_cluster_id]
 
-                            prefill_cluster_id_list = [prefill_cluster_id, second_prefill_cluster_id]
-                        else:
-                            link_num = self._create_kv_link(prefill_server_group, decode_server_group, p_rank, d_rank,
-                                                            prefill_cluster_id, decode_cluster_id, link_num)
-                            prefill_cluster_id_list = [prefill_cluster_id]
-
-                        if not self.data_dist_config.is_prefill:
-                            self.registered_link_infos[(prefill_server_group.cluster_id_start, prefill_dp_rank, d_rank)] = prefill_cluster_id_list
+                            if not self.data_dist_config.is_prefill and prefill_pp_rank == 0:
+                                self.registered_link_infos[(prefill_server_group.cluster_id_start, prefill_dp_rank, d_rank)] = prefill_cluster_id_list
 
         return self.check_register_status()
 

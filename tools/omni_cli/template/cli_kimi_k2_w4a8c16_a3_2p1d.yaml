@@ -307,7 +307,7 @@ all:
               max-num-batched-tokens: 65600
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.85'
+            gpu-util: '0.9'
             kv-transfer-config:
               engine_id: 0
               kv_buffer_device: npu
@@ -437,7 +437,7 @@ all:
               max-num-batched-tokens: 65600
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.85'
+            gpu-util: '0.9'
             kv-transfer-config:
               engine_id: 1
               kv_buffer_device: npu

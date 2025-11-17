@@ -29,6 +29,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce,
+                              get_pp_group,
                               get_world_group)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
@@ -40,6 +41,7 @@ from vllm.v1.kv_cache_interface import (KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.lora.request import LoRARequest
 
 from omni.adaptors.vllm.platform import NPUPlatform
@@ -309,17 +311,33 @@ class NPUWorker(WorkerBase):
         )
         return int(npu_kv_cache_bytes)
 
+    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
+        intermediate_tensors = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             if not self.profile_already_start and scheduler_output.total_num_scheduled_tokens >= self.profiler_token_threshold:
                 self.profiler.start()
                 self.profile_already_start = True
                 self.profile_step = 0
 
-        output = self.model_runner.execute_model(scheduler_output)
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=None
+                )
+            )
+
+        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+
+        if not get_pp_group().is_last_rank:
+            assert isinstance(output, IntermediateTensors)
+            get_pp_group().send_tensor_dict(output.tensors, all_gather_group=None)
+            return None
+
+        assert isinstance(output, ModelRunnerOutput)
         if envs.VLLM_TORCH_PROFILER_DIR:
             if self.profile_already_start and not self.profile_finished:
                 self.profile_step += 1

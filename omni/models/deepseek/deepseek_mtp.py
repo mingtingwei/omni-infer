@@ -25,6 +25,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.distributed import get_ep_group
 
 from omni.models.config_loader.loader import model_extra_config
@@ -62,11 +63,13 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
     def __init__(self, *,
                  vllm_config,
                  prefix: str,
+                 kv_ind: int,
                  is_ffn_die: Optional[bool] = False,
     ):
         self.config = vllm_config.model_config.hf_config
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
+        self.kv_ind = kv_ind
 
         super().__init__(self.config, prefix,
                          cache_config=self.cache_config,
@@ -128,7 +131,7 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
         encoded_states, residual = DeepseekDecoderLayer.forward(
             self,
             positions=positions,
-            kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
+            kv_cache=kv_caches[self.kv_ind] if kv_caches is not None else None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             residual=None,
@@ -211,6 +214,7 @@ class DeepseekMultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = self.config.num_hidden_layers
         self.num_mtp_layers = self.config.num_nextn_predict_layers
         self.ignore_share_weight = True # TODO get from config
+        real_num_mtp = min(self.num_mtp_layers, vllm_config.speculative_config.num_speculative_tokens)
         kwargs = {}
         if model_extra_config.task_config.enable_attn_ffn_disaggregation:
             if os.getenv("ASCEND_PLATFORM", "A3") == "A2":
@@ -224,9 +228,10 @@ class DeepseekMultiTokenPredictor(nn.Module):
             DeepseekMultiTokenPredictorLayer(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.layers.{i + self.mtp_start_layer_idx}",
+                kv_ind=i - real_num_mtp,
                 **kwargs
             )
-            for i in range(min(self.num_mtp_layers, vllm_config.speculative_config.num_speculative_tokens))
+            for i in range(real_num_mtp)
         })
         self.logits_processor = LogitsProcessor(self.config.vocab_size, logits_as_input=True)
         self.greedy_sampler = Sampler()
@@ -256,7 +261,8 @@ class DeepseekMultiTokenPredictor(nn.Module):
             selected_indices=selected_indices,
         )
 
-class DeepseekV3MTP(nn.Module):
+
+class DeepseekV3MTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config

@@ -50,6 +50,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     PPMissingLayer, 
     is_pp_missing_parameter, 
@@ -403,7 +404,8 @@ class DeepseekV3Model(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
         self.is_ffn_die = self.is_ffn_die_in_afd()
-        if get_pp_group().is_first_rank:
+        usr_spec_decode = vllm_config.speculative_config is not None
+        if get_pp_group().is_first_rank or (usr_spec_decode and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -422,6 +424,7 @@ class DeepseekV3Model(nn.Module):
             ),
             prefix=f"{prefix}.layers")
 
+        self.start_layer_key = f"{self.prefix}.{self.start_layer}{self.postfix}"
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -474,13 +477,13 @@ class DeepseekV3Model(nn.Module):
             intermediate_tensors: Optional[IntermediateTensors],
             max_num_tokens=None
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        attn_metadata_first = self.get_layer_attn_metadata(attn_metadata, 0)
+        attn_metadata_first = self.get_layer_attn_metadata(attn_metadata, self.start_layer_key)
 
         if model_extra_config.operator_opt_config.use_omni_cache:
             if attn_metadata_first is not None and attn_metadata_first.prefill is not None:
                 attn_metadata_first.omni_cache.synchronize_h2d(
                     prefix_meta=attn_metadata_first.prefill.prefix_meta,
-                    layer_idx=0,
+                    layer_idx=self.start_layer,
                 )
 
         if model_extra_config.operator_opt_config.enable_prefill_micro_batch and \
@@ -499,7 +502,7 @@ class DeepseekV3Model(nn.Module):
             attn_metadata: AttentionMetadata,
             intermediate_tensors: Optional[IntermediateTensors],
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        attn_metadata_first = self.get_layer_attn_metadata(attn_metadata, 0)
+        attn_metadata_first = self.get_layer_attn_metadata(attn_metadata, self.start_layer_key)
         is_prefill = attn_metadata is None or (attn_metadata_first is not None and attn_metadata_first.prefill is not None)
         if is_prefill:
             DeepseekDecoderLayer.is_split_hidden_states = False
@@ -716,11 +719,15 @@ class DeepseekV3Model(nn.Module):
             })
         return hidden_states
 
-    def get_layer_attn_metadata(self, attn_metadata, layer_idx):
+    def get_layer_attn_metadata(self, attn_metadata, key_idx):
         if attn_metadata is None:
             return None
         if isinstance(attn_metadata, dict):
-            key_idx = self.prefix + "." + str(layer_idx) + self.postfix
+            if not isinstance(key_idx, str):
+                if isinstance(key_idx, int):
+                    key_idx = self.prefix + "." + str(key_idx) + self.postfix
+                else:
+                    raise ValueError(f"Invalid key_idx type: {type(key_idx)}")
             return attn_metadata[key_idx]
 
     def index_batch(self, ori_tensor, split_dim, split_idx):
@@ -815,7 +822,7 @@ class DeepseekV3Model(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV3ForCausalLM(nn.Module):
+class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -881,17 +888,19 @@ class DeepseekV3ForCausalLM(nn.Module):
         else:
             hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors, self.max_num_token)
-        
-        if self.is_ffn_die:
-            logits = torch.zeros(size=(hidden_states.shape[0], 
-                                    self.config.vocab_size), 
-                                    dtype=hidden_states.dtype, 
-                                    device=hidden_states.device)
-        else: 
-            if attn_metadata is None:
-                logits = self.compute_lmhead(hidden_states[-1:, ...], None)
-            else:
-                logits = self.compute_lmhead(hidden_states, selected_indices)
+        if get_pp_group().is_last_rank: 
+            if self.is_ffn_die:
+                logits = torch.zeros(size=(hidden_states.shape[0], 
+                                        self.config.vocab_size), 
+                                        dtype=hidden_states.dtype, 
+                                        device=hidden_states.device)
+            else: 
+                if attn_metadata is None:
+                    logits = self.compute_lmhead(hidden_states[-1:, ...], None)
+                else:
+                    logits = self.compute_lmhead(hidden_states, selected_indices)
+        else:
+            logits = hidden_states
 
         if self.return_hidden_states:
             return hidden_states, logits

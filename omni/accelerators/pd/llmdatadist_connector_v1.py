@@ -37,7 +37,7 @@ from collections import defaultdict
 import torch
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
+    get_tp_group, get_pp_group)
 
 from vllm.utils import get_open_port
 from vllm.v1.request import RequestStatus
@@ -280,7 +280,7 @@ class PrefillConnectorWorker:
         self.host_ip = host_ip
         self.host_port = host_port
         self.rank = get_tensor_model_parallel_rank()
-        if self.rank == 0:
+        if self.rank == 0 and get_pp_group().is_last_rank:
             self.ctx = zmq.Context()
             self.input_socket = self.ctx.socket(zmq.constants.PULL)
             self.input_socket.bind(f"tcp://{self.host_ip}:{self.host_port}")
@@ -320,7 +320,7 @@ class PrefillConnectorWorker:
         """
         all_done_sending: set[str] = set()
         all_done_recving: set[str] = set()
-        if self.rank == 0:
+        if self.rank == 0 and get_pp_group().is_last_rank:
             # Update requests_finish_time with new finish times from metadata
             with self._transfer_lock:
                 self.requests_finish_time.update(
