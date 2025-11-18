@@ -1,39 +1,20 @@
-# Copyright 2023-2024 SGLang Team
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+"""Inference-only Longcat-Flash model."""
+from typing import Iterable, Optional, Tuple
+import os
 import concurrent.futures
 import logging
-from typing import Any, Dict, Iterable, Optional, Tuple
-import os
 import torch
 from torch import nn
-from transformers import PretrainedConfig
 import torchair as tng
+from transformers import PretrainedConfig
+torch._logging.set_logs(recompiles=True)
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
-from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
-from sglang.srt.layers.communicator import enable_moe_dense_fully_dp
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
-from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.fp8_utils import (
-    block_quant_to_tensor_quant,
-    channel_quant_to_tensor_quant,
-    requant_weight_ue8m0_inplace,
-)
-from sglang.srt.layers.quantization.int8_utils import block_dequant as int8_block_dequant
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -41,102 +22,23 @@ from sglang.srt.utils import (
     BumpAllocator,
     LazyValue,
     add_prefix,
-    bind_or_assign,
-    log_info_on_rank0,
 )
-
+from omni.adaptors.sglang.distributed import get_mlp_tp_group
 from omni.adaptors.sglang.layers.attention.deepseek_mla import DeepseekMLA
-from omni.adaptors.sglang.layers.activation import SiluAndMul
-from omni.adaptors.sglang.layers.moe.deepseek_moe import DeepseekMoE
+from omni.adaptors.sglang.layers.moe.longcat_moe import LongcatFlashMoE
 from omni.adaptors.sglang.layers.moe.fused_moe.layer import FusedMoE
 from omni.adaptors.sglang.layers.layernorm import RMSNorm
-from omni.adaptors.sglang.distributed import (
-    get_mlp_tp_group_parallel_world_size,
-    get_mlp_tp_group_parallel_rank,
-    get_mlp_tp_group,
-)
-from omni.adaptors.sglang.layers.linear import (
-    AscendMergedColumnParallelLinear,
-    AscendRowParallelLinear,
-)
+from omni.adaptors.sglang.models.deepseek.deepseek_v3 import ParallelDeepseekMLP
 from omni.adaptors.sglang.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
 logger = logging.getLogger(__name__)
 
+"""MLP module activation split length, split by 64G VRAM, need to confirm the optimal split length based on sequence length and performance"""
+SEQ_SPLIT_LENGTH_BEFORE_ALL_GATHER = 64
 
-# TODO: not aligned with vLLM's yet
-class ParallelDeepseekMLP(nn.Module):
+class LongcatFlashMLP(ParallelDeepseekMLP):
+    pass
 
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: bool = True,
-        prefix: str = "",
-        tp_rank: Optional[int] = None,
-        tp_size: Optional[int] = None,
-        **kwargs,
-    ) -> None:
-        super().__init__()
-        self.tp_size = tp_size
-
-        self.gate_up_proj = AscendMergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
-            bias=False,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            quant_config=quant_config,
-            prefix=add_prefix("gate_up_proj", prefix)
-        )
-
-        # TODO: temporarily disable DequantSwigluQuant
-        self.gate_up_proj.throw_dequant = True
-
-        self.down_proj = AscendRowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            quant_config=quant_config,
-            reduce_results=False,
-            prefix=add_prefix("down_proj", prefix)
-        )
-        if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. "
-                "Only silu is supported for now."
-            )
-
-        self.act_fn_obj = SiluAndMul()
-        self.quant_symbol = True if quant_config else False
-
-    def act_fn(self, x, quant_symbol):
-        if quant_symbol and isinstance(x, tuple):
-            x = dict(zip(['x_int8', 'pertoken_scale'], x))
-            x['out_scale'] = self.gate_up_proj.weight_scale
-        return self.act_fn_obj(x, quant_symbol)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        use_reduce_scatter: bool = False,
-        **kwargs):
-        x = hidden_states
-        x = get_mlp_tp_group().all_gather(x, dim=0)
-
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up, self.quant_symbol)
-        x, _ = self.down_proj(x, skip_all_reduce=use_reduce_scatter)
-
-        x = get_mlp_tp_group().reduce_scatter_(x)
-        return x
-
-
-class DeepseekDecoderLayer(nn.Module):
-
+class LongcatFlashDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -152,62 +54,63 @@ class DeepseekDecoderLayer(nn.Module):
         self.speculative_algorithm = global_server_args_dict["speculative_algorithm"]
         self.layer_id = layer_id
         self.is_nextn = is_nextn
-        self.quant_symbol = quant_config is not None
+        self.quant_symbol = False
         self.use_super_kernel = os.environ.get("USE_SUPER_KERNEL", "0") == "1"
         self.use_mla_prolog = os.environ.get("USE_MLA_PROLOG", "0") == "1"
 
-        self.is_layer_sparse = is_nextn or (
-                self.config.n_routed_experts is not None
-                and layer_id >= self.config.first_k_dense_replace
-                and layer_id % self.config.moe_layer_freq == 0
-            )
-
-        self.self_attn = DeepseekMLA(
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=(
-                config.q_lora_rank if hasattr(config, "q_lora_rank") else None
-            ),
-            kv_lora_rank=config.kv_lora_rank,
-            rope_theta=getattr(config, "rope_theta", 10000),
-            rope_scaling=getattr(config, "rope_scaling", None),
-            max_position_embeddings=getattr(config, "max_position_embeddings", 8192),
-            quant_config=quant_config,
-            layer_id=layer_id,
-            reduce_results=False,
-            prefix=add_prefix("self_attn", prefix),
+        # DecoderLayers are created with `make_layers` which passes the prefix
+        # with the layer's index.
+        self.self_attn = nn.ModuleList(
+            [
+                DeepseekMLA(
+                    config=config,
+                    hidden_size=self.hidden_size,
+                    num_heads=config.num_attention_heads,
+                    qk_nope_head_dim=config.qk_nope_head_dim,
+                    qk_rope_head_dim=config.qk_rope_head_dim,
+                    v_head_dim=config.v_head_dim,
+                    q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+                    kv_lora_rank=config.kv_lora_rank,
+                    rope_theta=getattr(config, "rope_theta", 10000),
+                    rope_scaling=getattr(config, "rope_scaling", None),
+                    rope_is_neox_style=True,
+                    max_position_embeddings=getattr(config, "max_position_embeddings", 8192),
+                    quant_config=None,
+                    layer_id=layer_id,
+                    reduce_results=False,
+                    prefix=add_prefix(f"self_attn.{i}", prefix)
+                )
+                for i in range(2)
+            ]
         )
 
-        if self.is_layer_sparse:
-            self.mlp = DeepseekMoE(
-                config=config,
-                quant_config=quant_config,
-                prefix=add_prefix("mlp", prefix),
-                layer_id=self.layer_id,
-                is_nextn=is_nextn,
-            )
-        else:
-            mlp_tp_rank, mlp_tp_size = 0, 1
-            if not enable_moe_dense_fully_dp():
-                mlp_tp_rank = get_mlp_tp_group_parallel_rank()
-                mlp_tp_size = get_mlp_tp_group_parallel_world_size()
+        self.input_layernorm = nn.ModuleList(
+            [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
+        )
+        self.post_attention_layernorm = nn.ModuleList(
+            [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
+        )
 
-            self.mlp = ParallelDeepseekMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=add_prefix("mlp", prefix),
-                tp_rank=mlp_tp_rank,
-                tp_size=mlp_tp_size)
+        self.mlps = nn.ModuleList(
+            [
+                LongcatFlashMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.ffn_hidden_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=add_prefix(f"mlps.{i}", prefix),
+                    tp_size=get_mlp_tp_group().world_size,
+                    tp_rank=get_mlp_tp_group().rank_in_group,
+                )
+                for i in range(2)
+            ]
+        )
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+        self.mlp = LongcatFlashMoE(
+            config=config,
+            layer_id=self.layer_id,
+            quant_config=quant_config,
+            prefix=add_prefix("mlp", prefix),
         )
 
     def forward(
@@ -219,72 +122,95 @@ class DeepseekDecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
         **kwargs,
     ) -> torch.Tensor:
-
-        if hidden_states.shape[0] == 0:
+        # Self Attention
+        if residual is None:
             residual = hidden_states
+            hidden_states = self.input_layernorm[0](hidden_states)
         else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(
-                    hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog
-                )
+            # Adapt: adapt for w8a8 dynamic, do quant
+            # Combines residual add and rmsnorm
+            hidden_states, residual = self.input_layernorm[0](
+                hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog)
+            # Adapt end.
+        hidden_states = self.self_attn[0](
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+            zero_allocator=zero_allocator,
+        )
+        hidden_states, residual = self.post_attention_layernorm[0](hidden_states, residual)
 
-        hidden_states = self.self_attn(
+        moe_hidden_states = self.mlp(hidden_states, forward_batch)
+        if isinstance(moe_hidden_states, (tuple, list)):
+            assert len(moe_hidden_states) == 2
+            # 0 is the shared expert hidden_states, 1 is the routing expert hidden_states, add operation cannot be placed in the super kernel
+            moe_hidden_states = moe_hidden_states[0] + moe_hidden_states[1]
+        try:
+            tng.scope.npu_wait_tensor(hidden_states, moe_hidden_states)
+        except:
+            pass
+        hidden_states = self.mlps[0](hidden_states, forward_batch)
+
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm[1](hidden_states)
+        else:
+            # Adapt: adapt for w8a8 dynamic, do quant
+            # Combines residual add and rmsnorm
+            hidden_states, residual = self.input_layernorm[1](
+                hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog)
+
+        hidden_states = self.self_attn[1](
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
 
-        if self.is_layer_sparse and self.use_super_kernel and not forward_batch.is_extend_in_batch:
-            with tng.scope.super_kernel(self.mlp.prefix, 'stream-fusion=1'):
-                hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        else:
-            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-            **kwargs)
+        hidden_states, residual = self.post_attention_layernorm[1](hidden_states, residual)
+
+        hidden_states = self.mlps[1](hidden_states, forward_batch)
+ 
+        hidden_states = moe_hidden_states + hidden_states
 
         return hidden_states, residual
 
 
-class DeepseekV3Model(nn.Module):
+class LongcatFlashModel(nn.Module):
     fall_back_to_pt_during_load = False
 
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+        prefix: str = ""
+    ):
         super().__init__()
-        self.padding_id = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.first_k_dense_replace = config.first_k_dense_replace
-        self.fuse_qkv_a_proj = os.environ.get("USE_FUSE_QKV_A_PROJ", "0") == "1"
+        self.prefix = f"{prefix}.layers"
+        self.postfix = ".self_attn.attn"
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
             enable_tp=not global_server_args_dict["enable_dp_attention"],
         )
+        
         self.layers = nn.ModuleList(
             [
-                DeepseekDecoderLayer(
+                LongcatFlashDecoderLayer(
                     config,
                     layer_id,
                     quant_config=quant_config,
                     prefix=add_prefix(f"layers.{layer_id}", prefix),
                 )
-                for layer_id in range(config.num_hidden_layers)
+                for layer_id in range(config.num_layers)
             ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def get_input_embeddings(self) -> torch.Tensor:
-        return self.embed_tokens
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids, reduce=1)
 
     def forward(
         self,
@@ -310,30 +236,12 @@ class DeepseekV3Model(nn.Module):
 
         for i in range(total_num_layers):
             layer = self.layers[i]
-            prefetch_list = None
-            if i + 1 < total_num_layers:
-                next_attn = self.layers[i + 1].self_attn
-                if self.fuse_qkv_a_proj:
-                    prefetch_list = {
-                        "fused_qkv_a_proj_with_mqa": next_attn.fused_qkv_a_proj_with_mqa.weight,
-                        "q_b_proj": next_attn.q_b_proj.weight,
-                        "w_kc": next_attn.w_kc,
-                    }
-                else:
-                    prefetch_list = {
-                        "q_a_proj": next_attn.q_a_proj.weight,
-                        "kv_a_proj_with_mqa": next_attn.kv_a_proj_with_mqa.weight,
-                        "q_b_proj": next_attn.q_b_proj.weight,
-                        "w_kc": next_attn.w_kc,
-                    }
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
-                zero_allocator,
-                prefetch_list=prefetch_list)
+                zero_allocator)
 
         if not forward_batch.is_prefill_idle:
             if residual is None:
@@ -346,8 +254,7 @@ class DeepseekV3Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV3ForCausalLM(nn.Module):
-    # for quark model load
+class LongcatFlashForCausalLM(nn.Module):
     packed_modules_mapping = {}
 
     def __init__(
@@ -370,8 +277,7 @@ class DeepseekV3ForCausalLM(nn.Module):
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.quant_config = quant_config
-        self.determine_num_fused_shared_experts()
-        self.model = DeepseekV3Model(
+        self.model = LongcatFlashModel(
             config, quant_config, prefix=add_prefix("model", prefix)
         )
         self.lm_head = ParallelLMHead(
@@ -387,31 +293,16 @@ class DeepseekV3ForCausalLM(nn.Module):
             lambda: {
                 layer_id: layer.mlp.get_moe_weights()
                 for layer_id, layer in enumerate(self.model.layers)
-                if isinstance(layer.mlp, DeepseekMoE)
+                if isinstance(layer.mlp, LongcatFlashMoE)
             }
         )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     @property
     def routed_experts_weights_of_layer(self):
         return self._routed_experts_weights_of_layer.value
-
-    def determine_num_fused_shared_experts(
-        self, architecture: str = "DeepseekV3ForCausalLM"
-    ):
-        self.num_fused_shared_experts = 0
-        if global_server_args_dict["disable_shared_experts_fusion"]:
-            return
-
-        # Only Deepseek V3/R1 can use shared experts fusion optimization now.
-        disable_reason = "Only Deepseek V3/R1 on NV-platform with capability >= 80 can use shared experts fusion optimization."
-
-        global_server_args_dict["disable_shared_experts_fusion"] = True
-        self.num_fused_shared_experts = 0
-        log_info_on_rank0(
-            logger,
-            f"{disable_reason} Shared experts fusion optimization is disabled.",
-        )
-        return
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -455,7 +346,6 @@ class DeepseekV3ForCausalLM(nn.Module):
         return logits
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
-
         # Perform post-processing after loading weights
         if is_nextn:
             layer_ids = [self.config.num_hidden_layers]
@@ -465,23 +355,33 @@ class DeepseekV3ForCausalLM(nn.Module):
             else:
                 layer_ids = set()
                 for name in weight_names:
+                    if "mtp" in name:
+                        continue
                     if "kv_b_proj" in name:
                         layer_id = int(name.split(".")[2])
                         if layer_id < self.config.num_hidden_layers:
                             layer_ids.add(layer_id)
 
         for layer_id in layer_ids:
-            self_attn = (
-                self.model.layers[layer_id].self_attn
-                if not is_nextn
-                else self.model.decoder.self_attn
-            )
-            if self_attn.w_kc is not None and self_attn.w_vc is not None:
-                self_attn.w_kc = torch.nn.Parameter(self_attn.w_kc.contiguous(), requires_grad=False)
-                self_attn.w_vc = torch.nn.Parameter(self_attn.w_vc.contiguous(), requires_grad=False)
+            for i in range(2):
+                self_attn = (
+                    self.model.layers[layer_id].self_attn[i]
+                    if not is_nextn
+                    else self.model.decoder.self_attn
+                )
+                if self.config.mla_scale_q_lora:
+                    self_attn.q_a_layernorm.weight.data *= (
+                        self.config.hidden_size / self.config.q_lora_rank
+                    ) ** 0.5
+                if self.config.mla_scale_kv_lora:
+                    self_attn.kv_a_layernorm.weight.data *= (
+                        self.config.hidden_size / self.config.kv_lora_rank
+                    ) ** 0.5
+                if self_attn.w_kc is not None and self_attn.w_vc is not None:
+                    self_attn.w_kc = torch.nn.Parameter(self_attn.w_kc.contiguous(), requires_grad=False)
+                    self_attn.w_vc = torch.nn.Parameter(self_attn.w_vc.contiguous(), requires_grad=False)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
-
         if is_nextn:
             if hasattr(self.config, "num_nextn_predict_layers"):
                 num_nextn_layers = self.config.num_nextn_predict_layers
@@ -489,8 +389,8 @@ class DeepseekV3ForCausalLM(nn.Module):
                 # compatible with old design
                 nextn_layer_id = (
                     0
-                    if self.config.num_hidden_layers == 1
-                    else self.config.num_hidden_layers
+                    if self.config.num_layers == 1
+                    else self.config.num_layers
                 )
             else:
                 raise ValueError("num_nextn_predict_layers is not in the config")
@@ -507,12 +407,8 @@ class DeepseekV3ForCausalLM(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts + self.num_fused_shared_experts,
+            num_experts=self.config.n_routed_experts,
         )
-        if self.quant_config and self.quant_config.get_name() == "w4afp8":
-            expert_params_mapping += FusedMoE.make_expert_input_scale_params_mapping(
-                num_experts=self.config.n_routed_experts
-            )
 
         # Fuse q_a_proj and kv_a_proj_with_mqa along output dimension when q_lora_rank is not None
         fuse_qkv_a_proj = os.environ.get("USE_FUSE_QKV_A_PROJ", "0") == "1"
@@ -527,21 +423,11 @@ class DeepseekV3ForCausalLM(nn.Module):
                 "hnorm",
             ]
 
-        if self.num_fused_shared_experts > 0:
-            assert self.num_fused_shared_experts == 1
-            log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
-
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
             params_dict = dict(self.named_parameters())
             weight_names = []
             for name, loaded_weight in weights:
-                if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
-                    name = name.replace(
-                        "mlp.shared_experts",
-                        f"mlp.experts.{self.config.n_routed_experts}",
-                    )
-
                 weight_names.append(name)
 
                 if not is_nextn:
@@ -551,7 +437,7 @@ class DeepseekV3ForCausalLM(nn.Module):
                             name_list = name.split(".")
                             if (
                                 len(name_list) >= 3
-                                and int(name_list[2]) >= self.config.num_hidden_layers
+                                and int(name_list[2]) >= self.config.num_layers
                             ):
                                 continue
                 else:
@@ -593,6 +479,9 @@ class DeepseekV3ForCausalLM(nn.Module):
                     name = name.replace(weight_name, param_name)
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name not in params_dict:
+                        logger.warning(f"{name} not found in params_dict.")
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
@@ -716,10 +605,9 @@ class DeepseekV3ForCausalLM(nn.Module):
     @classmethod
     def get_model_config_for_expert_location(cls, config):
         return ModelConfigForExpertLocation(
-            num_layers=config.num_hidden_layers,
+            num_layers=config.num_layers,
             num_logical_experts=config.n_routed_experts,
-            num_groups=config.n_group,
+            num_groups=1,
         )
 
-
-EntryClass = DeepseekV3ForCausalLM
+EntryClass = LongcatFlashForCausalLM

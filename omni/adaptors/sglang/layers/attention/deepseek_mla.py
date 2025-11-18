@@ -73,6 +73,31 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
+def extract_layer_index(layer_name: str) -> int:
+    """
+    Extract the layer index from the module name.
+    Examples:
+    - "encoder.layers.0" -> 0
+    - "encoder.layers.1.self_attn" -> 1
+    - "2.self_attn" -> 2
+    - "model.encoder.layers.0.sub.1" -> ValueError
+    """
+    subnames = layer_name.split(".")
+    int_vals: list[int] = []
+    for subname in subnames:
+        try:
+            int_vals.append(int(subname))
+        except ValueError:
+            continue
+
+    if len(int_vals) == 1:
+        return int_vals[0]
+    elif len(int_vals) == 2:
+        return int_vals[0] * 2 + int_vals[1]
+    else:
+        return -1
+
+
 class DeepseekMLA(nn.Module):
 
     def __init__(
@@ -87,6 +112,7 @@ class DeepseekMLA(nn.Module):
         kv_lora_rank: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_is_neox_style: bool = False,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
@@ -100,7 +126,8 @@ class DeepseekMLA(nn.Module):
         self.quant_config = quant_config
         self.prefix = prefix
 
-        self.layer_id = layer_id
+        self.layer_id = extract_layer_index(prefix)
+        self.layer_id = self.layer_id if self.layer_id >= 0 else layer_id
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -206,7 +233,7 @@ class DeepseekMLA(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=False,
+            is_neox_style=rope_is_neox_style,
         )
 
         if rope_scaling:
@@ -214,8 +241,6 @@ class DeepseekMLA(nn.Module):
             scaling_factor = rope_scaling["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
-        else:
-            self.rotary_emb.forward = self.rotary_emb.forward_native
 
         self.w_kc = None
         self.w_vc = None

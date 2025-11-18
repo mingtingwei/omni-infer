@@ -64,14 +64,6 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-        if self.rotary_dim != self.head_size:
-            self.rotary_pos_emb_cache = self.forward_impl(self.max_len, self.rotary_dim/2)
-        else:
-            self.embed = F.embedding
-        self.org_position = None
-        self.q_cache = None
-        self.k_cache = None
-
     def _compute_cos_sin_cache_alt(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
         inv_freq = self._compute_inv_freq(self.base)
@@ -99,25 +91,12 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
 
         return cos, sin
         # Adapt end.
-    
+
     def get_cos_sin(self, positions: torch.Tensor, offsets: Optional[torch.Tensor] = None):
         positions = torch.add(positions, offsets) if offsets is not None else positions
         cos = self.cos[positions].view(-1, 1, 1, self.cos.shape[-1]) # bnsd
         sin = self.sin[positions].view(-1, 1, 1, self.sin.shape[-1])
         return cos, sin
-
-    def forward_impl(
-            self, seq_len: int, n_elem: int):
-        """Enhanced Transformer with Rotary Position Embedding.
-        Derived from: https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/
-        transformers/rope/__init__.py. MIT License:
-        https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/license.
-        """
-        theta = 1.0 / (self.base ** (torch.arange(0, n_elem, 2, dtype=self.dtype) / n_elem))
-        seq_idx = torch.arange(seq_len, dtype=self.dtype)
-        idx_theta = torch.outer(seq_idx, theta).float().npu()
-        cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1).to(self.dtype)
-        return cache
 
     # use small ops
     def apply_rotary_pos_emb(self, x, cos, sin):
@@ -126,33 +105,46 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
         output = cos * x + sin * x_new
         return output
 
-    # use small ops for chatglm
-    def apply_rotary_pos_emb_glm(self, x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
-        sq, b, np, hn = x.size(0), x.size(1), x.size(2), x.size(3)
-        rot_dim = rope_cache.shape[-2] * 2
-        x, x_pass = x[..., :rot_dim], x[..., rot_dim:]
-        rope_cache = rope_cache[:sq]
-        xshaped = x.reshape(sq, -1, np, rot_dim // 2, 2)
-        rope_cache = rope_cache.view(sq, -1, 1, xshaped.size(3), 2)
-        x_out2 = torch.stack(
-            [
-                xshaped[..., 0] * rope_cache[..., 0] - xshaped[..., 1] * rope_cache[..., 1],
-                xshaped[..., 1] * rope_cache[..., 0] + xshaped[..., 0] * rope_cache[..., 1],
-            ],
-            -1,
-        )
-        x_out2 = x_out2.flatten(3)
-        return torch.cat((x_out2, x_pass), dim=-1)
+    def apply_rotary_emb_torch(
+            self,
+            x: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            is_neox_style: bool,
+    ) -> torch.Tensor:
+        cos = cos.unsqueeze(-2).to(x.dtype)
+        sin = sin.unsqueeze(-2).to(x.dtype)
+        if is_neox_style:
+            x1, x2 = torch.chunk(x, 2, dim=-1)
+        else:
+            x1 = x[..., ::2]
+            x2 = x[..., 1::2]
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        if is_neox_style:
+            return torch.cat((o1, o2), dim=-1)
+        else:
+            return torch.stack((o1, o2), dim=-1).flatten(-2)
 
-    # adapt chatglm : dim = head_size / 2
-    def _forward_chatglm(self, position_ids, query, key):
-        rotary_pos_emb = self.rotary_pos_emb_cache[position_ids]
-        query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
-        key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
-
-        q_embed = self.apply_rotary_pos_emb_glm(query, rotary_pos_emb)
-        k_embed = self.apply_rotary_pos_emb_glm(key, rotary_pos_emb)
-        return q_embed.flatten(-2), k_embed.flatten(-2)
+    def _forward_native(self, position_ids, query, key):
+        position = position_ids.flatten()
+        num_tokens = position_ids.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, position_ids)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = self.apply_rotary_emb_torch(query_rot, cos, sin, self.is_neox_style)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            key_rot = key[..., :self.rotary_dim]
+            key_pass = key[..., self.rotary_dim:]
+            key_rot = self.apply_rotary_emb_torch(key_rot, cos, sin, self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
 
     # use ascend_ops to deal with torch_npu.npu_apply_rotary_pos_emb last dim is not 128 bug
     def _forward_ascend_ops_and_small_ops(self, position_ids, query, key):
@@ -168,68 +160,26 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
 
     # use torch_npu fused ops
     def _forward_fused_ops(self, position_ids, query, key, layer_name: Optional[str] = None):
-        forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[layer_name]
+        # adapt to TND format
         cos = torch.index_select(self.cos, dim=0, index=position_ids.view(-1)).unsqueeze(1)
         sin = torch.index_select(self.sin, dim=0, index=position_ids.view(-1)).unsqueeze(1)
         # head_dim use class variable, repair head_dim convert to symbol in dynamo
         query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
         key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
 
-        if attn_metadata is None:
-            query = query.unsqueeze(0)
-            key = key.unsqueeze(0)  
-            cos = cos.unsqueeze(0)
-            sin = sin.unsqueeze(0)
-        else:     
-            num_batch = attn_metadata.seq_lens.shape[0]
-            # Calculate padding needed for each tensor to make them divisible by num_batch
-            total_tokens = query.shape[0]
-            tokens_per_batch = (total_tokens + num_batch - 1) // num_batch  # Ceiling division
-            padded_total_tokens = tokens_per_batch * num_batch
-            
-            # Pad query, key, cos, sin to make them divisible by num_batch if needed
-            if padded_total_tokens > total_tokens:
-                padding_size = padded_total_tokens - total_tokens
-                query_padding = torch.zeros(padding_size, *query.shape[1:], device=query.device, dtype=query.dtype)
-                key_padding = torch.zeros(padding_size, *key.shape[1:], device=key.device, dtype=key.dtype)
-                cos_padding = torch.zeros(padding_size, *cos.shape[1:], device=cos.device, dtype=cos.dtype)
-                sin_padding = torch.zeros(padding_size, *sin.shape[1:], device=sin.device, dtype=sin.dtype)
-                
-                query = torch.cat([query, query_padding], dim=0)
-                key = torch.cat([key, key_padding], dim=0)
-                cos = torch.cat([cos, cos_padding], dim=0)
-                sin = torch.cat([sin, sin_padding], dim=0)
-            
-            # Now reshape with the padded tensors
-            query = query.view(num_batch, tokens_per_batch, query.shape[1], self.head_size)
-            key = key.view(num_batch, tokens_per_batch, key.shape[1], self.head_size)
-            cos = cos.view(num_batch, tokens_per_batch, cos.shape[1], self.head_size)
-            sin = sin.view(num_batch, tokens_per_batch, sin.shape[1], self.head_size)
-
         # npu_apply_rotary_pos_emb replace npu_rotary_mul, npu_rotary_mul will not support muti batch size
-        q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
+        q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, 'TND')
 
         # Flatten results
-        q_embed_flat = q_embed.flatten(0, 1).flatten(1, 2)
-        k_embed_flat = k_embed.flatten(0, 1).flatten(1, 2)
-        
-        # Remove padding if it was applied
-        if attn_metadata is not None:
-            total_tokens = position_ids.shape[0]  # Use original total_tokens
-            if q_embed_flat.shape[0] > total_tokens:
-                q_embed_flat = q_embed_flat[:total_tokens]
-                k_embed_flat = k_embed_flat[:total_tokens]
-        
-        return q_embed_flat, k_embed_flat
+        q_embed_flat = q_embed.flatten(1,2)
+        k_embed_flat = k_embed.flatten(1,2)
 
+        return q_embed_flat, k_embed_flat
 
     def forward(self, position_ids, query, key, layer_name: Optional[str] = None):
         # adapt chatglm : dim = head_size / 2
         if self.rotary_dim < self.head_size:
-            q_embed, k_embed = self._forward_chatglm(position_ids, query, key)
+            q_embed, k_embed = self._forward_native(position_ids, query, key)
         elif self.rotary_dim != 128:
             # use ascend_ops to deal with torch_npu.npu_apply_rotary_pos_emb last dim is not 128 bug
             q_embed, k_embed = self._forward_ascend_ops_and_small_ops(position_ids, query, key)

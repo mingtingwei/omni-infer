@@ -19,9 +19,101 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
 from sglang.srt.eplb.expert_location_dispatch import topk_ids_logical_to_physical
-
+from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod as GPUUnquantizedFusedMoEMethod
 
 logger = logging.getLogger(__name__)
+
+class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
+    LAST_SEQ_LEN = None
+    BEST_EXPERT_TOKENS = None
+
+    def __init__(self):
+        super().__init__(None)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        **kwargs
+    ) -> torch.Tensor:
+        out = self.moe_infer_fusion(layer,
+                                    hidden_states,
+                                    topk_ids,
+                                    layer.w13_weight,
+                                    layer.w2_weight)
+        return out
+
+    def moe_infer_fusion(self, layer, x, topk_ids, w1, w2):
+        _, h = x.shape
+        hidden_states = x.view(-1, h)
+        topk_ids = topk_ids.int()
+        ep_size = get_moe_ep_group().world_size
+        max_num_deployed_expert = layer.w13_weight.shape[0] * ep_size
+        expert_range = [0, max_num_deployed_expert]
+        expanded_x, expanded_row_idx, tokens_per_expert, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
+            hidden_states,
+            expert_idx=topk_ids,
+            scale=None,
+            expert_num=max_num_deployed_expert,
+            active_expert_range=expert_range,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_num=topk_ids.numel(),
+            drop_pad_mode=0,
+            row_idx_type=0,
+            quant_mode=-1)
+        tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
+        dist.all_to_all_single(tokens_per_expert_group,
+                               tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
+
+        # combine tensors, do reduceSum and D2H toghter
+        combine_tokens = torch.stack([tokens_per_expert_group, tokens_per_expert], dim=0)
+        # view: EP, E//EP
+        # sum: EP, the number of tokens each rank receives from other cards
+        combine_tokens = combine_tokens.view(2, ep_size, -1).sum(2)
+        all_tokens = combine_tokens[0].sum()
+        combine_tokens_cpu = combine_tokens.cpu().tolist()
+        # alltoall input splits, the total number of tokens routed from the current rank to other ranks
+        input_splits = combine_tokens_cpu[1]
+        # alltoall output splits, the number of tokens each rank receives from other cards
+        output_splits = combine_tokens_cpu[0]
+        # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
+        gathered_tokens = expanded_x.new_empty(
+            all_tokens.item(), expanded_x.shape[1]
+        )
+        dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
+        # reroute
+        # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
+        hidden_states_sorted_by_experts, _, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
+            gathered_tokens,
+            tokens_per_expert_group.view(ep_size, -1),
+            per_token_scales=None
+        )
+        group_list = tokens_per_local_expert.to(torch.int64)
+
+        mm1_mm3 = torch_npu.npu_grouped_matmul([hidden_states_sorted_by_experts], [w1],
+                                               group_list=group_list, split_item=3, group_type=0,
+                                               group_list_type=1)[0]
+        intermediate_h = torch_npu.npu_swiglu(mm1_mm3)
+        # gmm2: down
+        hidden_states_ordered_by_experts = torch_npu.npu_grouped_matmul([intermediate_h], [w2], bias=None,
+                                                                        group_list=group_list, split_item=3,
+                                                                        group_type=0,
+                                                                        group_list_type=1)[0]
+        new_x = torch.index_select(hidden_states_ordered_by_experts, 0,
+                                   gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
+        gathered_tokens = new_x.new_empty(*expanded_x.shape)
+
+        dist.all_to_all_single(gathered_tokens, new_x, input_splits, output_splits)
+
+        return hidden_states, gathered_tokens, expanded_row_idx
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.w13_weight = torch.nn.Parameter(layer.w13_weight.transpose(1, 2).contiguous(), requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(layer.w2_weight.transpose(1, 2).contiguous(), requires_grad=False)
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 29)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 29)
 
 
 class FusedMoE(BaseFusedMoE):
@@ -59,7 +151,11 @@ class FusedMoE(BaseFusedMoE):
             swiglu_limit=None,
             with_bias=None,
         )
-
+        if quant_config is None:
+            self.quant_method = UnquantizedFusedMoEMethod()
+            self.quant_mode = 0
+        else:
+            self.quant_mode = 2
         assert self.quant_method is not None
 
         self.planner = kwargs.get("planner", None)

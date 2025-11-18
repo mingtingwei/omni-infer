@@ -1,0 +1,70 @@
+diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
+index 812f07103..fc549d5a5 100644
+--- a/python/sglang/srt/configs/model_config.py
++++ b/python/sglang/srt/configs/model_config.py
+@@ -214,7 +214,13 @@ class ModelConfig:
+                 scaling_factor = self.hf_config.rope_scaling["factor"]
+                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+                 self.scaling = self.scaling * mscale * mscale
+-
++        elif "LongcatFlashForCausalLM" in self.hf_config.architectures:
++            self.head_dim = 256
++            self.attention_arch = AttentionArch.MLA
++            self.kv_lora_rank = self.hf_config.kv_lora_rank
++            self.qk_nope_head_dim = self.hf_config.qk_nope_head_dim
++            self.qk_rope_head_dim = self.hf_config.qk_rope_head_dim
++            self.v_head_dim = self.hf_config.v_head_dim
+         elif "MiniCPM3ForCausalLM" in self.hf_config.architectures:
+             self.head_dim = 128
+             self.attention_arch = AttentionArch.MLA
+@@ -268,6 +274,9 @@ class ModelConfig:
+             self.num_key_value_heads = self.num_attention_heads
+         self.hidden_size = self.hf_text_config.hidden_size
+         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
++        self.num_attention_layers = self.num_hidden_layers
++        if "LongcatFlashForCausalLM" in self.hf_config.architectures:
++            self.num_attention_layers = self.num_hidden_layers * 2
+         self.num_nextn_predict_layers = getattr(
+             self.hf_text_config, "num_nextn_predict_layers", None
+         )
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index e89449456..291d3cec4 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -341,7 +341,10 @@ class ModelRunner:
+         model_num_layers = (
+             self.model_config.num_nextn_predict_layers
+             if self.is_draft_worker and model_has_mtp_layers
+-            else self.model_config.num_hidden_layers
++            else max(
++                self.model_config.num_attention_layers,
++                self.model_config.num_hidden_layers,
++            )
+         )
+         self.start_layer = getattr(self.model, "start_layer", 0)
+         self.end_layer = getattr(self.model, "end_layer", model_num_layers)
+diff --git a/python/sglang/srt/models/registry.py b/python/sglang/srt/models/registry.py
+index 3f61e8337..04bf6caa6 100644
+--- a/python/sglang/srt/models/registry.py
++++ b/python/sglang/srt/models/registry.py
+@@ -109,4 +109,6 @@ module = importlib.import_module("omni.adaptors.sglang.models.deepseek.deepseek_
+ tmp_.models["DeepseekV3ForCausalLM"] = module.EntryClass
+ module = importlib.import_module("omni.adaptors.sglang.models.deepseek.deepseek_mtp")
+ tmp_.models["DeepseekV3ForCausalLMNextN"] = module.EntryClass
++module = importlib.import_module("omni.adaptors.sglang.models.longcat.longcat_flash")
++tmp_.models["LongcatFlashForCausalLM"] = module.EntryClass
+ ModelRegistry = tmp_
+diff --git a/python/sglang/srt/utils.py b/python/sglang/srt/utils.py
+index 0ea2def9c..4b9a62a07 100644
+--- a/python/sglang/srt/utils.py
++++ b/python/sglang/srt/utils.py
+@@ -1710,7 +1710,8 @@ def get_compiler_backend() -> str:
+                 raise TypeError(
+                     f"Unsupported config type for {config_group}: {type(config_value)}"
+                 )
+-
++        if os.environ.get("DISABLE_INPLACE_ADD_RMSNORM_FUSION_PASS"):
++            compiler_config.ge_config.optimization_switch = "InplaceAddRmsNormFusionPass:off"
+         npu_backend = torchair.get_npu_backend(compiler_config=compiler_config)
+         return npu_backend
+ 

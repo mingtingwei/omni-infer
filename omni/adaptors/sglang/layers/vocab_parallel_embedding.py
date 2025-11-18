@@ -1,13 +1,17 @@
 import logging
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional
 
 import torch
 from sglang.srt.distributed import divide, tensor_model_parallel_all_gather
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size, get_attention_dp_size
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_group,
+    get_attention_tp_rank,
+    get_attention_tp_size,
+    get_attention_dp_size
+)
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -22,13 +26,12 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     pad_vocab_size,
 )
 from sglang.srt.utils import set_weight_attrs
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import Parameter
 
 from omni.adaptors.sglang.distributed import (
     get_local_world_group,
     get_local_world_rank,
     get_local_world_size,
-    tensor_model_local_world_parallel_all_reduce,
 )
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -50,13 +53,14 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_tp: bool = True,
-        use_attn_tp_group: bool = False,
+        use_attn_tp_group: bool = True,
         use_presharded_weights: bool = False,
     ):
         torch.nn.Module.__init__(self)
         self.quant_config = quant_config
 
         self.enable_tp = enable_tp
+        self.use_attn_tp_group = use_attn_tp_group
         if self.enable_tp:
             if use_attn_tp_group:
                 tp_rank = get_attention_tp_rank()
@@ -65,7 +69,6 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
                 tp_rank = get_local_world_rank()
                 self.tp_size = get_local_world_size()
         else:
-            assert use_attn_tp_group is False
             tp_rank = 0
             self.tp_size = 1
 
@@ -166,14 +169,15 @@ class VocabParallelEmbedding(VocabParallelEmbeddingGPU):
         else:
             masked_input = input_
         # Get the embeddings.
-        with use_symmetric_memory(get_local_world_group()) as sm:
+        group = get_attention_tp_group if self.use_attn_tp_group else get_local_world_group
+        with use_symmetric_memory(group()) as sm:
             output_parallel = self.quant_method.embedding(self, masked_input.long())
             sm.tag(output_parallel)
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
             # Reduce across all the model parallel GPUs.
-            output = get_local_world_group().reduce_scatter_(output_parallel)
+            output = group().reduce_scatter_(output_parallel)
         else:
             output = output_parallel
         return output

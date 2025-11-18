@@ -67,8 +67,10 @@ class AscendMLAMetadata:
             ):
                 self.seq_lens_list_cumsum[-1] = bs
         self.attn_mask = attn_mask
-        self.cos, self.sin = layer.self_attn.rotary_emb.get_cos_sin(forward_batch.positions)
-
+        if isinstance(layer.self_attn, torch.nn.ModuleList):
+            self.cos, self.sin = layer.self_attn[0].rotary_emb.get_cos_sin(forward_batch.positions)
+        else:
+            self.cos, self.sin = layer.self_attn.rotary_emb.get_cos_sin(forward_batch.positions)
 
 
 class KVBlockTable:
@@ -140,18 +142,16 @@ class AscendMLABackend(TorchNativeAttnBackend):
         )
         self.norm_res = None
         self.actual_seq_lengths = None
-        if "deepseek" in model_runner.model_config.hf_config.architectures[0].lower():
-            self.kv_lora_rank = model_runner.model_config.kv_lora_rank
-            self.q_lora_rank = model_runner.model_config.hf_config.q_lora_rank
-            self.qk_nope_head_dim = model_runner.model_config.qk_nope_head_dim
-            self.qk_rope_head_dim = model_runner.model_config.qk_rope_head_dim
-            self.v_head_dim = model_runner.model_config.v_head_dim
-            self.kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
-            self.scaling = model_runner.model_config.scaling
-            if model_runner.dp_size > 1:
-                bs = model_runner.server_args.torch_compile_max_bs
-                self.norm_res = torch.zeros([bs, self.q_lora_rank], dtype=torch.bfloat16, device=self.device)
-                self.actual_seq_lengths = torch.arange(1, bs + 1, dtype=torch.int64, device=self.device) # cumsum for TND layout
+        self.kv_lora_rank = model_runner.model_config.kv_lora_rank
+        self.q_lora_rank = model_runner.model_config.hf_config.q_lora_rank
+        self.qk_nope_head_dim = model_runner.model_config.qk_nope_head_dim
+        self.qk_rope_head_dim = model_runner.model_config.qk_rope_head_dim
+        self.v_head_dim = model_runner.model_config.v_head_dim
+        self.kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        if model_runner.dp_size > 1:
+            bs = model_runner.server_args.torch_compile_max_bs
+            self.norm_res = torch.zeros([bs, self.q_lora_rank], dtype=torch.bfloat16, device=self.device)
+            self.actual_seq_lengths = torch.arange(1, bs + 1, dtype=torch.int64, device=self.device) # cumsum for TND layout
         self.data_type = model_runner.kv_cache_dtype
         self.q_data_type = model_runner.dtype
 
