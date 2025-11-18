@@ -76,3 +76,4 @@ index 0f30bed26..03ec17201 100644
 +        response.kv_transfer_params["trace_headers"] = headers.get(request_id)
  
          return response
+ 
