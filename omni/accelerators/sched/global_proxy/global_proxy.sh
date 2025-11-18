@@ -485,6 +485,7 @@ function nginx_set_location_openai_compatible() {
         # match /v1/completions and /v1/chat/completions
         location ~ ^/v1(/chat)?/completions$ {
             set_request_id on;
+            set_trace_headers_force off;
             stream_ops $stream_ops;
             prefill /prefill_internal;
             proxy_pass http://decode_servers;

@@ -5,35 +5,83 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      raw_request_id = args[0].raw_request_id
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var
+      request_id = args[0].req_id
       if os.getenv('ROLE') == "prefill":
-          safe_print(trace_output_directory, f"<<<Action: Get prefill engine request and start pickle; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          if parent_ctx_var.get() is not None: 
+              timestamp = time.time_ns()
+              create_span(start_time_ns=0, end_time=timestamp, action_name="Get prefill engine request and start pickle", request_id=request_id, ip_str=ip_str, ctx_flag= True, trace_headers=None,) 
+
+          safe_print(trace_output_directory, f"<<<Action: Get prefill engine request and start pickle; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
     exit_operation: |
       import os, time
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      raw_request_id = args[0].raw_request_id
+      request_id = args[0].req_id
       if os.getenv('ROLE') == "prefill":
-          safe_print(trace_output_directory, f"<<<Action: Finish process request in prefill engine; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          if parent_ctx_var.get() is not None: 
+              timestamp = time.time_ns()
+              create_span(start_time_ns=0, end_time=timestamp, action_name="Finish process request in prefill engine",request_id=request_id, ip_str=ip_str, ctx_flag=True, trace_headers=None,)
+          safe_print(trace_output_directory, f"<<<Action: Finish process request in prefill engine; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   - module: "vllm.entrypoints.openai.serving_chat:OpenAIServingChat"
     function_name: create_chat_completion
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      raw_request_id = "chatcmpl-" + args[1].headers.get('X-Request-Id')
-      args[0].raw_request_id = raw_request_id
+      request_id = "chatcmpl-" + args[1].headers.get('X-Request-Id')
+      args[0].req_id = request_id
+      from omni.tools.profiler.trace.tracing import parent_ctx_var, span_start_time, create_span, clean_ctx
+      from vllm.logger import init_logger
+      import logging, time
+      logging.basicConfig(level=logging.DEBUG)
+      logger = init_logger(__name__)
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      clean_ctx()
       if os.getenv('ROLE') == "prefill":
-          safe_print(trace_output_directory, f"<<<Action: PD api server get request; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          trace_headers = {"traceparent": args[1].headers.get("Traceparent")}
+          if trace_headers.get('traceparent') is not None:
+              timestamp = time.time_ns()          
+              current_ctx = TraceContextTextMapPropagator().extract(trace_headers)
+              header_start_time = args[1].headers.get("Start_time_ns")
+              start_time = int(header_start_time)
+
+              logger.info(f"***** PD api server get request, req_id:{request_id}, start_time:{start_time}, timestamp:{timestamp}")
+              parent_ctx_var.set(current_ctx)
+              span_start_time.set(start_time)
+
+              create_span(start_time_ns=0, end_time=timestamp, action_name="PD api server get request", request_id=request_id, ip_str=ip_str, ctx_flag= True, trace_headers=None,)
+          logger.info(f"***** PD api server get request, req_id:{request_id}, trace_headers:{trace_headers}")
+          safe_print(trace_output_directory, f"<<<Action: PD api server get request; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
       else:
-          safe_print(trace_output_directory, f"<<<Action: Enter decode to generate; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          trace_headers = {"traceparent": args[1].headers.get("Traceparent")}
+          if trace_headers.get('traceparent') is not None:
+              timestamp = time.time_ns()
+              header_start_time = args[1].headers.get("Start_time_ns")
+              start_time = int(header_start_time)
+              
+              logger.info(f"***** Enter decode to generate, req_id:{request_id}, trace_headers:{trace_headers}, start_time: {start_time}, end_time:{timestamp}, start_time-end_time={start_time-timestamp}")
+              create_span(start_time_ns=start_time, end_time=timestamp, action_name="Enter decode to generate", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          safe_print(trace_output_directory, f"<<<Action: Enter decode to generate; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   - module: "vllm.v1.core.sched.scheduler:Scheduler"
     function_name: add_request
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       if os.getenv('ROLE') == "prefill":
-          safe_print(trace_output_directory, f"<<<Action: Prefill add waiting queue; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+        if args[0].trace_headers:
+            start_time = int(args[0].trace_headers.get("start_time_ns"))
+            trace_headers = {"traceparent": args[0].trace_headers["traceparent"]}
+            timestamp = time.time_ns()
+            ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill add waiting queue", request_id=args[0].request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+            carrier = {}
+            TraceContextTextMapPropagator().inject(carrier, context=ctx)
+            carrier['start_time_ns'] = str(timestamp)
+            args[0].trace_headers = carrier
+        safe_print(trace_output_directory, f"<<<Action: Prefill add waiting queue; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
  # Prefill free kv blocks
   - module: "vllm.v1.core.sched.scheduler:Scheduler"
@@ -41,8 +89,21 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from vllm.logger import init_logger
+      import logging, time
+      logging.basicConfig(level=logging.DEBUG)
+      logger = init_logger(__name__)
       for req_id in (args[0].finished_sending or ()):
           if req_id in self.requests and req_id not in self._cached_reqs_data:
+              headers = self.connector.pop_trace_headers(req_id) or {}
+              if headers and headers.get('traceparent') is not None:
+                  start_time = int(headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  logger.info(f"**** Prefill free kv blocks, req_id:{req_id}, headers:{headers} at {time.time()}")
+                  if start_time<timestamp:
+                      create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill free kv blocks", request_id=req_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
               safe_print(trace_output_directory, f"<<<Action: Prefill free kv blocks; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   # start pull kv
@@ -51,7 +112,16 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span, ttft_start_time, ttft_trace_id
       request_id = kwargs['request_id']
+      headers = kwargs.get('trace_headers') or getattr(self, 'trace_headers', None)
+      if headers and headers.get('traceparent') is not None:
+          start_time = int(headers.get("start_time_ns"))
+          trace_headers = {"traceparent": headers["traceparent"]}
+          timestamp = time.time_ns()
+          create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          ttft_start_time.set(headers.get('ttft_start_time'))
+          ttft_trace_id.set(headers.get('ttft_traceparent'))
       safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   # finish pull kv
@@ -60,7 +130,19 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      request_id = args[1][0]
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var, clean_ctx, ttft_start_time, ttft_trace_id
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      request_id = args[1][0]['remote_request_id']
+      if parent_ctx_var.get() is not None: 
+          timestamp = time.time_ns()
+          ctx = create_span(start_time_ns=0, end_time=timestamp, action_name="Finish pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=True, trace_headers=None,)
+          carrier = {}
+          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+          carrier['start_time_ns'] = str(timestamp)
+          carrier['ttft_start_time'] = ttft_start_time.get()
+          carrier['ttft_traceparent'] = ttft_trace_id.get()
+          args[1][0]['trace_headers'] = carrier
+      clean_ctx()
       safe_print(trace_output_directory, f"<<<Action: Finish pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   - module: "vllm.v1.serial_utils:MsgpackDecoder"
@@ -78,10 +160,27 @@ targets:
     exit_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from vllm.logger import init_logger
+      import logging, time
+      logging.basicConfig(level=logging.DEBUG)
+      logger = init_logger(__name__)
       from vllm.v1.engine import EngineCoreOutputs
+      from omni.tools.profiler.trace.tracing import parent_ctx_var, create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       if isinstance(result, EngineCoreOutputs) and os.getenv('ROLE') == "prefill":
           for request in getattr(result, 'outputs', []):
-              safe_print(trace_output_directory, f"<<<Action: Pop output queues; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              if request.trace_headers:
+                start_time = int(request.trace_headers.get("start_time_ns"))
+                trace_headers = {"traceparent": request.trace_headers["traceparent"]}
+                timestamp = time.time_ns()
+                ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Finish prefill pickle and start response", request_id=request.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+              
+                carrier = {}
+                TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                carrier['start_time_ns'] = str(timestamp)
+                request.trace_headers = carrier
+                logger.info(f"<<< Finish prefill pickle and start response, req_id:{request.request_id}, trace_headers:{request.trace_headers}")
+
               safe_print(trace_output_directory, f"<<<Action: Finish prefill pickle and start response; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   - module: "vllm.v1.core.kv_cache_manager:KVCacheManager"
@@ -89,10 +188,21 @@ targets:
     exit_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       load_kv_async = False
       if "delay_cache_blocks" in kwargs:
           load_kv_async = kwargs['delay_cache_blocks']
-          if result and load_kv_async == False and os.getenv('ROLE') == "prefill": # block is not none
+          if result and load_kv_async == False and os.getenv('ROLE') == "prefill": # block is not-none
+              if args[0].trace_headers:
+                  start_time = int(args[0].trace_headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": args[0].trace_headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill get new_blocks", request_id=args[0].request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                  carrier = {}
+                  TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                  carrier['start_time_ns'] = str(timestamp)
+                  args[0].trace_headers = carrier
               safe_print(trace_output_directory, f"<<<Action: Prefill get new_blocks; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
           elif result and load_kv_async: #delay_cache_blocks is True
               safe_print(trace_output_directory, f"<<<Action: Add need pulling sequence; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
@@ -104,16 +214,56 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       class CustomList(list):
+          def __init__(self, connector, iterable=()):
+              super().__init__(iterable)
+              self.connector = connector        
           def append(self, item):
               if os.getenv('ROLE') == "prefill":
+                  if item.trace_headers:
+                      start_time = int(item.trace_headers.get("start_time_ns"))
+                      trace_headers = {"traceparent": item.trace_headers["traceparent"]}
+                      timestamp = time.time_ns()
+                      ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="success add to seq groups", request_id=item.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                      carrier = {}
+                      TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                      carrier['start_time_ns'] = str(timestamp)
+                      item.trace_headers = carrier
                   safe_print(trace_output_directory, f"<<<Action: success add to seq groups; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               else:
+                  headers = self.connector.pop_trace_headers(item.request_id) or {}
+                  if headers and headers.get('traceparent') is not None:
+                      start_time = int(headers.get("start_time_ns"))
+                      trace_headers = {"traceparent": headers["traceparent"]}
+                      timestamp = time.time_ns()
+                      ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start append running sequece for decode", request_id=item.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                      carrier = {}
+                      TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                      carrier['start_time_ns'] = str(timestamp)
+                      carrier['ttft_start_time'] = headers.get('ttft_start_time')
+                      carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
+                      item.trace_headers = carrier
                   safe_print(trace_output_directory, f"<<<Action: Start append running sequece for decode; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               super().append(item)
-      self.running = CustomList(self.running)
-      for request in self.waiting: 
-          safe_print(trace_output_directory, f"<<<Action: try to schedule in waiting queue; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+      # self.running = CustomList(self.running)
+      self.running = CustomList(connector=self.connector, iterable=self.running)
+
+      for request in self.waiting:
+          if request.request_id not in self.traced_waiting_ids:
+              if os.getenv('ROLE') == "prefill":
+                  if request.trace_headers:
+                      start_time = int(request.trace_headers.get("start_time_ns"))
+                      trace_headers = {"traceparent": request.trace_headers["traceparent"]}
+                      timestamp = time.time_ns()
+                      ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="try to schedule in waiting queue", request_id=request.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                      carrier = {}
+                      TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                      carrier['start_time_ns'] = str(timestamp)
+                      request.trace_headers = carrier
+                      self.traced_waiting_ids.add(request.request_id)
+          safe_print(trace_output_directory, f"<<<Action: try to schedule in waiting queue; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")          
     exit_operation: |
       self.schedule_output = result # for accessing schedule_output in engine core
 
@@ -122,20 +272,68 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
       self.execute_model_start_time = time.time()
       args[0].engine_core_str = f'{os.getpid()}-{self.execute_model_start_time}'
       for req in args[0].scheduled_new_reqs:
           if os.getenv('ROLE') == "prefill":
+              if req.trace_headers:
+                  start_time = int(req.trace_headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": req.trace_headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill start execute_model", request_id=req.req_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                  carrier = {}
+                  TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                  carrier['start_time_ns'] = str(timestamp)
+                  req.trace_headers = carrier
               safe_print(trace_output_directory, f"<<<Action: Prefill start execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
           else:
+              if req.trace_headers:
+                  start_time = int(req.trace_headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": req.trace_headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Decode start execute_model", request_id=req.req_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                  carrier = {}
+                  TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                  carrier['start_time_ns'] = str(timestamp)
+                  carrier['ttft_start_time'] = req.trace_headers.get('ttft_start_time')
+                  carrier['ttft_traceparent'] = req.trace_headers.get('ttft_traceparent')
+                  req.trace_headers = carrier
               safe_print(trace_output_directory, f"<<<Action: Start to send output; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
     exit_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       self.execute_model_end_time = time.time()
       for req in args[0].scheduled_new_reqs:
           if os.getenv('ROLE') == "prefill":
+              if req.trace_headers:
+                  start_time = int(req.trace_headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": req.trace_headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill done execute_model", request_id=req.req_id, ip_str=ip_str, ctx_flag=False, trace_headers=req.trace_headers,)
+                  carrier = {}
+                  TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                  carrier['start_time_ns'] = str(timestamp)
+                  req.trace_headers = carrier
               safe_print(trace_output_directory, f"<<<Action: Prefill done execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          else:
+              if req.trace_headers:
+                  start_time = int(req.trace_headers.get("start_time_ns"))
+                  trace_headers = {"traceparent": req.trace_headers["traceparent"]}
+                  timestamp = time.time_ns()
+                  ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Decode done execute_model", request_id=req.req_id, ip_str=ip_str, ctx_flag=False, trace_headers=req.trace_headers,)
+                  carrier = {}
+                  TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                  carrier['ttft_start_time'] = req.trace_headers.get('ttft_start_time')
+                  carrier['ttft_traceparent'] = req.trace_headers.get('ttft_traceparent')
+                  carrier['start_time_ns'] = str(timestamp)
+                  req.trace_headers = carrier
+              safe_print(trace_output_directory, f"<<<Action: Decode done execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
 
   - module: "omni.adaptors.vllm.worker.npu_model_runner:NPUModelRunner" 
     function_name: _execute_model
@@ -207,14 +405,39 @@ targets:
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
       from vllm.v1.engine import EngineCoreRequestType
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var, clean_ctx
       def patch_queue_put_nowait(queue):
           original_put_nowait = queue.put_nowait
           def patched_put_nowait(item):
               request_type, request = item
               if request_type == EngineCoreRequestType.ADD:
                   if os.getenv('ROLE') == "prefill":
+                      traceparent = request.trace_headers.get('traceparent') if request.trace_headers else None
+                      if traceparent is not None:
+                          start_time = int(request.trace_headers.get("start_time_ns"))
+                          trace_headers = {"traceparent": request.trace_headers["traceparent"]}
+                          timestamp = time.time_ns()
+                          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start process request in prefill engine", request_id=request.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                          carrier = {}
+                          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                          carrier['start_time_ns'] = str(timestamp)
+                          request.trace_headers = carrier
                       safe_print(trace_output_directory, f"<<<Action: Start process request in prefill engine; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
                   else:
+                      traceparent = request.trace_headers.get('traceparent') if request.trace_headers else None
+                      clean_ctx()
+                      if traceparent is not None:
+                          start_time = int(request.trace_headers.get("start_time_ns"))
+                          trace_headers = {"traceparent": request.trace_headers["traceparent"]}
+                          timestamp = time.time_ns()
+                          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start to dispatch decode request", request_id=request.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                          carrier = {}
+                          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                          carrier['start_time_ns'] = str(timestamp)
+                          carrier['ttft_start_time'] = request.trace_headers.get('ttft_start_time')
+                          carrier['ttft_traceparent'] = request.trace_headers.get('ttft_traceparent')
+                          request.trace_headers = carrier
                       safe_print(trace_output_directory, f"<<<Action: Start to dispatch decode request; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               original_put_nowait(item)
           queue.put_nowait = patched_put_nowait
@@ -227,12 +450,26 @@ targets:
       import os, time
       import queue
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      from omni.tools.profiler.apply_profiler_patches import patch_enginecoreoutput
+      patch_enginecoreoutput()
       def patch_queue_get(queue):
           original_get = queue.get
           def patch_get():
               value = original_get()
               for request in getattr(value, 'outputs', []):
                   if os.getenv('ROLE') == "prefill":
+                      if request.trace_headers:
+                          start_time = int(request.trace_headers.get("start_time_ns"))
+                          trace_headers = {"traceparent": request.trace_headers["traceparent"]}
+                          timestamp = time.time_ns()
+                          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start to send output in prefill stage", request_id=request.request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+                          carrier = {}
+                          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+                          carrier['start_time_ns'] = str(timestamp)
+                          request.trace_headers = carrier
+
                       safe_print(trace_output_directory, f"<<<Action: Start to send output in prefill stage; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               return value
           queue.get = patch_get

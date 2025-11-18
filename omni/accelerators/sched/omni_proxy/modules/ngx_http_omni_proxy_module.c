@@ -20,6 +20,10 @@ ngx_module_t ngx_http_omni_proxy_module;
 
 #define TIMER_INTERVAL 1
 #define UUID_STR_LEN 37
+#define TRACE_ID_STR_LEN 56 /* 55 for trace_id, and 1 for '\0' */
+#define TIME_STR_LEN 33 /* 32 for start_time_ns, and 1 for '\0' */
+static u_char x_trace_headers[] = "Traceparent";
+static u_char x_start_time_ns[] = "Start_time_ns";
 
 enum req_metrics_tokens_var {
     VAR_PROMPT_NUM_TOKENS,
@@ -67,6 +71,41 @@ static omni_global_state_t *g_state;          // In share memory
 static omni_worker_local_state_t local_state; // In local process memory space
 
 static ngx_int_t ngx_http_omni_init_upstreams(ngx_cycle_t *cycle);
+
+static ngx_int_t update_traceparent_header(ngx_http_request_t *r, const u_char *trace_headers, const u_char *trace_value, size_t trace_value_len)
+{
+    ngx_table_elt_t *target = NULL;
+    ngx_list_part_t *part = &r->headers_in.headers.part;
+    ngx_table_elt_t *h = part->elts;
+
+    for (ngx_uint_t i = 0; /*void*/; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) break;
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+        if (h[i].key.len == ngx_strlen(trace_headers) &&
+            ngx_strncasecmp(h[i].key.data, (u_char *)trace_headers, ngx_strlen(trace_headers)) == 0) {
+            target = &h[i];
+            break;
+        }
+    }
+
+    if (target) {
+        // update trace header 
+        if (target->value.len == trace_value_len) {
+            ngx_memcpy(target->value.data, trace_value, trace_value_len);
+        } else {
+            u_char *p = ngx_pnalloc(r->pool, trace_value_len);
+            if (p == NULL) return NGX_ERROR;
+            ngx_memcpy(p, trace_value, trace_value_len);
+            target->value.data = p;
+            target->value.len = trace_value_len;
+        }
+    } 
+    return NGX_OK;
+}
 
 omni_global_state_t *omni_get_global_state()
 {
@@ -471,6 +510,42 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
 
     r->read_event_handler = ngx_http_request_empty_handler;
     r->write_event_handler = ngx_http_request_empty_handler;
+
+    if (subr == NULL || subr->headers_out.headers.part.elts == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Upstream headers_in is NULL!");
+    } else {
+        ngx_list_part_t *part = &subr->headers_out.headers.part;
+        ngx_table_elt_t *header = part->elts;
+        ngx_uint_t i;
+        for (i = 0; /* void */; i++) {
+            if (i >= part->nelts) {
+                if (part->next == NULL) break;
+                part = part->next;
+                header = part->elts;
+                i = 0;
+            }
+            /*update Traceparent from P node*/
+            if (header[i].key.len == sizeof(x_trace_headers)-1 &&
+            ngx_strncasecmp(header[i].key.data, x_trace_headers, sizeof(x_trace_headers)-1) == 0){
+                ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "****Find Traceparent return from P****; Traceparent:%s", header[i].value.data);
+                u_char *trace_value = header[i].value.data;
+                size_t trace_value_len = header[i].value.len;
+                u_char *saved = ngx_pnalloc(r->pool, trace_value_len);
+                if (saved) {ngx_memcpy(saved, trace_value, trace_value_len);}
+                update_traceparent_header(r, x_trace_headers, saved, trace_value_len);
+            }
+            /*update Start_time_ns from P node*/
+            if (header[i].key.len == sizeof(x_start_time_ns)-1 &&
+            ngx_strncasecmp(header[i].key.data, x_start_time_ns, sizeof(x_start_time_ns)-1) == 0){
+                ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "****Find Start_time_ns return from P****; Start_time_ns:%s", header[i].value.data);
+                u_char *trace_value = header[i].value.data;
+                size_t trace_value_len = header[i].value.len;
+                u_char *saved = ngx_pnalloc(r->pool, trace_value_len);
+                if (saved) {ngx_memcpy(saved, trace_value, trace_value_len);}
+                update_traceparent_header(r, x_start_time_ns, saved, trace_value_len);
+            }
+        }
+    }
 
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "[Prefill-%d] Done from %d", req->slot_index, req->prefill_upstream_endpoint_idx);

@@ -5,7 +5,7 @@ import json
 from collections.abc import Iterator
 import math
 import threading
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, Mapping
 import zmq
 import os
 import pickle
@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -43,13 +43,20 @@ from vllm.utils import get_open_port
 from vllm.v1.request import RequestStatus
 import queue
 from concurrent.futures import ThreadPoolExecutor
+from omni.tools.profiler.trace.tracing import get_local_ip
 
 GET_META_MSG = b"get_meta_msg"
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+logger = init_logger(__name__)
 
 thread_dump_path = os.environ.get("VLLM_THREAD_DUMP_PATH", "/tmp/vllm_thread_info")
 BLOCK_RELEASE_DELAY = int(os.environ.get("BLOCK_RELEASE_DELAY", 600))  # seconds, use to free blocks when the request is finished for a long time 
 
 from omni.accelerators.pd.llmdatadist_manager import LLMDataDistManager, LLMDataDistConfig
+from omni.tools.profiler.apply_profiler_patches import patch_request
+patch_request()
 
 
 @dataclass
@@ -61,6 +68,7 @@ class ReqMeta:
     spec_token_ids: Optional[list[int]]
     remote_dp_rank: Optional[int]
     remote_request_id: Optional[str]
+    trace_headers: Optional[Mapping[str, str]] = None
 
 @dataclass
 class ReqMetaPrefill:
@@ -77,6 +85,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
         request_id: str,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
+        trace_headers: Optional[Mapping[str, str]] = None,
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -86,6 +95,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
             spec_token_ids=kv_transfer_params["spec_token_ids"],
             remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
             remote_request_id=kv_transfer_params.get("remote_request_id", None),
+            trace_headers=trace_headers  or {},
         )
 
 class DatadistConnectorMetadataPrefill(KVConnectorMetadata):
@@ -127,16 +137,15 @@ class LLMDataDistConnector(KVConnectorBase_V1):
 
         if role == KVConnectorRole.SCHEDULER:
             if self.is_prefill:
-                self.connector_scheduler = PrefillConnectorScheduler(vllm_config, self.cluster_id_start, self.host_ip,
-                                                                     str(self.host_port))
+                self.connector_scheduler = PrefillConnectorScheduler(vllm_config, self.cluster_id_start, self.host_ip, str(self.host_port), str(self.host_port + 1000))
             else:
-                self.connector_scheduler = DecodeConnectorScheduler(vllm_config)
+                self.connector_scheduler = DecodeConnectorScheduler(vllm_config, str(self.host_port + 2000))
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             if self.is_prefill:
-                self.connector_worker = PrefillConnectorWorker(vllm_config, str(self.host_ip), str(self.host_port))
+                self.connector_worker = PrefillConnectorWorker(vllm_config, str(self.host_ip), str(self.host_port), str(self.host_port + 1000))
             else:
-                self.connector_worker = DecodeConnectorWorker(vllm_config, str(self.host_ip), self.cluster_id_start)
+                self.connector_worker = DecodeConnectorWorker(vllm_config, str(self.host_ip), self.cluster_id_start, str(self.host_port + 2000))
             self.connector_scheduler = None
 
     ############################################################
@@ -211,17 +220,55 @@ class LLMDataDistConnector(KVConnectorBase_V1):
         """Connector does not save explicitly."""
         pass
 
+    def pop_trace_headers(self, req_id: str) -> dict:
+        if self.connector_scheduler is None:
+            raise RuntimeError("self.connector_scheduler cannot be None")                             
+        return self.connector_scheduler.pop_trace_headers(req_id)
+
 class PrefillConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config, cluster_id_start: str, host_ip: str, host_port: str):
+    def __init__(self, vllm_config, cluster_id_start: str, host_ip: str, host_port: str, trace_p_port: str):
         self.vllm_config = vllm_config
         self.cluster_id_start = cluster_id_start
         self.host_ip = host_ip
         self.host_port = host_port
-        logger.info("Initializing LLMDataDist Scheduler %s %s %s", cluster_id_start, host_ip, host_port)
+        self.trace_p_port=trace_p_port
+        logger.info("Initializing LLMDataDist Scheduler %s %s %s %s", cluster_id_start, host_ip, host_port, trace_p_port)
         # initialize the dict to save requests finish time
         self.requests_finish_time = dict()
+        # req_id -> headers
+        self.sending_trace_headers: dict[str, dict] = {}
+
+        self._transfer_lock = threading.Lock()
+        self.ctx = zmq.Context()
+        self.pull_socket = self.ctx.socket(zmq.PULL)
+        self.pull_socket.bind(f"tcp://{host_ip}:{trace_p_port}")
+        if os.getenv("PROFILING_NAMELIST", None):
+            self._listener_thread = threading.Thread(target=self._listen_worker_headers, daemon=True)
+            self._listener_thread.start()
+
+    def _listen_worker_headers(self):
+        while True:
+            try:
+                msg_str = self.pull_socket.recv_string()
+                msg_list = json.loads(msg_str)
+                for msg in msg_list:
+                    req_id = msg['remote_request_id'] or msg['request_id']
+                    headers = msg.get('trace_headers', {})
+                    with self._transfer_lock:
+                        self.sending_trace_headers[req_id] = headers
+                    logger.info(f"Scheduler received headers (P): {req_id}, {headers} at {time.time()}")
+            except Exception as e:
+                logger.error(f"Failed to receive worker header (P): {e}")
+                time.sleep(1)
+
+    def pop_trace_headers(self, req_id: str) -> dict:
+        logger.info(f"<<< pop_trace_headers (P) >>>: {req_id}")
+        with self._transfer_lock:
+            trace_headers = self.sending_trace_headers.pop(req_id, {})
+            if trace_headers:
+                return trace_headers
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -275,10 +322,11 @@ class PrefillConnectorScheduler:
 class PrefillConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: "VllmConfig", host_ip: str, host_port: str):
+    def __init__(self, vllm_config: "VllmConfig", host_ip: str, host_port: str, trace_p_port: str):
         # Metadata.
         self.host_ip = host_ip
         self.host_port = host_port
+        self.trace_p_port = trace_p_port
         self.rank = get_tensor_model_parallel_rank()
         if self.rank == 0 and get_pp_group().is_last_rank:
             self.ctx = zmq.Context()
@@ -346,7 +394,10 @@ class PrefillConnectorWorker:
                 return all_done_sending, all_done_recving
 
             with self._transfer_lock:
-                for req_id in self.receive_req_list:
+                for item in self.receive_req_list:
+                    req_id = item.get('remote_request_id')#item['remote_request_id']
+                    headers = item.get('trace_headers', {})
+                    logger.info(f" *****get finished, req_id:{req_id}, trace_headers:{headers}")
                     logger.debug(f"Get_finished: request {req_id}")
                     all_done_sending.add(req_id)
                     # if the request's kv has been received, remove it from requests_finish_time
@@ -357,6 +408,10 @@ class PrefillConnectorWorker:
         return all_done_sending, all_done_recving
 
     def get_pulled_kv_req_list(self):
+        path_p = f"tcp://{self.host_ip}:{self.trace_p_port}"
+        socket_p = self.ctx.socket(zmq.PUSH)
+        socket_p.connect(path_p)
+        logger.info(f"create new socket path for P trace:{path_p}")
         while True:
             try:
                 if self.input_socket.poll(timeout=10) > 0:
@@ -365,19 +420,35 @@ class PrefillConnectorWorker:
                     logger.debug("Received: %s", id_list)
                     with self._transfer_lock:
                         self.receive_req_list.extend(id_list)
+
+                    json_data = json.dumps(id_list)
+                    socket_p.send_string(json_data)
+                    logger.info(f"send string to prefill shcduler {json_data}, path:{path_p}")
             except Exception as e:
                 logger.error("get pulled kv req list failed: %s", e)
 
 
 class DecodeConnectorScheduler:
     """Implementation of Scheduler side methods"""
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, trace_d_port: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
         self.processed_request: set[str] = set()
         self.ctx = zmq.Context()
         self.zmq_socket_map = {}
+
+        self.host_ip = get_local_ip()
+        self.trace_d_port = trace_d_port
+        self.recving_trace_headers: dict[str, dict] = {}
+        self._transfer_lock = threading.Lock()
+        self.ctx = zmq.Context()
+        self.pull_socket = self.ctx.socket(zmq.PULL)
+        self.pull_socket.bind(f"tcp://{self.host_ip}:{self.trace_d_port}")
+
+        if os.getenv("PROFILING_NAMELIST", None):
+            self._listener_thread = threading.Thread(target=self._listen_worker_headers, daemon=True)
+            self._listener_thread.start()
 
         additional_config = vllm_config.additional_config
         if additional_config:
@@ -389,7 +460,29 @@ class DecodeConnectorScheduler:
             self.context = zmq.Context()
             self.pub = self.context.socket(zmq.PUB)
             kv_rank = self.vllm_config.kv_transfer_config.kv_rank
-            self.pub.bind(f"ipc:///tmp/sched-pub-{kv_rank}-{vllm_config.parallel_config.data_parallel_rank_local}")
+            self.pub.bind(f"ipc:///tmp/sched-pub--{kv_rank}-{vllm_config.parallel_config.data_parallel_rank_local}")
+
+    def _listen_worker_headers(self):
+        while True:
+            try:
+                msg_str = self.pull_socket.recv_string()
+                msg_list = json.loads(msg_str)
+                for msg in msg_list:
+                    req_id = msg['remote_request_id']
+                    headers = msg.get('trace_headers', {})
+                    with self._transfer_lock:
+                        self.recving_trace_headers[req_id] = headers
+                    logger.info(f"Scheduler received headers (D): {req_id}, {headers} at {time.time()}")
+            except Exception as e:
+                logger.error(f"Failed to receive worker header (D): {e}")
+                time.sleep(1)
+
+    def pop_trace_headers(self, req_id: str) -> dict:
+        logger.info(f"<<< pop_trace_headers (D) >>>: {req_id}")
+        with self._transfer_lock:
+            trace_headers = self.recving_trace_headers.pop(req_id, {})
+            if trace_headers:
+                return trace_headers
 
     def _send_pulled_kv_req_list(self, path, data):
         if path in self.zmq_socket_map:
@@ -399,6 +492,7 @@ class DecodeConnectorScheduler:
             socket.connect(path)
             self.zmq_socket_map[path] = socket
             logger.info(f"create new socket path:{path}")
+        logger.info(f"DecodeConnectorScheduler: path:{path}")
 
         try:
             json_data = json.dumps(data)
@@ -463,6 +557,7 @@ class DecodeConnectorScheduler:
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    trace_headers=req.trace_headers  or {},
                 )
             req.kv_transfer_params = None
         self._reqs_need_recv.clear()
@@ -485,14 +580,15 @@ class DecodeConnectorScheduler:
         if request.request_id in self.processed_request:
             self.processed_request.remove(request.request_id)
         if request.status == RequestStatus.FINISHED_ABORTED and request.kv_transfer_params is not None:
-            self._send_pulled_kv_req_list(request.kv_transfer_params.get("remote_host_ip"), [request.request_id])
+            self._send_pulled_kv_req_list(request.kv_transfer_params.get("remote_host_ip"), [{'request_id': request.request_id, 'trace_headers': request.trace_headers or {}}])
+            logger.info(f" ***** request_finished at DecodeConnectorScheduler , remote_host_ip:{request.kv_transfer_params.get('remote_host_ip')}, request_id:{request.request_id}")
         return False, None
 
 
 class DecodeConnectorWorker:
     """Worker implementation for datadist."""
 
-    def __init__(self, vllm_config: "VllmConfig", host_ip: str, cluster_id_start: int):
+    def __init__(self, vllm_config: "VllmConfig", host_ip: str, cluster_id_start: int, trace_d_port: str):
         self.vllm_config = vllm_config
         self.cluster_id_start = cluster_id_start
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
@@ -530,6 +626,8 @@ class DecodeConnectorWorker:
         self.threads = {} # cluster_id -> threading.Thread
 
         self._transfer_lock = threading.Lock()
+        self.host_ip = host_ip
+        self.trace_d_port = trace_d_port
 
         self.ctx = zmq.Context()
         self.zmq_socket_map = {}
@@ -563,16 +661,17 @@ class DecodeConnectorWorker:
             try:
                 if self.input_socket.poll(timeout=10) > 0:
                     data = self.input_socket.recv_json()
-                    request_id = data.get("request_id")
-                    remote_request_id = data.get("remote_request_id")
-                    remote_host_ip = data.get("remote_host_ip")
+                    request_id = data[0].get("request_id")
+                    remote_host_ip = data[0].get("remote_host_ip")
+                    remote_request_id = data[0].get("remote_request_id", None)
+                    trace_headers = data[0].get("trace_headers", {})
                     # if request_id not in dict, set to 0, else do nothing
                     self.tp_sync_req_dict.setdefault(request_id, 0)
                     self.tp_sync_req_dict[request_id] += 1
                     logger.debug(f"{request_id} finish pull kv {self.tp_sync_req_dict[request_id]} times.")
                     if self.tp_sync_req_dict[request_id] == self.vllm_config.parallel_config.tensor_parallel_size:
                         self.tp_sync_req_dict.pop(request_id)
-                        self._send_pulled_kv_req_list(remote_host_ip, [remote_request_id])
+                        self._send_pulled_kv_req_list(remote_host_ip, [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}])
                         with self._transfer_lock:
                             self._recving_transfers.append(request_id)
             except Exception as e:
@@ -611,7 +710,8 @@ class DecodeConnectorWorker:
                 self._read_blocks(**task)
             except Exception as e:
                 logger.error("KV transfer task failed in thread %s: %s", cluster_id, e)
-                self._send_pulled_kv_req_list(task['remote_host_ip'], [task['request_id']])
+                patch_data = [{'request_id': task['request_id'], 'trace_headers': task.get('trace_headers', {})}]
+                self._send_pulled_kv_req_list(task['remote_host_ip'], patch_data)
                 raise RuntimeError(f"Failed to pull kv for request:{task['request_id']} from cluster:{cluster_id}.")
             q.task_done()
 
@@ -751,6 +851,7 @@ class DecodeConnectorWorker:
                             'local_block_ids': local_blocks,
                             'remote_block_ids': remote_blocks,
                             'remote_host_ip': meta.remote_host,
+                            'trace_headers': meta.trace_headers  or {},
                         }
                         logger.warning(f"*********** dst cluster_id is {cluster_id}.")
                         self.queues[cluster_id].put(task)
@@ -762,6 +863,7 @@ class DecodeConnectorWorker:
                     'local_block_ids': meta.local_block_ids,
                     'remote_block_ids': meta.remote_block_ids,
                     'remote_host_ip': meta.remote_host,
+                    'trace_headers': meta.trace_headers  or {},
                 }
 
                 self.queues[cluster_ids[0]].put(task)
@@ -775,6 +877,7 @@ class DecodeConnectorWorker:
                     request_id=req_id,
                     remote_request_id=meta.remote_request_id,
                     remote_host_ip=meta.remote_host,
+                    trace_headers=meta.trace_headers,
                 )
                 futures.append(future)
 
@@ -790,13 +893,14 @@ class DecodeConnectorWorker:
         request_id: str,
         remote_request_id: str,
         remote_host_ip: str,
+        trace_headers: Optional[Mapping[str, str]] = None
     ):
         start = time.time()
         self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id)
 
         if self.vllm_config.parallel_config.tensor_parallel_size == 1:
             # tp=1, send to prefill tp rank0 directly.
-            self._send_pulled_kv_req_list(remote_host_ip, [remote_request_id])
+            self._send_pulled_kv_req_list(remote_host_ip, [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}])
             with self._transfer_lock:
                 self._recving_transfers.append(request_id)
         else:
@@ -807,13 +911,14 @@ class DecodeConnectorWorker:
                     {
                         "request_id": request_id,
                         "remote_request_id": remote_request_id,
-                        "remote_host_ip": remote_host_ip
+                        "remote_host_ip": remote_host_ip,
+                        'trace_headers': trace_headers or {}
                     }
                 )
             else:
                 torch.distributed.barrier(group=get_tp_group().cpu_group)
                 if get_tensor_model_parallel_rank() == 0:
-                    self._send_pulled_kv_req_list(remote_host_ip, [remote_request_id])
+                    self._send_pulled_kv_req_list(remote_host_ip, [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}])
                 with self._transfer_lock:
                     self._recving_transfers.append(request_id)
         logger.debug(f" ***** read block, req_id:{request_id}, local_block_ids:{local_block_ids}, remote_block_ids:{remote_block_ids}")
@@ -831,10 +936,18 @@ class DecodeConnectorWorker:
             self.zmq_socket_map[path] = socket
             logger.info(f"create new socket path:{path}")
 
+        path_d = f"tcp://{self.host_ip}:{self.trace_d_port}"
+        socket_d = self.ctx.socket(zmq.PUSH)
+        socket_d.connect(path_d)
+        logger.info(f"create new socket path for D trace:{path_d}")
+
         try:
             json_data = json.dumps(data)
             socket.send_string(json_data)
             logger.info(f"send string {json_data} path:{path}")
+
+            socket_d.send_string(json_data)
+            logger.info(f"send string to decode shcduler {json_data}, path:{path_d}")
         except Exception as e:
             logger.error(f"Failed to send reqest_id {json_data} to prefill: {e}")
 
@@ -846,7 +959,7 @@ class DecodeConnectorWorker:
         if len(all_done_recving) > 0:
             logger.debug(
                 "Get_finished: %s requests done recving", len(all_done_recving))
-
+        logger.info(f"******* all_done_recving is: {all_done_recving}")
         return all_done_sending, all_done_recving
 
     def _pop_done_transfers(self, transfers: list) -> set[str]:

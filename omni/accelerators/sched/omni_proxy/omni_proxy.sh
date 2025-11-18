@@ -381,6 +381,7 @@ $(gen_upstream_block "decode_endpoints" "$decode_endpoints")
 
         location /v1 {
             set_request_id on;
+            set_trace_headers_force off;
             omni_proxy decode_endpoints;
             stream_ops $stream_ops;
             omni_proxy_pd_policy $omni_proxy_pd_policy;

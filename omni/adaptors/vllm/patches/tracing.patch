@@ -1,0 +1,78 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 0f30bed26..03ec17201 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -45,6 +45,15 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+                                                 validate_request_params)
+ 
+ from vllm.utils import random_uuid
++from omni.tools.profiler.trace.tracing import parent_ctx_var, span_start_time
++from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
++
++original_init = RequestOutput.__init__
++def new_init(self, *args, **kwargs):
++    trace_headers = kwargs.pop('trace_headers', None)
++    original_init(self, *args, **kwargs)
++    self.trace_headers = trace_headers
++RequestOutput.__init__ = new_init
+ 
+ logger = init_logger(__name__)
+ 
+@@ -81,6 +90,7 @@ class OpenAIServingChat(OpenAIServing):
+         self.response_role = response_role
+         self.chat_template = chat_template
+         self.chat_template_content_format: Final = chat_template_content_format
++        self.headers_map = {}
+ 
+         # set up tool use
+         self.enable_auto_tools: bool = enable_auto_tools
+@@ -272,8 +282,18 @@ class OpenAIServingChat(OpenAIServing):
+                                  lora_request=lora_request,
+                                  prompt_adapter_request=prompt_adapter_request)
+ 
+-                trace_headers = (None if raw_request is None else await
+-                                 self._get_trace_headers(raw_request.headers))
++                trace_ctx = parent_ctx_var.get()
++                if trace_ctx is None:
++                    trace_headers = None
++                else:
++                    carrier = {}
++                    TraceContextTextMapPropagator().inject(carrier, context=trace_ctx)
++                    trace_headers=carrier
++                    start_time = span_start_time.get()
++                    trace_headers['start_time_ns'] = str(start_time)
++                    if os.getenv('ROLE') == "decode":
++                        trace_headers['ttft_start_time'] = raw_request.headers.get("TTFT_Start_time") or "0"
++                        trace_headers['ttft_traceparent'] = raw_request.headers.get("TTFT_traceparent") or "None"
+ 
+                 if isinstance(sampling_params, BeamSearchParams):
+                     generator = self.engine_client.beam_search(
+@@ -538,6 +558,7 @@ class OpenAIServingChat(OpenAIServing):
+         last_delta_message = None
+         try:
+             async for res in result_generator:
++                self.headers_map.setdefault(res.request_id, res.trace_headers)
+                 if res.prompt_token_ids is not None:
+                     num_prompt_tokens = len(res.prompt_token_ids)
+                     if res.encoder_prompt_token_ids is not None:
+@@ -984,9 +1005,11 @@ class OpenAIServingChat(OpenAIServing):
+         created_time = int(time.time())
+         final_res: Optional[RequestOutput] = None
+ 
++        headers={}
+         try:
+             async for res in result_generator:
+                 final_res = res
++                headers[res.request_id] = res.trace_headers
+         except asyncio.CancelledError:
+             return self.create_error_response("Client disconnected")
+         except ValueError as e:
+@@ -1225,6 +1248,9 @@ class OpenAIServingChat(OpenAIServing):
+             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+             kv_transfer_params=final_res.kv_transfer_params,
+         )
++        if response.kv_transfer_params is None:
++            response.kv_transfer_params = {}
++        response.kv_transfer_params["trace_headers"] = headers.get(request_id)
+ 
+         return response
