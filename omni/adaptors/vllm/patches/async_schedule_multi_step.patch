@@ -178,8 +178,8 @@ index 740ba60fe..75b284f03 100644
 +            self.async_schedule = additional_config.get(
 +                    "async_schedule", False)
 +
-+            if additional_config.get("multi_step", False):
-+                self.step_num = 4
++            if additional_config.get("multi_step", 1):
++                self.step_num = additional_config.get("multi_step", 1)
  
          self.scheduler: SchedulerInterface = Scheduler(
              vllm_config=vllm_config,
