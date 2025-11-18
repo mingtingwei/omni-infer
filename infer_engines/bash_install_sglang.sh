@@ -23,4 +23,5 @@ git apply --whitespace=nowarn $PATCH_ROOT/promote_forward_batch_init_stage.patch
 git apply --whitespace=nowarn $PATCH_ROOT/overlap_mtp.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_sampler.patch
 git apply --whitespace=nowarn $PATCH_ROOT/send_kvcache_multi_rank.patch
+git apply --whitespace=nowarn $PATCH_ROOT/sglang_model_param_adjust.patch
 git apply --whitespace=nowarn $PATCH_ROOT/longcat.patch

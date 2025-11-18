@@ -16,6 +16,9 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
 )
 from torch.nn import Parameter
 
+from omni.models.config_loader.loader import model_extra_config
+
+
 class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
     _kernel_backends_being_used: set[str] = set()
 
@@ -106,7 +109,7 @@ class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
         if getattr(layer, "throw_dequant", False):
             weight_scale = weight_scale.to(torch.float32)
         weight_offset = layer.weight_offset
-        is_prefill = (os.getenv("IS_PREFILL", "0") == "1")
+        is_prefill = model_extra_config.task_config.is_prefill_node
         if is_prefill:
             layer.weight = Parameter(weight.t().contiguous(), requires_grad=False)
         else:

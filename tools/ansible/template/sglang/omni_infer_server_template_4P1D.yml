@@ -81,10 +81,9 @@
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
       export GLOO_SOCKET_IFNAME={{ansible_env.GLOO_SOCKET_IFNAME}}
-      export MLP_TP_SIZE=4
       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
-      export IS_PREFILL=1
+      export ROLE=prefill
       export SGLANG_DISAGGREGATION_THREAD_POOL_SIZE=6
       export SGLANG_DISAGGREGATION_QUEUE_SIZE=2
       export SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=128
@@ -129,14 +128,12 @@
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
       export HCCL_BUFFSIZE=700
-      export USE_MLA_PROLOG=1
       export GLOO_SOCKET_IFNAME={{ansible_env.GLOO_SOCKET_IFNAME}}
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
-      export MLP_TP_SIZE=4
       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
       export ASCEND_CONNECT_TIMEOUT=30000
       export ASCEND_TRANSFER_TIMEOUT=30000
-      # export USE_SUPER_KERNEL=1
+      export ROLE=decode
 
       dp=$(echo -n "$DECODE_DATA_PARALLEL_SIZE" | tr -cd ',' | wc -c)
       ((dp++))

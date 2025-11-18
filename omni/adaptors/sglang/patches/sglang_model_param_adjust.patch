@@ -42,8 +42,8 @@ diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/sr
 +            hardware_platform=hardware_platform,
 +            is_pd_disaggregation=is_pd_disaggregation,
 +            is_prefill_node=is_prefill_node,
-+            prefill_nodes_num=int(os.getenv("PREFILL_POD_NUM", 1)),
-+            decode_nodes_num=int(os.getenv("DECODE_POD_NUM", 1))
++            prefill_node_num=int(os.getenv("PREFILL_POD_NUM", 1)),
++            decode_node_num=int(os.getenv("DECODE_POD_NUM", 1))
 +        )
 +
      def model_specific_adjustment(self):

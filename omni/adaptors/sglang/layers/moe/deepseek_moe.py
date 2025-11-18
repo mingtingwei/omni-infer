@@ -30,6 +30,7 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 
 from omni.adaptors.sglang.layers.moe.fused_moe.layer import FusedMoE
 from omni.adaptors.sglang.layers.activation import SiluAndMul
+from omni.models.config_loader.loader import model_extra_config
 
 
 # TODO: not really "replicated" currently
@@ -170,7 +171,7 @@ class DeepseekMoE(nn.Module):
 
         self.quant_symbol = True if quant_config else False
 
-        self.use_super_kernel = os.environ.get("USE_SUPER_KERNEL", "0") == "1"
+        self.use_super_kernel = model_extra_config.operator_opt_config.use_super_kernel
 
         assert global_server_args_dict["moe_a2a_backend"].is_deepep()
 

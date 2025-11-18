@@ -6,9 +6,22 @@ import json
 import os
 import torch
 
-from vllm.logger import logger
-import omni.adaptors.vllm.envs as envs
+import logging
+
 from omni.models.config_loader.features import apply_eager_mode_config, apply_fusion_pass
+
+def init_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    if not logger.handlers:
+        logger.addHandler(console_handler)
+    return logger
+
+logger = init_logger(__name__)
 
 default_config_path = os.path.normpath(os.path.join(os.path.abspath(__file__), '../../configs'))
 
@@ -337,7 +350,8 @@ def update_task_config(**kwargs):
         for key, value in kwargs.items():
             if hasattr(task_config, key):
                 setattr(task_config, key, value)
-                logger.info(f"{key} loads from vllm config: {value}")
+                logger.info(f"{key} loads parameters from framework : {value}")
+
     hf_config = kwargs.get('hf_config')
     if hf_config is None:
         raise KeyError("hf_config is required for update_task_config")

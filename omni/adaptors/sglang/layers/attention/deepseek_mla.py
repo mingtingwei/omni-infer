@@ -39,6 +39,7 @@ from omni.adaptors.sglang.layers.layernorm import RMSNorm
 from omni.adaptors.sglang.layers.linear import (
     RowParallelLinearWithReduceScatter,
 )
+from omni.models.config_loader.loader import model_extra_config
 KVCACHE_NZ_DIM = 16
 
 def stream_context(stream_tag: str, enable_multi_stream: bool = False):
@@ -148,7 +149,7 @@ class DeepseekMLA(nn.Module):
         self.layer_scatter_modes = layer_scatter_modes
         self.quant_symbol = quant_config is not None
 
-        self.enable_fused_qkv = os.environ.get("USE_FUSE_QKV_A_PROJ", "0") == "1"
+        self.enable_fused_qkv = model_extra_config.operator_opt_config.merge_qkv
         # For tensor parallel attention
         if self.q_lora_rank is not None:
             if self.enable_fused_qkv:
@@ -248,7 +249,7 @@ class DeepseekMLA(nn.Module):
 
         self.w_scale_k = None
         self.w_scale_v = None
-        self.use_mla_prolog = os.environ.get("USE_MLA_PROLOG", "0") == "1"
+        self.use_mla_prolog = model_extra_config.operator_opt_config.use_mlaprolog
         if self.quant_symbol and self.use_mla_prolog:
             self.q_a_proj.weight_scale.data = self.q_a_proj.weight_scale.data.to(torch.float)
             self.q_b_proj.weight_scale.data = self.q_b_proj.weight_scale.data.to(torch.float)
