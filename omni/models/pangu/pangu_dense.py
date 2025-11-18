@@ -384,13 +384,6 @@ class PanguEmbeddedModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-        
-        base = getattr(config, "rope_theta", DEFAULT_ROPE_THETA)
-        rotary_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        max_len = config.max_position_embeddings
-        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(base, rotary_dim, max_len)
-        self.register_buffer("full_cos", full_cos, persistent=False)
-        self.register_buffer("full_sin", full_sin, persistent=False)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -399,6 +392,7 @@ class PanguEmbeddedModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
@@ -417,9 +411,13 @@ class PanguEmbeddedModel(nn.Module):
             cos = None
             sin = None
         else:
-            cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-            sin = torch.index_select(self.full_sin, dim=0, index=positions)
-
+            if attn_metadata is None :
+                cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+            else :
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[next(iter(attn_metadata))]
+                cos = attn_metadata.cos
+                sin = attn_metadata.sin
         aux_hidden_states = []
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
@@ -622,7 +620,7 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, intermediate_tensors,
+        model_output = self.model(input_ids, positions, attn_metadata, intermediate_tensors,
                                   inputs_embeds)
         return model_output
 

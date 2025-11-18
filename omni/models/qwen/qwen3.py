@@ -361,12 +361,6 @@ class Qwen3Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        base = getattr(config, "rope_theta", DEFAULT_ROPE_THETA)
-        rotary_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        max_len = config.max_position_embeddings
-        full_cos, full_sin = QwenRotaryEmbedding.compute_full_cos_sin(base, rotary_dim, max_len)
-        self.register_buffer("full_cos", full_cos, persistent=False)
-        self.register_buffer("full_sin", full_sin, persistent=False)
         self.kv_stream = torch.npu.Stream()
         self.micro_stream = torch.npu.Stream()
 
@@ -414,8 +408,13 @@ class Qwen3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-        sin = torch.index_select(self.full_sin, dim=0, index=positions)
+        if attn_metadata is None :
+            cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+        else :
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[next(iter(attn_metadata))]
+            cos = attn_metadata.cos
+            sin = attn_metadata.sin
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
             n_tokens = hidden_states.shape[0]
