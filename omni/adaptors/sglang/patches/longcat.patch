@@ -55,7 +55,7 @@ index 3f61e8337..04bf6caa6 100644
 +tmp_.models["LongcatFlashForCausalLM"] = module.EntryClass
  ModelRegistry = tmp_
 diff --git a/python/sglang/srt/utils.py b/python/sglang/srt/utils.py
-index 0ea2def9c..4b9a62a07 100644
+index 0ea2def9c..928f25369 100644
 --- a/python/sglang/srt/utils.py
 +++ b/python/sglang/srt/utils.py
 @@ -1710,7 +1710,8 @@ def get_compiler_backend() -> str:
@@ -63,7 +63,7 @@ index 0ea2def9c..4b9a62a07 100644
                      f"Unsupported config type for {config_group}: {type(config_value)}"
                  )
 -
-+        if os.environ.get("DISABLE_INPLACE_ADD_RMSNORM_FUSION_PASS"):
++        if os.environ.get("DISABLE_INPLACE_ADD_RMSNORM_FUSION_PASS", "0") == "1":
 +            compiler_config.ge_config.optimization_switch = "InplaceAddRmsNormFusionPass:off"
          npu_backend = torchair.get_npu_backend(compiler_config=compiler_config)
          return npu_backend
