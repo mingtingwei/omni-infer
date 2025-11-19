@@ -4,6 +4,14 @@
 #include <omni_pd_body_rewrite.h>
 #include <jsmn.h>
 
+#define KV_HOST_STR "\"bootstrap_host\":"
+#define KV_PORT_STR ",\"bootstrap_port\":"
+#define KV_ROOM_STR ",\"bootstrap_room\":"
+
+/* 7 contains one comma, 4 double quotation mark, one '}' and '\0' */
+#define SGLANG_EXTRA_BODY_LEN   (strlen(KV_HOST_STR) + strlen(KV_PORT_STR) + NGX_SOCKADDR_STRLEN \
+    + strlen(KV_ROOM_STR) + strlen("\"7FFFFFFFFFFFFFFF\"") + 7)
+
 static char *prefill_response_json_keys[] = {
     "kv_transfer_params",
 };
@@ -77,7 +85,7 @@ static void omni_try_set_model_name_from_json(ngx_http_request_t *r, const u_cha
                     }
                     ngx_shmtx_unlock(&gs->shmtx);
                 }
-                break; 
+                break;
             }
         }
     }
@@ -96,6 +104,16 @@ int find_jsmn_key(ngx_http_request_t *r, const char *json, jsmntok_t *tokens, in
         }
     }
     return -1;
+}
+
+// Helper to copy a substring from JSON based on token
+void json_token_tostr(const char *json, const jsmntok_t *t, char *buf, size_t buflen)
+{
+    size_t len = t->end - t->start;
+    if (len >= buflen)
+        len = buflen - 1;
+    strncpy(buf, json + t->start, len);
+    buf[len] = '\0';
 }
 
 void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_context_t *ctx)
@@ -414,6 +432,73 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
         chain_new->next = NULL;
         chain->next = chain_new;
         chain = chain_new;
+        b = b_new;
+    }
+
+
+    if (omni_get_global_state()->pd_policy == PD_PARALLEL) {
+        size_t content_len;
+        u_char *content_data_to_copy;
+
+        while (b->last > b->pos)
+        {
+            if (b->last[-1] == '}')
+            {
+                b->last -= 1;
+                break;
+            }
+            b->last -= 1;
+        }
+
+        u_int pos = 0;
+        size_t buf_len = SGLANG_EXTRA_BODY_LEN;
+        b_new = ngx_create_temp_buf(r->pool, buf_len);
+        if (b_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "bootstrap_host ngx_create_temp_buf: failed! ");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+        if (ctx->bootstrap_host.len == 0) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "bootstrap_host is 0");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+        pos += ngx_snprintf(b_new->pos + pos, buf_len - pos, ","KV_HOST_STR"\"%V\"", &ctx->bootstrap_host)
+               - (b_new->pos + pos);
+
+        if (ctx->bootstrap_port.len > 0) {
+            pos += ngx_snprintf(b_new->pos + pos, buf_len - pos, KV_PORT_STR"\"%V\"", &ctx->bootstrap_port)
+                   - (b_new->pos + pos);
+        } else {
+            pos += ngx_snprintf(b_new->pos + pos, buf_len - pos, KV_PORT_STR"null") - (b_new->pos + pos);
+        }
+
+        pos += ngx_snprintf(b_new->pos + pos, buf_len - pos, KV_ROOM_STR"\"%V\"", &ctx->bootstrap_room)
+               - (b_new->pos + pos);
+
+        b_new->pos[pos++] = '}';
+        b_new->pos[pos] = '\0';
+        b_new->last = b_new->pos + pos;
+        b_new->memory = 1;
+
+        chain_new = ngx_alloc_chain_link(r->pool);
+        if (chain_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_alloc_chain_link: failed! ");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        chain->buf->last_buf = 0;
+        chain->buf->last_in_chain = 0;
+        b_new->last_buf = 1;
+        b_new->last_in_chain = 1;
+
+        chain_new->buf = b_new;
+        chain_new->next = NULL;
+        chain->next = chain_new;
+        chain = chain_new;
     }
 
     if (chain->buf != NULL)
@@ -480,16 +565,6 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
     return;
 }
 
-// Helper to copy a substring from JSON based on token
-void json_token_tostr(const char *json, const jsmntok_t *t, char *buf, size_t buflen)
-{
-    size_t len = t->end - t->start;
-    if (len >= buflen)
-        len = buflen - 1;
-    strncpy(buf, json + t->start, len);
-    buf[len] = '\0';
-}
-
 // Info for all modifications, in the order they appear in the JSON
 typedef enum
 {
@@ -506,7 +581,7 @@ typedef struct
 } region_info_t;
 
 void gen_prefill_json_str_jsmn(
-    ngx_http_request_t *r, omni_req_context_t *ctx, const char *json, size_t len, char **out, size_t *out_len)
+    ngx_http_request_t *r, omni_req_context_t *ctx, const char *json, size_t len, u_char **out, size_t *out_len)
 {
     jsmn_parser parser;
     int tokens_size = 256;
@@ -601,8 +676,8 @@ void gen_prefill_json_str_jsmn(
         }
     }
 
-    size_t cap = len + 64; // ensure enough room, since we're only reducing/removing
-    char *newjson = ngx_palloc(r->pool, cap);
+    size_t cap = len + 256; // ensure enough room for additional metadata
+    u_char *newjson = ngx_palloc(r->pool, cap);
     if (!newjson)
     {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "gen prefill json: palooc %d", cap);
@@ -618,18 +693,18 @@ void gen_prefill_json_str_jsmn(
         // Copy up to region
         if (ri->start > src)
         {
-            memcpy(newjson + pos, json + src, ri->start - src);
+            ngx_memcpy(newjson + pos, json + src, ri->start - src);
             pos += ri->start - src;
         }
         switch (ri->type)
         {
         case R_MAX_TOKENS:
-            memcpy(newjson + pos, "1", 1);
+            ngx_memcpy(newjson + pos, "1", 1);
             pos += 1;
             src = ri->end;
             break;
         case R_STREAM:
-            memcpy(newjson + pos, "false", 5);
+            ngx_memcpy(newjson + pos, "false", 5);
             pos += 5;
             src = ri->end;
             break;
@@ -641,7 +716,7 @@ void gen_prefill_json_str_jsmn(
     // Copy the remainder before closing }
     if (src < len - 1)
     {
-        memcpy(newjson + pos, json + src, len - 1 - src);
+        ngx_memcpy(newjson + pos, json + src, len - 1 - src);
         pos += len - 1 - src;
     }
 
@@ -653,8 +728,31 @@ void gen_prefill_json_str_jsmn(
             newjson[pos++] = ',';
         }
         const char *insertion = "\"max_tokens\":1";
-        memcpy(newjson + pos, insertion, strlen(insertion));
-        pos += strlen(insertion);
+        size_t ins_len = ngx_strlen(insertion);
+        ngx_memcpy(newjson + pos, insertion, ins_len);
+        pos += ins_len;
+    }
+
+    if (omni_get_global_state()->pd_policy == PD_PARALLEL) {
+        if (pos > 0 && newjson[pos - 1] != '{') {
+            newjson[pos++] = ',';
+        }
+
+        pos += ngx_snprintf(newjson + pos, cap - pos, KV_HOST_STR"\"%V\"", &ctx->bootstrap_host)
+               - (newjson + pos);
+
+        if (ctx->bootstrap_port.len > 0)
+        {
+            pos += ngx_snprintf(newjson + pos, cap - pos, KV_PORT_STR"\"%V\"", &ctx->bootstrap_port)
+                   - (newjson + pos);
+        }
+        else
+        {
+            pos += ngx_snprintf(newjson + pos, cap - pos, KV_PORT_STR":null") - (newjson + pos);
+        }
+
+        pos += ngx_snprintf(newjson + pos, cap - pos, KV_ROOM_STR"\"%V\"", &ctx->bootstrap_room)
+               - (newjson + pos);
     }
 
     // Add closing '}'
@@ -757,7 +855,7 @@ ngx_int_t omni_proxy_save_origin_body(
 ngx_int_t omni_proxy_prepare_prefill_subrequest(
     ngx_http_request_t *r, ngx_http_request_t *sr, omni_req_context_t *ctx)
 {
-    char *modified_json_str = NULL;
+    u_char *modified_json_str = NULL;
     size_t len = ctx->origin_body_data_size;
     u_char *body_data = ctx->origin_body_data;
     ngx_buf_t *b;
@@ -833,7 +931,7 @@ ngx_int_t omni_proxy_prepare_prefill_subrequest(
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "prefill: failed to ngx_pcalloc buf");
         return NGX_ERROR;
     }
-    b->pos = (u_char *)modified_json_str;
+    b->pos = modified_json_str;
     b->last = b->pos + str_len;
     b->memory = 1;
     b->last_buf = (sr->request_body_no_buffering) ? 0 : 1;

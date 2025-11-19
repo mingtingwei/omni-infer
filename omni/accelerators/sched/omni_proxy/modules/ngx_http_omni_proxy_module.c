@@ -93,7 +93,7 @@ static ngx_int_t update_traceparent_header(ngx_http_request_t *r, const u_char *
     }
 
     if (target) {
-        // update trace header 
+        // update trace header
         if (target->value.len == trace_value_len) {
             ngx_memcpy(target->value.data, trace_value, trace_value_len);
         } else {
@@ -103,7 +103,7 @@ static ngx_int_t update_traceparent_header(ngx_http_request_t *r, const u_char *
             target->value.data = p;
             target->value.len = trace_value_len;
         }
-    } 
+    }
     return NGX_OK;
 }
 
@@ -266,13 +266,6 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
     gettimeofday(&tv, NULL);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Enter state P waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
-
-
-    if (g_state->pd_policy == PD_PARALLEL)
-    {
-        omni_add_req_to_group(req->slot_index, &local_state.groups[PHASE_DECODE_WAITING_SCHEDULE]);
-        req->metrics.time_enter_wait_decode = ngx_current_msec;
-    }
 }
 
 static void omni_proxy_req_body_handler(ngx_http_request_t *r)
@@ -383,13 +376,26 @@ static inline void omni_proxy_cleanup_req(omni_req_t *req)
                           ds->num_running,
                           ds->num_tokens);
         }
-        omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[phase]);
-
+        if (phase == PHASE_PREFILL_WAITING_SCHEDULE) {
+            if (req->has_prefill_sched) {
+                omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[PHASE_PREFILL_SCHEDULED]);
+            } else {
+                omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[PHASE_PREFILL_WAITING_SCHEDULE]);
+            }
+        } else if (phase == PHASE_DECODE_WAITING_SCHEDULE) {
+            if (req->has_decode_sched) {
+                omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[PHASE_DECODE_SCHEDULED]);
+            } else {
+                omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[PHASE_DECODE_WAITING_SCHEDULE]);
+            }
+        } else {
+            omni_remove_req_from_group_by_req_index(req->slot_index, &g_state->groups[phase]);
+        }
         ngx_shmtx_unlock(&g_state->shmtx);
 
         omni_remove_req_from_group_by_req_index(req->slot_index, &local_state.groups[phase]);
-        local_state.req_in_groups--;
     }
+    local_state.req_in_groups--;
 }
 
 static void omni_proxy_main_req_cleanup(void *data)
@@ -527,7 +533,7 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
             /*update Traceparent from P node*/
             if (header[i].key.len == sizeof(x_trace_headers)-1 &&
             ngx_strncasecmp(header[i].key.data, x_trace_headers, sizeof(x_trace_headers)-1) == 0){
-                ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "****Find Traceparent return from P****; Traceparent:%s", header[i].value.data);
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "****Find Traceparent return from P****; Traceparent:%s", header[i].value.data);
                 u_char *trace_value = header[i].value.data;
                 size_t trace_value_len = header[i].value.len;
                 u_char *saved = ngx_pnalloc(r->pool, trace_value_len);
@@ -537,7 +543,7 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
             /*update Start_time_ns from P node*/
             if (header[i].key.len == sizeof(x_start_time_ns)-1 &&
             ngx_strncasecmp(header[i].key.data, x_start_time_ns, sizeof(x_start_time_ns)-1) == 0){
-                ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "****Find Start_time_ns return from P****; Start_time_ns:%s", header[i].value.data);
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "****Find Start_time_ns return from P****; Start_time_ns:%s", header[i].value.data);
                 u_char *trace_value = header[i].value.data;
                 size_t trace_value_len = header[i].value.len;
                 u_char *saved = ngx_pnalloc(r->pool, trace_value_len);
@@ -761,27 +767,127 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
                       us->num_queue);
     }
 
-    // check policy
-    if (g_state->pd_policy == PD_SEQUENTIAL)
-    {
-        ngx_atomic_fetch_add(&us->num_running, -1);
-        ngx_atomic_fetch_add(&us->comm.ref, -1);
-        ngx_atomic_fetch_add(&us->num_tokens, -req->metrics.prompt_num_tokens);
+    ngx_atomic_fetch_add(&us->num_running, -1);
+    ngx_atomic_fetch_add(&us->comm.ref, -1);
+    ngx_atomic_fetch_add(&us->num_tokens, -req->metrics.prompt_num_tokens);
 
+    // check policy
+    if (g_state->pd_policy == PD_SEQUENTIAL) {
         omni_phase_transition_all(req, PHASE_PREFILLING, PHASE_DECODE_WAITING_SCHEDULE);
         req->metrics.time_enter_wait_decode = ngx_current_msec;
         struct timeval tv;
         gettimeofday(&tv, NULL);
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+    } else {
+        omni_remove_req_from_group_by_req_index(req->slot_index, &omni_get_local_state()->groups[PHASE_PREFILLING]);
+
+        ngx_shmtx_lock(&g_state->shmtx);
+        omni_remove_req_from_group_by_req_index(req->slot_index, &omni_get_global_state()->groups[PHASE_PREFILLING]);
+        omni_req_leave_phase(req, PHASE_PREFILLING);
+        ngx_shmtx_unlock(&g_state->shmtx);
     }
 
     return NGX_DONE;
 }
 
+static ngx_int_t omni_proxy_prepare_bootstrap_info(ngx_http_request_t *r, omni_req_context_t *ctx)
+{
+    omni_req_t *req = ctx->req;
+    omni_global_state_t *gs = omni_get_global_state();
+
+    ctx->bootstrap_host.data = NULL;
+    ctx->bootstrap_host.len = 0;
+    ctx->bootstrap_port.data = NULL;
+    ctx->bootstrap_port.len = 0;
+    ctx->bootstrap_room.data = NULL;
+    ctx->bootstrap_room.len = 0;
+
+    if (req == NULL || gs == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "prefill: missing request or global state when preparing bootstrap info");
+        return NGX_ERROR;
+    }
+
+    if (req->prefill_upstream_endpoint_idx >= MAX_PREFILL_UPSTREAMS) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "prefill: invalid prefill upstream index %ui when preparing bootstrap info",
+                      req->prefill_upstream_endpoint_idx);
+        return NGX_ERROR;
+    }
+
+    omni_upstream_prefill_t *prefill = &gs->prefill_states[req->prefill_upstream_endpoint_idx];
+    const char *ip = prefill->comm.address.ip;
+    if (ip != NULL && ip[0] != '\0') {
+        size_t len = ngx_strlen(ip);
+        ctx->bootstrap_host.data = ngx_pnalloc(r->pool, len + 1);
+        if (ctx->bootstrap_host.data == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "prefill: failed to allocate bootstrap host buffer");
+            return NGX_ERROR;
+        }
+        ngx_memcpy(ctx->bootstrap_host.data, ip, len);
+        ctx->bootstrap_host.data[len] = '\0';
+        ctx->bootstrap_host.len = len;
+    } else {
+        ctx->bootstrap_host.data = (u_char *)"";
+        ctx->bootstrap_host.len = 0;
+    }
+
+    if (prefill->comm.address.port > 0) {
+        ctx->bootstrap_port.data = ngx_pnalloc(r->pool, NGX_INT_T_LEN + 1);
+        if (ctx->bootstrap_port.data == NULL) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "prefill: failed to allocate bootstrap port buffer");
+            return NGX_ERROR;
+        }
+        /* get port from setting later */
+        ctx->bootstrap_port.len = ngx_sprintf(ctx->bootstrap_port.data, "%d", 8998)
+                                   - ctx->bootstrap_port.data;
+        ctx->bootstrap_port.data[ctx->bootstrap_port.len] = '\0';
+    } else {
+        ctx->bootstrap_port.data = NULL;
+        ctx->bootstrap_port.len = 0;
+    }
+
+    ctx->bootstrap_room.data = ngx_pnalloc(r->pool, NGX_INT64_LEN + 1);
+    if (ctx->bootstrap_room.data == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "prefill: failed to allocate bootstrap room buffer");
+        return NGX_ERROR;
+    }
+    uint64_t room_id = (((uint64_t)ngx_random()) << 32) | (uint64_t)ngx_random();
+    room_id &= 0x7FFFFFFFFFFFFFFFULL;
+    ctx->bootstrap_room.len = ngx_sprintf(ctx->bootstrap_room.data, "%uL", room_id)
+                              - ctx->bootstrap_room.data;
+    ctx->bootstrap_room.data[ctx->bootstrap_room.len] = '\0';
+
+    return NGX_OK;
+}
+
 static ngx_int_t ngx_http_prefill_wakeup(omni_req_t *req)
 {
     ngx_http_request_t *r = omni_get_http_request(req);
+    omni_req_context_t *ctx = omni_get_req_ctx(r);
+
+    if (g_state->pd_policy == PD_PARALLEL) {
+        if (omni_proxy_prepare_bootstrap_info(r, ctx) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+        omni_add_req_to_group(req->slot_index, &omni_get_local_state()->groups[PHASE_DECODE_WAITING_SCHEDULE]);
+
+        ngx_shmtx_lock(&g_state->shmtx);
+        omni_add_req_to_group(req->slot_index, &omni_get_global_state()->groups[PHASE_DECODE_WAITING_SCHEDULE]);
+        omni_req_enter_phase(req, PHASE_DECODE_WAITING_SCHEDULE);
+        ngx_shmtx_unlock(&g_state->shmtx);
+
+        req->metrics.time_enter_wait_decode = ngx_current_msec;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                    "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+    }
 
     size_t prelen = PREFILL_URI_LEN + r->uri.len;
     if (r->args.len)
@@ -828,7 +934,6 @@ static ngx_int_t ngx_http_prefill_wakeup(omni_req_t *req)
     sr->method = r->method;
     sr->method_name = r->method_name;
 
-    omni_req_context_t *ctx = omni_get_req_ctx(r);
     ngx_http_set_ctx(sr, ctx, ngx_http_omni_proxy_module);
 
     omni_proxy_prepare_prefill_subrequest(r, sr, ctx);
@@ -1496,6 +1601,14 @@ static void omni_update_local_waiting(omni_worker_local_state_t *local_state,
     {
         omni_req_info_t *info = &group->requests[i];
         omni_req_t *req = omni_info_to_req(info);
+        if (omni_req_is_in_phase(req, PHASE_PREFILL_WAITING_SCHEDULE) && req->has_prefill_sched) {
+            omni_req_leave_phase(req, PHASE_PREFILL_WAITING_SCHEDULE);
+            omni_req_enter_phase(req, PHASE_PREFILL_SCHEDULED);
+        }
+        if (omni_req_is_in_phase(req, PHASE_DECODE_WAITING_SCHEDULE) && req->has_decode_sched) {
+            omni_req_leave_phase(req, PHASE_DECODE_WAITING_SCHEDULE);
+            omni_req_enter_phase(req, PHASE_DECODE_SCHEDULED);
+        }
         if (req->in_use && omni_req_is_in_phase(req, to))
         {
             omni_remove_from_group_by_req_info(info, group);
@@ -2745,7 +2858,7 @@ static ngx_command_t omni_proxy_commands[] = {
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, decode_max_num_seqs),
      NULL},
-    
+
     {ngx_string("omni_proxy_max_tokens_weight"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_num_slot,

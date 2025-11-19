@@ -52,6 +52,9 @@ typedef struct omni_req_context_s
     int origin_body_tokens_size;
     u_char *prefill_response_body;
     ngx_uint_t prefill_response_body_size;
+    ngx_str_t bootstrap_host;
+    ngx_str_t bootstrap_port;
+    ngx_str_t bootstrap_room;
 } omni_req_context_t;
 
 typedef struct omni_worker_local_state_s

@@ -78,6 +78,8 @@ typedef struct omni_request_s
     void *backend;
     uint32_t last_retry;
 
+    bool has_prefill_sched;
+    bool has_decode_sched;
     uint16_t prefill_upstream_endpoint_idx;
     uint16_t decode_upstream_endpoint_idx;
     omni_request_metrics_t metrics;
