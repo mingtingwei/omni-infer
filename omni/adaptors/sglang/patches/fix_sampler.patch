@@ -1,22 +1,64 @@
 diff --git a/python/sglang/srt/layers/sampler.py b/python/sglang/srt/layers/sampler.py
-index 75644b588..407f86800 100644
+index 75644b588..4aa5b0d83 100644
 --- a/python/sglang/srt/layers/sampler.py
 +++ b/python/sglang/srt/layers/sampler.py
-@@ -150,6 +150,9 @@ class Sampler(nn.Module):
+@@ -1,7 +1,9 @@
+ import logging
+ from typing import List
++import os
+ 
+ import torch
++import torch_npu
+ import torch.distributed as dist
+ from torch import nn
+ 
+@@ -74,6 +76,17 @@ class Sampler(nn.Module):
+             batch_next_token_ids = torch.argmax(logits, -1)
+             if return_logprob:
+                 logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
++        elif not os.environ.get("NOT_USING_NPU_SAMPLER_OP", False):
++            assert not sampling_info.need_min_p_sampling # TODO: min_p not implemented
++            logits.div_(sampling_info.temperatures)
++            batch_next_token_ids, _ = torch_npu.npu_top_k_top_p_sample(
++                logits,
++                sampling_info.top_ks.to(torch.int32),
++                sampling_info.top_ps.to(logits.dtype),
++            )
++            del logits
++            if return_logprob: # clamp to avoid -inf
++                logprobs = torch.log(probs).clamp(min=torch.finfo(probs.dtype).min)
+         else:
+             # Post process logits
+             logits.div_(sampling_info.temperatures)
+@@ -150,6 +163,10 @@ class Sampler(nn.Module):
  
          return batch_next_token_ids
  
++# masked_zero is used for replace index_put(0), which obstructs the overlap
 +def masked_zero(x, msk):
 +    msk = 1 - msk.to(torch.int32)
 +    x *= msk.to(x.dtype)
  
  def top_k_top_p_min_p_sampling_from_probs_torch(
      probs: torch.Tensor,
-@@ -161,15 +164,14 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
+@@ -160,16 +177,26 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
+ ):
      """A top-k, top-p and min-p sampling implementation with native pytorch operations."""
      probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
-     probs_sum = torch.cumsum(probs_sort, dim=-1)
+-    probs_sum = torch.cumsum(probs_sort, dim=-1)
 -    probs_sort[
++
++    # TODO: replace low-performance cumsum(bf16) with cumsum(int32) before it is fixed up
++    # however, top_k_top_p_min_p_sampling_from_probs_torch(...) is not the best
++    # we suggest torch_npu.npu_top_k_top_p_sample(...)
++    def int_cumsum_for_bf16(x, dim, sc=65536.0):
++        div = 1.0 / sc
++        y = x.to(torch.float) * sc
++        y = torch.cumsum(y.to(torch.int32), dim=dim)
++        return (y.to(torch.float) * div).to(dtype=x.dtype)
++    probs_sum = int_cumsum_for_bf16(probs_sort, dim=-1)
++    # probs_sum = torch.cumsum(probs_sort, dim=-1)
++
 +    masked_zero(probs_sort,
          torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1)
 -        >= top_ks.view(-1, 1)
@@ -32,7 +74,7 @@ index 75644b588..407f86800 100644
  
      sampled_index = torch.multinomial(probs_sort, num_samples=1)
      # int32 range is enough to represent the token ids
-@@ -193,7 +195,7 @@ def top_p_normalize_probs_torch(
+@@ -193,7 +220,7 @@ def top_p_normalize_probs_torch(
      # See also top_k_top_p_min_p_sampling_from_probs_torch
      probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
      probs_sum = torch.cumsum(probs_sort, dim=-1)
