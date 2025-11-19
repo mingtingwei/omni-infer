@@ -1184,13 +1184,18 @@ def fused_experts_allgather_ep_a2(layer: torch.nn.Module,
                                                                        group_list_type=1,
                                                                        shared_input_offset=0)
         elif layer.weight_num_bits == 4:
+            tuning_config = None
+            if not model_extra_config.operator_opt_config.gmm_nz:
+                tuning_config = model_extra_config.task_config.decode_gear_list[:1]
+            elif model_extra_config.task_config.decode_gear_list[0] >= 32:
+                tuning_config = [256]
             gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.w13_weight], bias=[layer.w13_weight_bias], scale=[layer.w13_weight_int4_scale],
                                                         offset=None, antiquant_scale=None, antiquant_offset=None,
                                                         per_token_scale=[dynamic_quant_scale],
                                                         group_list=expert_tokens,
                                                         activation_input=None, activation_quant_scale=None,
                                                         activation_quant_offset=None, split_item=3, group_type=0,
-                                                        group_list_type=1, act_type=0, output_dtype=torch.bfloat16)[0]
+                                                        group_list_type=1, tuning_config=tuning_config, act_type=0, output_dtype=torch.bfloat16)[0]
 
             fake_scale = torch.ones(layer.w13_weight_int4_scale.shape, dtype=torch.float32, device="npu").view(-1, layer.w13_weight_int4_scale.shape[-1])
             dynamic_quant_scale = torch.ones(dynamic_quant_scale.shape, dtype=torch.float32, device="npu")
@@ -1208,7 +1213,9 @@ def fused_experts_allgather_ep_a2(layer: torch.nn.Module,
                                                                    pertoken_scale=pertoken_scale,
                                                                    shared_input=share_input, logit=sorted_topk_weight,
                                                                    row_index=row_index,
-                                                                   output_bs=batch_size, group_list_type=1).to(torch.bfloat16)
+                                                                   output_bs=batch_size,
+                                                                   group_list_type=1,
+                                                                   tuning_config=tuning_config).to(torch.bfloat16)
 
         if not is_prefill and (
                 model_extra_config.operator_opt_config.enable_round_pipeline_comm or model_extra_config.operator_opt_config.enable_pipeline_comm):

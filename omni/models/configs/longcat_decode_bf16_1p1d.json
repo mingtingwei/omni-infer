@@ -20,6 +20,6 @@
         "expert_gate_up_prefetch": 0,
         "expert_down_prefetch": 0,
         "attn_prefetch": 0,
-        "inplace_add_rms_norm_fustion_pass": true
+        "ascend_operator_fusion_pass_set": "InplaceAddRmsNormFusionPass:off"
     }
 }

@@ -356,7 +356,7 @@ class DeepseekMoE(nn.Module):
                     return self.forward_prefill_a2(hidden_states, residual, attn_metadata)
                 else:
                     return self._forward_prefill_norm(hidden_states, residual, attn_metadata)
-            elif self.is_A2:
+            elif self.is_A2 and model_extra_config.operator_opt_config.enable_round_pipeline_comm:
                 return self.forward_decode_a2(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
             else:
                 return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
@@ -442,7 +442,10 @@ class DeepseekMoE(nn.Module):
 
         if not model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             hidden_states_int8, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            global_hidden_states = get_world_group().all_gather(hidden_states_int8, dim=0)
+            if model_extra_config.task_config.hardware_platform.startswith('A2'):
+                global_hidden_states = all_gather_two_stage(hidden_states_int8, idx=0, dim=0)
+            else:
+                global_hidden_states = get_world_group().all_gather(hidden_states_int8, dim=0)
         else:
             global_hidden_states = hidden_states
             global_pertoken_scale = None
@@ -465,11 +468,11 @@ class DeepseekMoE(nn.Module):
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
         if not model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)
-            topk_all = get_world_group().all_gather(topk_cat, dim=0)
+            if model_extra_config.task_config.hardware_platform.startswith('A2'):
+                topk_all = all_gather_two_stage(topk_cat, idx=0, dim=0)
+            else:
+                topk_all = get_world_group().all_gather(topk_cat, dim=0)
 
-            topk_all = topk_all.view(-1, self.device_count, topk_weights.shape[0], topk_all.shape[-1]) \
-                                .transpose(0, 1) \
-                                .reshape(-1, topk_all.shape[-1])
             topk_weights, topk_ids, global_pertoken_scale = torch.split(topk_all, [topk_weights.shape[-1], topk_ids.shape[-1], 1], dim=-1)
             topk_ids = torch.round(topk_ids).to(torch.int32)
             global_pertoken_scale = global_pertoken_scale.squeeze(-1)
@@ -492,7 +495,7 @@ class DeepseekMoE(nn.Module):
             final_hidden_states = final_hidden_states_list
 
         if not model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
-            final_hidden_states = get_world_group().reduce_scatter(final_hidden_states)
+            final_hidden_states = reduce_scatter_two_stage(final_hidden_states, idx=0)
 
         if not self.quant_symbol:
             final_hidden_states = torch_npu.npu_moe_finalize_routing(

@@ -31,6 +31,7 @@ def get_torchair_config(vllm_config: VllmConfig):
     if enable_torchair_graph_mode and not is_pd_seperate_d and model_extra_config.operator_opt_config.use_tnd_pa:
        config.experimental_config.tiling_schedule_optimize = False
     torch.npu.set_compile_mode(jit_compile=False)
+    config.ge_config.optimization_switch=model_extra_config.operator_opt_config.ascend_operator_fusion_pass_set
     return config
 
 
@@ -128,8 +129,6 @@ class NPUCompilationConfig:
         ]:
             if not self.backend or self.backend == "":
                 config = get_torchair_config(vllm_config)
-                if model_extra_config.operator_opt_config.inplace_add_rms_norm_fustion_pass:
-                    config.ge_config.optimization_switch = "InplaceAddRmsNormFusionPass:off"
                 npu_backend = torchair.get_npu_backend(compiler_config=config)
                 logger.info(f"Using torchair backend!")
                 return npu_backend
