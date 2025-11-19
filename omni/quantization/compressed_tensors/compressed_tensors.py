@@ -276,7 +276,7 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
             moe_method, weight_num_bits = self.get_moe_method(prefix)
             layer.weight_num_bits = weight_num_bits
             return moe_method
-        elif isinstance(layer, Attention) and model_extra_config.operator_opt_config.fa_quant:
+        elif isinstance(layer, Attention) and model_extra_config.operator_opt_config.enable_c8:
             return AscendCompressedTensorsKVCacheMethod(self)
         return None
 

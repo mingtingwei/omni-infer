@@ -45,7 +45,7 @@ from omni.models.config_loader.loader import model_extra_config
 
 def get_nz_dim():
     #NZ_DIM = 16 for float16/bfloat16, 32 for int8.
-    if model_extra_config.operator_opt_config.fa_quant:
+    if model_extra_config.operator_opt_config.enable_c8:
         return 32
     return 16
 
@@ -842,7 +842,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.view(-1, self.num_kv_heads, self.head_size).contiguous()
         num_batch = attn_metadata.seq_lens.shape[0]
 
-        if model_extra_config.operator_opt_config.fa_quant:
+        if model_extra_config.operator_opt_config.enable_c8:
             # Scale-format constraints under GQA quantization with BNSD layout.
             k_scale = layer.k_scale.view(self.num_kv_heads, 1, -1) 
             v_scale = layer.v_scale.view(self.num_kv_heads, 1, -1)
@@ -859,7 +859,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
             block_size = kv_cache[0].shape[-2]
             assert block_size == 128, f"{block_size}"
-            if model_extra_config.operator_opt_config.fa_quant:
+            if model_extra_config.operator_opt_config.enable_c8:
                 quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
                 quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
                 quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
@@ -881,7 +881,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )         
   
 
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and model_extra_config.operator_opt_config.fa_quant:
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and model_extra_config.operator_opt_config.enable_c8:
             attn_output = torch_npu.npu_fused_infer_attention_score_v2(
                     query.unsqueeze(0),
                     key.unsqueeze(0),
@@ -998,7 +998,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         "encoder/decoder cross-attention "
                                         "are not implemented for "
                                         "PallasAttentionBackendImpl")
-        if model_extra_config.operator_opt_config.fa_quant:
+        if model_extra_config.operator_opt_config.enable_c8:
             k_scale = layer.k_scale
             v_scale = layer.v_scale
 
@@ -1019,7 +1019,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # (1) saving keys and values into kv_cache, and
                 # (2) GQA
                 # can run simultaneously in two streams
-                if model_extra_config.operator_opt_config.fa_quant:
+                if model_extra_config.operator_opt_config.enable_c8:
                     quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
                     quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
                     quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
@@ -1032,14 +1032,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     stream_for_reshape_and_cache = torch.npu.current_stream()
                 with torch.npu.stream(stream_for_reshape_and_cache):
                     torch_npu._npu_reshape_and_cache(
-                        key if not model_extra_config.operator_opt_config.fa_quant else quant_key,
-                        value if not model_extra_config.operator_opt_config.fa_quant else quant_value,
+                        key if not model_extra_config.operator_opt_config.enable_c8 else quant_key,
+                        value if not model_extra_config.operator_opt_config.enable_c8 else quant_value,
                         self.key_cache.view(self.key_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
                         self.value_cache.view(self.value_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
                         attn_metadata.slot_mapping.int()
                     )
             else:
-                if model_extra_config.operator_opt_config.fa_quant:
+                if model_extra_config.operator_opt_config.enable_c8:
                     torch_npu.npu_quant_scatter_(self.key_cache, attn_metadata.slot_indices, key.view(-1, 1, self.num_kv_heads * self.head_size), k_scale.view(-1), axis=-2, quant_axis=-1)
                     torch_npu.npu_quant_scatter_(self.value_cache, attn_metadata.slot_indices, value.view(-1, 1, self.num_kv_heads * self.head_size), v_scale.view(-1), axis=-2, quant_axis=-1)
                 else:
@@ -1127,8 +1127,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     input_layout="BNSD",
                     scale=self.scale,
-                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
-                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
                     key_antiquant_mode=0,
                     value_antiquant_mode=0,
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
@@ -1145,8 +1145,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     input_layout="BSH",
                     scale=self.scale,
-                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
-                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.fa_quant else None,
+                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
                     key_antiquant_mode=0,
                     value_antiquant_mode=0,
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
@@ -1257,7 +1257,7 @@ class AscendAttentionBackend(AttentionBackend):
         # KVCache needs to store the shape of the reduced dimension [num_blocks, block_size, 1, kv_lora_rank] [num_blocks, block_size, 1, rope_dim]
         # The shape of the augmented dimension is [num_blocks, block_size, head_num, head_dim]
         layer_kv_caches = torch.zeros(kv_cache_shape,
-                                      dtype=dtype if not model_extra_config.operator_opt_config.fa_quant else torch.int8,
+                                      dtype=dtype if not model_extra_config.operator_opt_config.enable_c8 else torch.int8,
                                       device=device)
         if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
             torch_npu.npu_format_cast(layer_kv_caches, 2)

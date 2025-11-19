@@ -156,7 +156,7 @@ class PanguEmbeddedAttention(nn.Module):
         else:
             sliding_window = None
 
-        if model_extra_config.operator_opt_config.fa_quant:
+        if model_extra_config.operator_opt_config.enable_c8:
             Attention.__init__ = attention_init_c8
             self.attn = Attention(
                 self.num_heads,

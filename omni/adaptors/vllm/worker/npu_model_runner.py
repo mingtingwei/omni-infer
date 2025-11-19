@@ -234,7 +234,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 self.save_hidden_states = True
 
-        if model_extra_config.operator_opt_config.fa_quant and not self.vllm_config.model_config.use_mla:
+        if model_extra_config.operator_opt_config.enable_c8 and not self.vllm_config.model_config.use_mla:
             self.kv_cache_dtype = torch.int8
 
     def _init_graph_options(self):
