@@ -17,7 +17,6 @@ all:
             CODE_PATH: /workspace/omniinfer
             LOG_PATH: /tmp/omni_logs
             ROLE: proxy
-            MODEL_PATH: /data/model/DeepSeek-V31-Terminus-sszs50g0a0b4sym1
     D:
       hosts:
         d0:
@@ -51,7 +50,7 @@ all:
             extra-args:
               disable-log-requests: ''
               enable-expert-parallel: ''
-              max-num-seqs: 13
+              max-num-seqs: 60
               no-enable-prefix-caching: ''
               preemption-mode: swap
             gpu-util: '0.92'
@@ -116,7 +115,7 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_BUFFSIZE: 900
+            HCCL_BUFFSIZE: 1200
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
@@ -186,7 +185,7 @@ all:
             extra-args:
               disable-log-requests: ''
               enable-expert-parallel: ''
-              max-num-seqs: 13
+              max-num-seqs: 60
               no-enable-prefix-caching: ''
               preemption-mode: swap
             gpu-util: '0.92'
@@ -251,7 +250,7 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_BUFFSIZE: 900
+            HCCL_BUFFSIZE: 1200
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
@@ -305,7 +304,16 @@ all:
                 sink: 2
                 recent: 6
                 beta: 0.4
-              enable_omni_placement: false
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: /workspace/omniinfer/omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: ../dump_data
             enable-mtp: ''
             base-api-port: $API_PORT
             extra-args:
@@ -315,7 +323,8 @@ all:
               max-num-batched-tokens: 64640
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.921'
+              preemption-mode: swap
+            gpu-util: '0.908'
             kv-transfer-config:
               kv_buffer_device: npu
               kv_connector: AscendHcclConnectorV1
@@ -433,7 +442,16 @@ all:
                 sink: 2
                 recent: 6
                 beta: 0.4
-              enable_omni_placement: false
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: /workspace/omniinfer/omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: ../dump_data
             enable-mtp: ''
             base-api-port: $API_PORT
             extra-args:
@@ -443,7 +461,8 @@ all:
               max-num-batched-tokens: 64640
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.921'
+              preemption-mode: swap
+            gpu-util: '0.908'
             kv-transfer-config:
               kv_buffer_device: npu
               kv_connector: AscendHcclConnectorV1
@@ -561,7 +580,16 @@ all:
                 sink: 2
                 recent: 6
                 beta: 0.4
-              enable_omni_placement: false
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: /workspace/omniinfer/omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: ../dump_data
             enable-mtp: ''
             base-api-port: $API_PORT
             extra-args:
@@ -571,7 +599,8 @@ all:
               max-num-batched-tokens: 64640
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.921'
+              preemption-mode: swap
+            gpu-util: '0.908'
             kv-transfer-config:
               kv_buffer_device: npu
               kv_connector: AscendHcclConnectorV1
@@ -689,7 +718,16 @@ all:
                 sink: 2
                 recent: 6
                 beta: 0.4
-              enable_omni_placement: false
+              enable_omni_placement: true
+              omni_placement_config:
+                pattern_path: /workspace/omniinfer/omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy
+                max_moe_layer_num: 58
+                enable_dynamic: false
+                max_redundant_per_expert: 1
+                max_redundant_per_rank: 0
+                enable_rank_round_robin: false
+                enable_dump: false
+                dump_dir: ../dump_data
             enable-mtp: ''
             base-api-port: $API_PORT
             extra-args:
@@ -699,7 +737,8 @@ all:
               max-num-batched-tokens: 64640
               max-num-seqs: 32
               no-enable-prefix-caching: ''
-            gpu-util: '0.921'
+              preemption-mode: swap
+            gpu-util: '0.908'
             kv-transfer-config:
               kv_buffer_device: npu
               kv_connector: AscendHcclConnectorV1
