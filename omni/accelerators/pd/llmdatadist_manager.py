@@ -194,7 +194,7 @@ class LLMDataDistManager:
             self._register_caches_prefill(flatten_kv_caches)
         else:
             self._register_caches_decode(flatten_kv_caches)
-        logger.error(f" ***** registered_kv_caches num:{len(self.registered_kv_caches)}")
+        logger.info(f" ***** registered_kv_caches num:{len(self.registered_kv_caches)}")
 
     def _register_caches_prefill(self, flatten_kv_caches):
         for model_id, sub_kv_caches in enumerate(flatten_kv_caches):
