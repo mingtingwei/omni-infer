@@ -338,6 +338,11 @@ class DeepseekMoE(nn.Module):
         if self.experts_pruning:
             self.experts_pruning_threshold = torch.tensor(
                     [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135])
+        self.decode_experts_pruning = (model_extra_config.operator_opt_config.decode_experts_pruning and 
+                                model_extra_config.operator_opt_config.decode_moe_dispatch_combine)
+        if self.decode_experts_pruning:
+            self.decode_experts_pruning_threshold= torch.tensor(
+                    [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135], dtype=torch.float32).npu()
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
@@ -559,6 +564,12 @@ class DeepseekMoE(nn.Module):
         layer = self.experts
         
         max_num_deployed_expert = self.local_expert_num * get_ep_group().world_size
+        if self.decode_experts_pruning:
+            topk_weights, sorted_indices = torch.sort(topk_weights,dim=1,descending=True)
+            topk_ids = torch.gather(topk_ids, dim=1, index=sorted_indices)
+            topk_weights_sum = torch.sum(topk_weights, dim=1, keepdim=True)
+            mc2_mask_2d = (topk_weights >= topk_weights_sum * self.decode_experts_pruning_threshold) & mc2_mask.reshape(-1,1)
+
         act_dtype = hidden_states.dtype
         shared_expert_rank_num = 0
         kwargs = {
@@ -586,7 +597,7 @@ class DeepseekMoE(nn.Module):
             "group_tp": layer.moe_rs_group_name,
             "tp_world_size": experts_tp_size,
             "tp_rank_id": global_rank % experts_tp_size,
-            "x_active_mask": mc2_mask,
+            "x_active_mask": mc2_mask_2d if self.decode_experts_pruning else mc2_mask,
         })
 
         output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs)
@@ -702,7 +713,7 @@ class DeepseekMoE(nn.Module):
             "group_tp": layer.moe_rs_group_name,
             "tp_world_size": experts_tp_size,
             "tp_rank_id": global_rank % experts_tp_size,
-            "x_active_mask": mc2_mask,
+            "x_active_mask": mc2_mask_2d if self.decode_experts_pruning else mc2_mask,
         }
         kwargs.update(stage3_kwargs)
 
