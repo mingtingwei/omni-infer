@@ -412,9 +412,9 @@ class PrefillConnectorWorker:
                     logger.debug("Received: %s", id_list)
                     with self._transfer_lock:
                         self.receive_req_list.extend(id_list)
-                if os.getenv("PROFILING_NAMELIST", None):
-                    json_data = json.dumps(id_list)
-                    socket_p.send_string(json_data)
+                    if os.getenv("PROFILING_NAMELIST", None):
+                        json_data = json.dumps(id_list)
+                        socket_p.send_string(json_data)
             except Exception as e:
                 logger.error("get pulled kv req list failed: %s", e)
 
