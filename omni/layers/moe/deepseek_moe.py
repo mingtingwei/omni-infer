@@ -325,17 +325,19 @@ class DeepseekMoE(nn.Module):
                     if self.ep_size > 64:
                         self.w2_prefetch_size = model_extra_config.operator_opt_config.expert_down_prefetch * 1024 * 1024
 
-            self.tuning_config = None
-            if not model_extra_config.operator_opt_config.gmm_nz:
-                self.tuning_config = model_extra_config.task_config.decode_gear_list[:1]
-            elif model_extra_config.task_config.decode_gear_list[0] >= 32:
-                self.tuning_config = [256]
-            
-            self.experts_pruning = (model_extra_config.operator_opt_config.experts_pruning and 
-                                    model_extra_config.operator_opt_config.prefill_moe_all_to_all)
-            if self.experts_pruning:
-                self.experts_pruning_threshold = torch.tensor(
-                        [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135])
+        self.tuning_config = None
+        if not model_extra_config.operator_opt_config.gmm_nz:
+            self.tuning_config = model_extra_config.task_config.decode_gear_list[:1]
+        elif model_extra_config.operator_opt_config.new_w4_op:
+            self.tuning_config = [model_extra_config.task_config.decode_gear_list[0], 1]
+        elif model_extra_config.task_config.decode_gear_list[0] >= 32:
+            self.tuning_config = [256]
+        
+        self.experts_pruning = (model_extra_config.operator_opt_config.experts_pruning and 
+                                model_extra_config.operator_opt_config.prefill_moe_all_to_all)
+        if self.experts_pruning:
+            self.experts_pruning_threshold = torch.tensor(
+                    [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135])
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \

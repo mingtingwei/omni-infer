@@ -121,6 +121,7 @@ class ModelOperatorOptConfig:
     ascend_operator_fusion_pass_set: str = '' #用于控制关闭算子融合，为空代表不关闭任何算子融合
 
     enable_mlp_seq_split: bool = False # 模型大 + 权重大 + 长序列场景下会OOM，需要切分长度时打开以避免OOM，默认切分大小为4096
+    new_w4_op: bool = False # w4a8新算子
     enable_c8: bool = False # GQA使能C8
 
     def __post_init__(self):

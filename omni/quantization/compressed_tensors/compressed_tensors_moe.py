@@ -4,6 +4,7 @@ import os
 import math
 from typing import Optional
 import torch, torch_npu
+import numpy as np
 
 from vllm.attention import AttentionMetadata
 from vllm.platforms import current_platform
@@ -367,13 +368,97 @@ class AscendCompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_bias, extra_weight_attrs)
         # set_weight_attrs(w2_weight_int4_offset, extra_weight_attrs)
 
+    def get_block_col_num(self, dtype:str) -> int:
+        if dtype == 'int8':
+            bytes_per_element = 1
+        elif dtype == 'float16':
+            bytes_per_element = 2
+        elif dtype == 'int4':
+            bytes_per_element = 0.5
+        else:
+            raise ValueError(f"Unsupported dtype: {dtype}")
+        return int(32 / bytes_per_element)
+
+    def flatten_matrices_into_big_matrix(self, matrices):
+        x, m, n = matrices.shape
+        total_elements = x * m * n
+        flat = matrices.flatten(order='C')
+        return flat.reshape((m, x * n), order='C')
+
+    def split_big_matrix_by_columns(self, bigmat, n):
+        m, total_cols = bigmat.shape
+        assert total_cols % n == 0, "列数必须能整除"
+        x = total_cols // n
+        return bigmat.reshape(m, x, n).transpose(1, 0, 2)
+
+    def nd_to_nz_variable_block(self, nd: np.ndarray, dtype: str) -> np.ndarray:
+        N, D = nd.shape
+        block_col_num = self.get_block_col_num(dtype)
+
+        if D % block_col_num != 0:
+            pad_len = block_col_num - (D % block_col_num)
+            nd = np.pad(nd, ((0,0), (0, pad_len)), mode='constant')
+            D = nd.shape[1]
+
+        flat = nd.flatten(order='C')
+        num_blocks = D // block_col_num
+        block_size = N * block_col_num
+        blocks = self.split_big_matrix_by_columns(nd, block_col_num)
+        nz = self.flatten_matrices_into_big_matrix(blocks)
+
+        return nz
+
+    def unpack_int8_to_int4(self, packed: torch.Tensor) -> torch.Tensor:
+        low = packed & 0x0F
+        high = (packed >> 4) &0x0F
+        unpacked = torch.empty((packed.shape[0] * 2, packed.shape[1]), dtype=torch.int8, device=packed.device)
+        unpacked[0::2, :] = low
+        unpacked[1::2, :] = high
+        return unpacked
+
+    def pack_4bit(self, unpacked: torch.Tensor) -> torch.Tensor:
+        x1 = unpacked[:, ::2] & 0x0F
+        x2 = (unpacked[:, 1::2] & 0x0F) << 4
+        return (x1 | x2).to(torch.int8)
+
+    def convert_weight(self, packed: torch.Tensor) -> torch.Tensor:
+        unpacked = self.unpack_int8_to_int4(packed)
+        repacked = self.pack_4bit(unpacked)
+        return repacked
+
+    def convert_scale(self, scale: torch.Tensor) -> torch.Tensor:
+        E, _, N = scale.shape
+        scale = scale.view(torch.int32)[:, :, ::2]
+        scale_64 = torch.zeros((2 * E, 1, N), dtype=torch.int32, device=scale.device)
+        scale_64[:E, :, :] = scale
+        scale_64 = scale_64.reshape(E, 1, 2 * N).view(torch.int64)
+        return scale_64
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight = torch.nn.Parameter(layer.w13_weight.transpose(1, 2).contiguous(), requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(layer.w2_weight.transpose(1, 2).contiguous(), requires_grad=False)
+        if not model_extra_config.operator_opt_config.new_w4_op:
+            layer.w13_weight = torch.nn.Parameter(layer.w13_weight.transpose(1, 2).contiguous(), requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(layer.w2_weight.transpose(1, 2).contiguous(), requires_grad=False)
 
         if model_extra_config.operator_opt_config.gmm_nz:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight, 29)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight, 29)
+            if model_extra_config.operator_opt_config.new_w4_op:
+                e, n, k = layer.w13_weight.data.shape
+                w13_tmp = torch.empty((e, n * 2, k // 2), dtype=layer.w13_weight.data.dtype, device=layer.w13_weight.data.device)
+                layer.w13_weight_int4_scale.data = self.convert_scale(layer.w13_weight_int4_scale.data).contiguous()
+                for i in range(e):
+                    w13_tmp[i] = self.convert_weight(layer.w13_weight.data[i]).contiguous()
+                    w13_tmp[i] = torch.from_numpy(self.nd_to_nz_variable_block(w13_tmp[i].cpu().numpy(), 'int8')).npu()
+                layer.w13_weight.data = w13_tmp.contiguous().view(e, k, n)
+
+                e, n, k = layer.w2_weight.data.shape
+                w2_tmp = torch.empty((e, n * 2, k // 2), dtype=layer.w2_weight.data.dtype, device=layer.w2_weight.data.device)
+                layer.w2_weight_int4_scale.data = self.convert_scale(layer.w2_weight_int4_scale.data).contiguous()
+                for i in range(e):
+                    w2_tmp[i] = self.convert_weight(layer.w2_weight.data[i]).contiguous()
+                    w2_tmp[i] = torch.from_numpy(self.nd_to_nz_variable_block(w2_tmp[i].cpu().numpy(), 'int8')).npu()
+                layer.w2_weight.data = w2_tmp.contiguous().view(e, k, n)
+            else:
+                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight, 29)
+                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight, 29)
 
         layer.w13_weight.data = layer.w13_weight.data.view(torch.int32).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.view(torch.int32).contiguous()

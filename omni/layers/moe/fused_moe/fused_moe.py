@@ -650,13 +650,17 @@ def gmm_expert(layer, x, expert_tokens, dynamic_scale=None, avg_tokens_per_exper
                                                   group_list_type=1, tuning_config=avg_tokens_per_expert)[0]
         return out_hidden
     elif layer.weight_num_bits == 4:
+        tuning_config = None
+        if model_extra_config.operator_opt_config.new_w4_op:
+            tuning_config = [model_extra_config.task_config.decode_gear_list[0], 1]
         mm1_mm3 = torch_npu.npu_grouped_matmul([h], [layer.w13_weight], bias=[layer.w13_weight_bias], scale=[layer.w13_weight_int4_scale],
                                                offset=None, antiquant_scale=None, antiquant_offset=None,
                                                per_token_scale=[pertoken_scale],
                                                group_list=expert_tokens,
                                                activation_input=None, activation_quant_scale=None,
                                                activation_quant_offset=None, split_item=3, group_type=0,
-                                               group_list_type=1, act_type=0, output_dtype=torch.bfloat16)[0]
+                                               group_list_type=1, act_type=0, output_dtype=torch.bfloat16,
+                                               tuning_config=tuning_config)[0]
 
         fake_scale = torch.ones(layer.w13_weight_int4_scale.shape, dtype=torch.float32, device="npu").view(-1, layer.w13_weight_int4_scale.shape[-1])
         pertoken_scale = torch.ones(pertoken_scale.shape, dtype=torch.float32, device="npu")
@@ -677,7 +681,7 @@ def gmm_expert(layer, x, expert_tokens, dynamic_scale=None, avg_tokens_per_exper
                                                   scale=[layer.w2_weight_int4_scale], per_token_scale=[pertoken_scale],
                                                   group_list=expert_tokens, split_item=3,
                                                   output_dtype=out_dtype, group_type=0,
-                                                  group_list_type=1, tuning_config=avg_tokens_per_expert)[0]
+                                                  group_list_type=1, tuning_config=tuning_config)[0]
         return out_hidden
     else:
         raise NotImplementedError(f"Unsupported compress tensor type. num bits: {layer.weight_num_bits}")
@@ -873,6 +877,13 @@ def moe_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dyn
                                            group_list_type=1)[0]
         return out
     elif layer.weight_num_bits == 4:
+        tuning_config = None
+        if not model_extra_config.operator_opt_config.gmm_nz:
+            tuning_config = model_extra_config.task_config.decode_gear_list[:1]
+        elif model_extra_config.operator_opt_config.new_w4_op:
+            tuning_config = [model_extra_config.task_config.decode_gear_list[0], 1]
+        elif model_extra_config.task_config.decode_gear_list[0] >= 32:
+            tuning_config = [256]
         gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [layer.w13_weight], bias=[layer.w13_weight_bias], scale=[layer.w13_weight_int4_scale],
                                                     offset=None, antiquant_scale=None, antiquant_offset=None,
                                                     per_token_scale=[pertoken_scale],
@@ -880,8 +891,7 @@ def moe_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dyn
                                                     activation_input=None, activation_quant_scale=None,
                                                     activation_quant_offset=None, split_item=3, group_type=0,
                                                     group_list_type=1, act_type=0,
-                                                    tuning_config=model_extra_config.task_config.decode_gear_list[
-                                                                  0:], output_dtype=torch.bfloat16)[0]
+                                                    tuning_config=tuning_config, output_dtype=torch.bfloat16)[0]
 
         fake_scale = torch.ones(layer.w13_weight_int4_scale.shape, dtype=torch.float32, device="npu").view(-1, layer.w13_weight_int4_scale.shape[-1])
         pertoken_scale = torch.ones(pertoken_scale.shape, dtype=torch.float32, device="npu")
@@ -896,7 +906,7 @@ def moe_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dyn
                                            group_list=expert_tokens, split_item=3, output_dtype=act_dtype,
                                            group_type=0,
                                            group_list_type=1,
-                                           tuning_config=model_extra_config.task_config.decode_gear_list[0:])[0]
+                                           tuning_config=tuning_config)[0]
         return out
     else:
         raise NotImplementedError(f"Unsupported compress tensor type. num bits: {layer.weight_num_bits}")
