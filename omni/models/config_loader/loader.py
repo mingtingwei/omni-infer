@@ -68,6 +68,7 @@ class ModelParallelConfig:
     attn_sp_size: int = 1
     redundancy_shared_expert_num: int = 0
     attn_dies: int = 0
+    eh_proj_tp_size: int = 1
 
  
 @dataclass
