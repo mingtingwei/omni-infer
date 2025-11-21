@@ -82,4 +82,4 @@ index 75644b588..4aa5b0d83 100644
 +    masked_zero(probs_sort, (probs_sum - probs_sort) > top_ps.view(-1, 1))
      probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
      return torch.zeros_like(probs_sort).scatter_(-1, probs_idx, probs_sort)
-
+ 
