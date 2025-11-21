@@ -7,15 +7,17 @@ class Device:
         self.device_ip = device_info["device_ip"]
         self.rank_id = int(device_info["rank_id"])
         self.cluster_id = int(device_info.get("cluster_id", "0"))
+        self.device_port = device_info.get("device_port", None)
 
     def __repr__(self) -> str:
         return ("Device("
                 f"device_id={self.device_id}, "
                 f"device_ip={self.device_ip}, "
-                f"rank_id={self.rank_id}")
+                f"rank_id={self.rank_id}, "
+                f"device_port={self.device_port}")
 
     def __eq__(self, other):
-        return self.device_ip == other.device_ip
+        return self.device_ip == other.device_ip and self.device_port == other.device_port
 
 
 class Server:

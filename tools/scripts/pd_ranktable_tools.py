@@ -65,6 +65,10 @@ def parse_args():
                         help="List of local rank tables (default is an empty list).")
     parser.add_argument('--api-server-list', nargs='*', default=[], type=str,
                         help="List of api server.")
+    parser.add_argument('--device-port-range', nargs='*', default=[16667, 65535], type=str,
+                        help="Range of device port.")
+    parser.add_argument('--replace-device-list', nargs='*', default=[], type=str2list,
+                        help="List of the device which need to replace communication track.")
 
     args = parser.parse_args()
     verify_server_args(args)
@@ -106,6 +110,22 @@ def verify_server_args(args):
     if len(server_set) != device_count:
         raise ValueError('A device_id can be used only once in prefill server and decode server.')
 
+def get_free_ports(count=1, port_range=(8000, 9000)):
+    free_ports = []
+
+    for port in range(port_range[0], port_range[1] + 1):
+        if len(free_ports) >= count:
+            break
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('', port))
+                free_ports.append(port)
+        except OSError:
+            continue
+
+    return free_ports
 
 def generate_global_ranktable(args):
     global_ranktable = {
@@ -145,7 +165,7 @@ def generate_local_ranktable(args):
         local_ranktable['server_list'][0]["server_id"] = local_ip
         local_ranktable['server_list'][0]["server_ip"] = local_ip
         if device_list != 'host':
-            local_ranktable['server_list'][0]["device"] = get_device(device_list)
+            local_ranktable['server_list'][0]["device"] = get_device(device_list, args)
 
         dump_json(os.path.join(args.save_dir, f"local_ranktable_{local_ip}_{''.join(device_list)}.json"),
                   local_ranktable)
@@ -167,7 +187,7 @@ def generate_group(args, group_id, server_list=None):
         return group_info
     for device_list in server_list:
         server = deepcopy(default_server)
-        server['device'] = get_device(device_list)
+        server['device'] = get_device(device_list, args)
         group_info["server_list"].append(server)
 
     return group_info
@@ -281,14 +301,33 @@ def merge_all(args):
     dump_json(os.path.join(args.save_dir, f"global_ranktable_merge.json"), global_ranktable)
 
 
-def get_device(device_list):
+def get_device(device_list, args):
     device_info = []
     for rank_id, device_id in enumerate(device_list):
-        device = {
-            "device_id": str(device_id),
-            "device_ip": get_device_ip(device_id),
-            "rank_id": str(rank_id)
-        }
+        device_ip = get_device_ip(device_id)
+        replace_device_list = args.replace_device_list
+        if len(replace_device_list) == 0 or device_ip not in replace_device_list[0]:
+            device = {
+                "device_id": str(device_id),
+                "device_ip": get_device_ip(device_id),
+                "rank_id": str(rank_id)
+            }
+        else:
+            device_id_int = int(device_id)
+            if device_id_int % 2 == 0:
+                new_device_ip = get_device_ip(str(device_id_int + 1))
+            else:
+                new_device_ip = get_device_ip(str(device_id_int - 1))
+            if new_device_ip in replace_device_list[0]:
+                raise ValueError("The new device ip is already in replace device.")
+            else:
+                device_port = get_free_ports(count=1, port_range=args.device_port_range)
+                device = {
+                    "device_id": str(device_id),
+                    "device_ip": str(new_device_ip),
+                    "rank_id": str(rank_id),
+                    "device_port": str(device_port[0])
+                }
         device_info.append(device)
     return device_info
 
