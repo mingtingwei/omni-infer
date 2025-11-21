@@ -1,0 +1,67 @@
+diff --git a/python/sglang/srt/disaggregation/prefill.py b/python/sglang/srt/disaggregation/prefill.py
+index 92483ef5d..8a5402ff8 100644
+--- a/python/sglang/srt/disaggregation/prefill.py
++++ b/python/sglang/srt/disaggregation/prefill.py
+@@ -26,6 +26,7 @@ from http import HTTPStatus
+ from typing import TYPE_CHECKING, List, Optional
+ 
+ import torch
++import time
+ 
+ from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
+ from sglang.srt.disaggregation.utils import (
+@@ -356,6 +357,14 @@ class SchedulerDisaggregationPrefillMixin:
+             if len(self.disagg_prefill_inflight_queue) > 0:
+                 self.process_disagg_prefill_inflight_queue()
+ 
++            if not self.server_args.disable_prefill_release_kv_early:
++                retry_times = 0
++                while len(self.disagg_prefill_inflight_queue) > 0 and retry_times < self.server_args.prefill_release_kv_retry_times:
++                    time.sleep(self.server_args.prefill_release_kv_waiting_time)
++                    self.process_disagg_prefill_inflight_queue()
++                    retry_times += 1
++
++
+             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
+                 self.self_check_during_idle()
+ 
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 7eba576c5..652ab82ee 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -259,6 +259,10 @@ class ServerArgs:
+     disable_mooncake_mla_multi_rank: bool = False
+     mooncake_session_failures_threshold: int = 100
+ 
++    disable_prefill_release_kv_early: bool = False
++    prefill_release_kv_retry_times: int = 1
++    prefill_release_kv_waiting_time: float = 0.1
++
+     # Debug tensor dumps
+     debug_tensor_dump_output_folder: Optional[str] = None
+     debug_tensor_dump_input_file: Optional[str] = None
+@@ -2056,6 +2060,23 @@ class ServerArgs:
+             default=ServerArgs.mooncake_session_failures_threshold,
+             help="The threshold for mooncake session failure times.",
+         )
++        parser.add_argument(
++            "--disable-prefill-release-kv-early",
++            action="store_true",
++            help="Disable the kvcache's early release feature when Prefill enables overlap.",
++        )
++        parser.add_argument(
++            "--prefill-release-kv-retry-times",
++            type=int,
++            default=ServerArgs.prefill_release_kv_retry_times,
++            help="The number of retries to release the kvcache.",
++        )
++        parser.add_argument(
++            "--prefill-release-kv-waiting-time",
++            type=float,
++            default=ServerArgs.prefill_release_kv_waiting_time,
++            help="The waiting time before releasing kvcache.",
++        )
+ 
+     @classmethod
+     def from_cli_args(cls, args: argparse.Namespace):
+

@@ -25,3 +25,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/fix_sampler.patch
 git apply --whitespace=nowarn $PATCH_ROOT/send_kvcache_multi_rank.patch
 git apply --whitespace=nowarn $PATCH_ROOT/sglang_model_param_adjust.patch
 git apply --whitespace=nowarn $PATCH_ROOT/longcat.patch
+git apply --whitespace=nowarn $PATCH_ROOT/release_kv_early.patch
