@@ -50,6 +50,7 @@ KV_PARALLEL_SIZE=2
 KV_PRODUCER_DP_SIZE=1
 KV_PRODUCER_PP_SIZE=1
 VLLM_PP_LAYER_PARTITION="null"
+PRINT_SCREEN=False
 
 GPU_UTIL=0.9
 EXTRA_ARGS=""
@@ -76,6 +77,9 @@ print_help() {
     echo "  --prefill-pod-num                llmdatadist-specific: Number of P instances (default: $PREFILL_POD_NUM)"
     echo "  --decode-pod-num                 llmdatadist-specific: Number of D instances (default: $DECODE_POD_NUM)"
     echo "  --vllm-llmdatadist-zmq-port      llmdatadist-specific: ZMQ port for llmdatadist connector (must be string) (default: $VLLM_LLMDATADIST_ZMQ_PORT)"
+    echo "  --ray-port      llmdatadist-specific: head node's listening port (default $RAY_PORT)for Ray cluster communication"
+    echo "  --ray-min-worker-port      llmdatadist-specific: sets the lowest port number  (default $RAY_MIN_WORKER_PORT) available for Ray worker processes."
+    echo "  --ray-max-worker-port      llmdatadist-specific: sets the highest port number  (default $RAY_MAX_WORKER_PORT) available for Ray worker processes."
     echo "  --hcc-intra-roce-enable          Ascend-specific: Set to 1 for A3, enable intra-HCCL ROCE (default: $HCCL_INTRA_ROCE_ENABLE)"
     echo "  --hcc-intra-pcie-enable          Ascend-specific: Set to 0 for A3, enable intra-HCCL PCIE (default: $HCCL_INTRA_PCIE_ENABLE)"
     echo "  --ascend-rt-visible-devices      Ascend-specific: Visible physical devices for the instance. (default: $ASCEND_RT_VISIBLE_DEVICES)"
@@ -116,6 +120,7 @@ print_help() {
     echo "  --hccl-buffsize                  vLLM framework: HCCL_BUFFSIZE"
     echo "  --num-speculative-tokens         vLLM framework: Speculative decoding parameter, number of speculative tokens per step (default: $NUM_SPECULATIVE_TOKENS)"
     echo "  --pp-layer-partition             vLLM framework: pp layer partition (default: $VLLM_PP_LAYER_PARTITION)"
+    echo "  --print-screen             vLLM framework: this parameter only takes effect when the VLLM_LOGGING_CONFIG_PATH active"
     exit 0
 }
 
@@ -279,6 +284,9 @@ parse_long_option() {
         --ray-max-worker-port)
             RAY_MAX_WORKER_PORT="$2"
             ;;
+       --print-screen)
+            PRINT_SCREEN="$2"
+            ;;
         --help)
             print_help
             ;;
@@ -440,6 +448,10 @@ echo "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: $RAY_EXPERIMENTAL_NOSET_
 echo "RAY_CGRAPH_get_timeout: $RAY_CGRAPH_get_timeout"
 echo "TASK_QUEUE_ENABLE: $TASK_QUEUE_ENABLE"
 echo "LLM_WAITING_OUT: $LLM_WAITING_OUT"
+echo "RAY_PORT: $RAY_PORT"
+echo "RAY_MIN_WORKER_PORT: $RAY_MIN_WORKER_PORT"
+echo "RAY_MAX_WORKER_PORT: $RAY_MAX_WORKER_PORT"
+echo "PRINT_SCREEN: $PRINT_SCREEN"
 echo "=================="
 
 # Execute Python script
@@ -468,7 +480,8 @@ common_operations() {
     --gpu-util "$GPU_UTIL" \
     --additional-config "$ADDITIONAL_CONFIG" \
     $mtp_args \
-    --extra-args "$EXTRA_ARGS"
+    --extra-args "$EXTRA_ARGS" \
+    --print-screen "$PRINT_SCREEN" 
 }
 
 start_ray_log_rotate(){
