@@ -109,12 +109,8 @@ class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
         if getattr(layer, "throw_dequant", False):
             weight_scale = weight_scale.to(torch.float32)
         weight_offset = layer.weight_offset
-        is_prefill = model_extra_config.task_config.is_prefill_node
-        if is_prefill:
-            layer.weight = Parameter(weight.t().contiguous(), requires_grad=False)
-        else:
-            weight = torch_npu.npu_format_cast(weight.t().contiguous(), 29)
-            layer.weight = Parameter(weight, requires_grad=False)
+        weight = torch_npu.npu_format_cast(weight.t().contiguous(), 29)
+        layer.weight = Parameter(weight, requires_grad=False)
 
         layer.weight_scale = Parameter(weight_scale.view(-1), requires_grad=False)
         layer.weight_offset = Parameter(
