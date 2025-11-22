@@ -4,48 +4,57 @@
 import functools
 import inspect
 import logging
+import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _execute_operation(operation_str: Optional[str], param_dict: Dict[str, Any]) -> None:
+def _execute_operation(operation_str: Optional[str], global_vars: Dict[str, Any], local_vars: Dict[str, Any]) -> None:
     """execute_operation"""
     if operation_str:
         try:
-            exec(operation_str, param_dict)
+            exec(operation_str, global_vars, local_vars)
         except Exception as e:
             logging.error(f"Error executing operation: {e}")
 
-
-def _get_caller_info(stack: List[inspect.FrameInfo]) -> Tuple[str, str, str]:
+def _get_caller_info(caller_frame) -> Tuple[str, str, str]:
     """Obtain the caller's module name, class name, and function name"""
     caller_module: str = ""
     caller_class: str = ""
     caller_function: str = ""
     try:
-        if len(stack) > 1:
-            caller_frame: inspect.FrameType = stack[1].frame
-            # module name
-            caller_module = caller_frame.f_globals.get('__name__', '')
-            # class name
-            caller_self: Optional[Union[object, Type]] = caller_frame.f_locals.get('self') or caller_frame.f_locals.get(
-                'cls')
+        # module name
+        caller_module = caller_frame.f_globals.get('__name__', '')
+        # class name
+        caller_self: Optional[Union[object, Type]] = caller_frame.f_locals.get('self') or caller_frame.f_locals.get(
+            'cls')
 
-            if caller_self:
-                if inspect.isclass(caller_self):
-                    caller_class = caller_self.__name__
-                else:
-                    caller_class = caller_self.__class__.__name__
+        if caller_self:
+            if inspect.isclass(caller_self):
+                caller_class = caller_self.__name__
+            else:
+                caller_class = caller_self.__class__.__name__
 
-            # function name
-            caller_function = stack[1].function
+        # function name
+        caller_function = caller_frame.f_code.co_name
     except Exception as e:
         logging.error(f"Error getting caller info: {e}")
 
     return caller_module, caller_class, caller_function
 
+
+def _get_caller_env(caller_frame) -> Tuple[dict, dict]:
+    """Obtain the caller's globals and locals env"""
+    try:
+        local_vars = caller_frame.f_locals
+        global_vars = caller_frame.f_globals
+
+    except Exception as e:
+        logging.error(f"Error getting caller env: {e}")
+
+    return local_vars, global_vars 
 
 def _should_wrap(
         scope_name: Optional[str],
@@ -95,8 +104,10 @@ def _sync_func_multi(original_method: Callable, patch_list: List[Dict[str, Any]]
 
     @functools.wraps(original_method)
     def wrapper(first_arg: Any, *args: Any, **kwargs: Any) -> Any:
-        stack: List[inspect.FrameInfo] = inspect.stack()
-        caller_module, caller_class, caller_function = _get_caller_info(stack)
+        caller_frame = sys._getframe(1)
+        caller_module, caller_class, caller_function = _get_caller_info(caller_frame)
+
+        local_vars, global_vars = _get_caller_env(caller_frame)
 
         matched_patches = []
         for patch_info in patch_list:
@@ -110,34 +121,28 @@ def _sync_func_multi(original_method: Callable, patch_list: List[Dict[str, Any]]
                 logger.debug(f"<<< Matched patch for caller {caller_module}.{caller_class}.{caller_function}")
 
         if not matched_patches:
-            # d_12 in while true frantically prints
-            # logger.info(
-            #     f"<<<INFO: No matching patches for {original_method.__qualname__} "
-            #     f"from caller {caller_module}.{caller_class}.{caller_function}")
             return original_method(first_arg, *args, **kwargs)
 
-        is_cls = _is_cls_method(original_method)
-        param_dict = _set_param_dict(args, first_arg, is_cls, kwargs)
 
         for patch_info in matched_patches:
             entry_op = patch_info.get('entry_operation')
             entry_msg = patch_info.get('entry_message')
             if entry_msg:
                 logger.info(f"<<<{entry_msg}")
-            _execute_operation(entry_op, param_dict)
+            _execute_operation(entry_op, global_vars, local_vars)
 
         result = {}
         try:
             result = original_method(first_arg, *args, **kwargs)
         finally:
-            param_dict["result"] = result
+            local_vars["result"] = result
 
         for patch_info in reversed(matched_patches):
             exit_op = patch_info.get('exit_operation')
             exit_msg = patch_info.get('exit_message')
             if exit_msg:
                 logger.info(f"<<<{exit_msg}")
-            _execute_operation(exit_op, param_dict)
+            _execute_operation(exit_op, global_vars, local_vars)
 
         return result
 
@@ -149,8 +154,10 @@ def _async_func_multi(original_method: Callable, patch_list: List[Dict[str, Any]
 
     @functools.wraps(original_method)
     async def async_wrapper(first_arg: Any, *args: Any, **kwargs: Any) -> Any:
-        stack: List[inspect.FrameInfo] = inspect.stack()
-        caller_module, caller_class, caller_function = _get_caller_info(stack)
+        caller_frame = sys._getframe(1)
+        caller_module, caller_class, caller_function = _get_caller_info(caller_frame)
+
+        local_vars, global_vars = _get_caller_env(caller_frame)
 
         matched_patches = []
         for patch_info in patch_list:
@@ -163,34 +170,28 @@ def _async_func_multi(original_method: Callable, patch_list: List[Dict[str, Any]
                 logger.debug(f"<<< Matched patch for caller {caller_module}.{caller_class}.{caller_function}")
 
         if not matched_patches:
-            # d_12 in while true frantically prints
-            # logger.info(
-            #     f"<<<INFO: No matching patches for {original_method.__qualname__} "
-            #     f"from caller {caller_module}.{caller_class}.{caller_function}")
             return await original_method(first_arg, *args, **kwargs)
 
-        is_cls = _is_cls_method(original_method)
-        param_dict = _set_param_dict(args, first_arg, is_cls, kwargs)
 
         for patch_info in matched_patches:
             entry_op = patch_info.get('entry_operation')
             entry_msg = patch_info.get('entry_message')
             if entry_msg:
                 logger.info(f"<<<{entry_msg}")
-            _execute_operation(entry_op, param_dict)
+            _execute_operation(entry_op, global_vars, local_vars)
 
         result = {}
         try:
             result = await original_method(first_arg, *args, **kwargs)
         finally:
-            param_dict["result"] = result
+            local_vars["result"] = result
 
         for patch_info in reversed(matched_patches):
             exit_op = patch_info.get('exit_operation')
             exit_msg = patch_info.get('exit_message')
             if exit_msg:
                 logger.info(f"<<<{exit_msg}")
-            _execute_operation(exit_op, param_dict)
+            _execute_operation(exit_op, global_vars, local_vars)
 
         return result
 

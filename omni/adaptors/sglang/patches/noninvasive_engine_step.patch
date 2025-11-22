@@ -1,0 +1,15 @@
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 5d2204c3f..b02e269d0 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+
+@@ -2587,3 +2687,14 @@ def run_scheduler_process(
+         traceback = get_exception_traceback()
+         logger.error(f"Scheduler hit an exception: {traceback}")
+         parent_process.send_signal(signal.SIGQUIT)
++
++import os
++## apply patches for engine_step
++if os.getenv("PROFILING_NAMELIST", None):
++    print("Profiler patch environmental variable is enable, applying profiler patches for engine_step.")    
++    from omni.adaptors.sglang.patches.profiler_patches import apply_profiler_patches_engine_step

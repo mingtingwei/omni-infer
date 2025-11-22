@@ -26,6 +26,7 @@
     MODEL_PATH: "/data/models/DeepSeek-R1-w8a8-fusion"
     LOG_PATH_IN_EXECUTOR: "/data/log_path_in_executor"
     CODE_PATH: "/data/local_code_path"
+    NAMELIST: "/noninvasive_path"
 
     # Configuration for containers 
     DOCKER_IMAGE_ID: "REPOSITORY:TAG"
@@ -43,6 +44,7 @@
       docker run -it --shm-size=500g \
         -e CODE_PATH=$CODE_PATH \
         -e LOG_PATH=$LOG_PATH \
+        -e NAMELIST=$NAMELIST \
         -e TRACE_PATH=$TRACE_PATH \
         --net=host \
         --privileged=true \
@@ -81,6 +83,9 @@
       #!/bin/bash
 
       . ~/.bashrc
+
+      export PROFILING_NAMELIST=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/${NAMELIST}
+      export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
@@ -124,6 +129,9 @@
       #!/bin/bash
 
       . ~/.bashrc
+
+      export PROFILING_NAMELIST=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/${NAMELIST}
+      export OMNILOGGER_ARGS="$TRACE_PATH,D{{ node_rank }},01"
 
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
@@ -854,17 +862,19 @@
       tags: 
         - fetch_log
 
-    # - name: Delete the historical trace files on the server.
-    #   command: bash -c "rm -rf {{ TRACE_PATH }}/trace/*"
-    #   tags:
-    #     - rm_trace
+    - name: 删除宿主机上的历史 trace 文件
+      command: bash -c "rm -rf {{ TRACE_PATH }}/trace/*"
+      tags:
+        - rm_trace
 
-    # - name: Sync the remote trace logs to the local directory.
-    #   synchronize:
-    #     src: "{{ TRACE_PATH }}/trace/"
-    #     dest: "{{ TRACE_SYNC_PATH }}/sync"
-    #     mode: pull
-    #     rsync_opts:
-    #       - "--archive"
-    #       - "--compress"
-    #   tags: collect_trace
+
+    - name: 同步远程 trace 日志到本地日期目录
+      synchronize:
+        src: "{{ TRACE_PATH }}/trace/"
+        dest: "{{ TRACE_SYNC_PATH }}/sync"
+        mode: pull  # 从远程拉取到本地
+        rsync_opts:
+          - "--archive"  # 保留权限、时间戳等
+          - "--compress" # 压缩传输
+            #- "--mkpath"
+      tags: collect_trace
