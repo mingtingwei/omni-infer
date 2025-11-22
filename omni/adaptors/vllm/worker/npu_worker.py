@@ -184,10 +184,12 @@ class NPUWorker(WorkerBase):
             enable_omni_placement = self.vllm_config.additional_config.get("enable_omni_placement", False)
             enable_pd_elastic_scaling = self.vllm_config.additional_config.get("enable_pd_elastic_scaling", False)
             enable_attn_ffn_disaggregation = self.vllm_config.additional_config.get("enable_attn_ffn_disaggregation", False)
+            low_latency=self.vllm_config.additional_config.get("low_latency", False)
         else:
             enable_omni_placement = False
             enable_pd_elastic_scaling = False
             enable_attn_ffn_disaggregation = False
+            low_latency = False
         max_num_reqs = self.scheduler_config.max_num_seqs
         self.decode_gear_list = self.vllm_config.npu_compilation_config.decode_gear_list
         if self.decode_gear_list is None:
@@ -207,7 +209,8 @@ class NPUWorker(WorkerBase):
             enable_pd_elastic_scaling = enable_pd_elastic_scaling,
             decode_gear_list=self.decode_gear_list,
             enable_graph_mode=self.enable_torchair_graph_mode,
-            enable_attn_ffn_disaggregation=enable_attn_ffn_disaggregation
+            enable_attn_ffn_disaggregation=enable_attn_ffn_disaggregation,
+            low_latency=low_latency
         )
     
     def _init_omni_placement_configs(self)-> None:

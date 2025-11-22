@@ -59,6 +59,7 @@ class TaskConfig:
     enable_chunked_prefill: bool = False
     enable_graph_mode: bool = True
     enable_attn_ffn_disaggregation: bool = False
+    low_latency: bool = False
 
 
 @dataclass
@@ -266,7 +267,8 @@ def _load_best_practice_config():
     config_map = {
         (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
         (c["prefill_config_file"], c["decode_config_file"])
-        for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is None
+        for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is None \
+            and c.get("low_latency") is None
     }
 
     node_elasticly_config_map = {
@@ -281,15 +283,26 @@ def _load_best_practice_config():
         for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is not None
     }
 
-    return config_map, node_elasticly_config_map, afd_config_map
+    low_latency_map = {
+        (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
+        (c["prefill_config_file"], c["decode_config_file"])
+        for c in configs_data if c.get("pd_disaggregation") is not None and c.get("attn_ffn_disaggregation") is None \
+            and c.get("low_latency") is not None
+    }
+
+    return config_map, node_elasticly_config_map, afd_config_map, low_latency_map
 
 
 
 def _get_best_practice_config(task_config):
-    config_map, node_elasticly_config_map, afd_config_map = _load_best_practice_config()
+    config_map, node_elasticly_config_map, afd_config_map, low_latency_map = _load_best_practice_config()
 
     if task_config.enable_attn_ffn_disaggregation:
         best_practice_model_config_path = afd_config_map.get((task_config.model_name,
+            task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
+            task_config.prefill_node_num,task_config.decode_node_num), None)
+    elif task_config.low_latency:
+        best_practice_model_config_path = low_latency_map.get((task_config.model_name,
             task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
             task_config.prefill_node_num,task_config.decode_node_num), None)
     elif not task_config.enable_pd_elastic_scaling:
