@@ -60,7 +60,7 @@ from omni.adaptors.vllm.distributed.parallel_state import (
 )
 from omni.layers.moe.fused_moe.layer import FusedMoE
 from omni.models.config_loader.loader import model_extra_config
-from omni.layers.moe.fused_moe.fused_moe import fused_experts_moe_dispatch_combine
+from omni.layers.moe.fused_moe.fused_moe import fused_experts_moe_dispatch_combine, set_fake_expand_x
 from omni.adaptors.vllm.utils import get_attr_by_names
 
 """NPU Stream Switch Names"""
@@ -251,6 +251,12 @@ class DeepseekMoE(nn.Module):
                 )
                 self.gate_up_prefetch_size = model_extra_config.operator_opt_config.shared_expert_gate_up_prefetch * 1024 * 1024
                 self.down_prefetch_size = model_extra_config.operator_opt_config.shared_expert_down_prefetch * 1024 * 1024
+            tp_size = self.fake_experts.tp_size
+            ep_size = self.fake_experts.ep_size
+            ffn_dies = ep_size - model_extra_config.parall_config.attn_dies
+            for batch_size in model_extra_config.task_config.decode_gear_list:
+                expand_x_size = max(tp_size, 1) * batch_size * ep_size * min(self.n_routed_experts // (ffn_dies - self.redundancy_shared_expert_num), self.top_k)
+                set_fake_expand_x(batch_size, [expand_x_size, config.hidden_size])
         else:
             if self.global_rank >= self.redundancy_shared_expert_num:
                 moe_prefix = f"{prefix}.experts"

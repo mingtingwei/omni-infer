@@ -81,6 +81,7 @@ from omni.layers.utils import ConditionalTNGScope
 from omni.layers.moe.fused_moe.layer import FusedMoE
 from omni.layers.moe.deepseek_moe import DeepseekMoE 
 from omni.layers.attention.deepseek_mla import DeepseekMLA 
+from omni.layers.moe.fused_moe.fused_moe import set_num_speculative_tokens
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.attention.backend.mla import group_request_list
 
@@ -443,6 +444,9 @@ class DeepseekV3Model(nn.Module):
             self.stream1_attn_group = get_stream1_attn_group()
             self.stream1_mlp_group = get_stream1_mlp_group()
             self.stream1_moe_group = get_stream1_moe_group()
+
+        if model_extra_config.task_config.enable_attn_ffn_disaggregation and usr_spec_decode:
+            set_num_speculative_tokens(vllm_config.speculative_config.num_speculative_tokens)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids, reduce=0 if model_extra_config.parall_config.attn_sp_size > 1 else 1)

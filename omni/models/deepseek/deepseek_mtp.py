@@ -29,6 +29,7 @@ from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.distributed import get_ep_group
 
 from omni.adaptors.vllm.distributed import get_eh_proj_tp_group
+from omni.layers.moe.fused_moe.fused_moe import set_num_speculative_tokens
 from omni.models.config_loader.loader import model_extra_config
 
 if os.getenv("ASCEND_PLATFORM", "A3")=="A2" and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
@@ -242,6 +243,8 @@ class DeepseekMultiTokenPredictor(nn.Module):
                 ffn_dies = get_ep_group().world_size - model_extra_config.parall_config.attn_dies
                 if get_ep_group().rank_in_group < ffn_dies:
                     kwargs["is_ffn_die"] = True
+            if vllm_config.speculative_config:
+                set_num_speculative_tokens(real_num_mtp)
         self.layers = nn.ModuleDict({
             str(i + self.mtp_start_layer_idx):
             DeepseekMultiTokenPredictorLayer(

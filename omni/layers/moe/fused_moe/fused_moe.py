@@ -912,6 +912,23 @@ def moe_expert_quant_forward(layer, sorted_tokens, expert_tokens, act_dtype, dyn
         raise NotImplementedError(f"Unsupported compress tensor type. num bits: {layer.weight_num_bits}")
 
 
+fake_expand_x = {}
+num_speculative_tokens = 0
+def set_fake_expand_x(batch_size: int, x_shape: list[int]):
+    global fake_expand_x
+    if batch_size not in fake_expand_x:
+        fake_expand_x[batch_size] = torch.zeros(x_shape, dtype=torch.bfloat16)
+    global num_speculative_tokens
+    real_max_seqs =  1 + num_speculative_tokens
+    if batch_size // real_max_seqs not in fake_expand_x:
+        x_shape[0] = x_shape[0] // real_max_seqs
+        fake_expand_x[batch_size // real_max_seqs] = torch.zeros(x_shape, dtype=torch.bfloat16)
+
+def set_num_speculative_tokens(num: int):
+    global num_speculative_tokens
+    num_speculative_tokens = num
+
+
 def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
                                             hidden_states: torch.Tensor,
                                             topk_weights: torch.Tensor,
@@ -990,11 +1007,11 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
                             :len(layer.w13_weight)]  # Adapt to redundant and non-redundant layers, #ENABLE_OMNI_PLANNER
                 hidden_states_experts = moe_expert_quant_forward(layer, expand_x, group_list, act_dtype, dynamic_scale)
         else:
+            ep_recv_counts = torch.zeros_like(ep_recv_counts)
+            global fake_expand_x
+            hidden_states_experts = fake_expand_x[hidden_states.shape[0]]
             if shared_expert_rank_num <= 0:
                 hidden_states_shared_experts = layer(hidden_states)
-            hidden_states_experts = torch.zeros_like(expand_x).to(torch.bfloat16)
-            ep_recv_counts = torch.zeros_like(ep_recv_counts)
-
         # moeCombine
         kwargs = {
             "expand_x": hidden_states_experts,
