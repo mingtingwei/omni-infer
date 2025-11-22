@@ -1,14 +1,16 @@
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.chart import ScatterChart, Reference, Series
+from openpyxl.chart import ScatterChart, Reference, Series, LineChart
 from openpyxl.chart.marker import Marker
+from openpyxl.chart.axis import NumericAxis
 
 import ast
 import os
 import re
 import sys
 from datetime import datetime
+from collections import defaultdict
 
 action_dict = {
     'PNode': 'P节点',
@@ -60,6 +62,21 @@ action_dict = {
     'd_21 api server收到推理结果': 'd_21 api server收到推理结果',
 }
 
+def convert_cell_value(cell):
+    if isinstance(cell, (int, float)):
+        return cell
+    if isinstance(cell, str):
+        stripped_cell = cell.strip()
+        try:
+            return int(stripped_cell)
+        except ValueError:
+            pass
+        try:
+            return float(stripped_cell)
+        except ValueError:
+            pass
+        return stripped_cell
+    return str(cell) if cell is not None else ""
 
 def _sgl_title() -> list:
     """ 列名 """
@@ -422,7 +439,8 @@ def parse_file(folder_path):
     return step_data, step_data_decode, result
 
 
-def save_to_time_analysis_detail(result, output_path="time_analysis.xlsx"):
+def save_to_time_analysis_detail(result, time_analysis_path):
+    output_path=time_analysis_path
     wb = Workbook()
     data_ws = wb.active
     data_ws.title = "time_analysis"
@@ -431,7 +449,8 @@ def save_to_time_analysis_detail(result, output_path="time_analysis.xlsx"):
         data_line = [req_id]
 
         # data_line.append("NA") # Prefill id
-        data_line.append(data['Seq len'])
+        # data_line.append(data['Seq len'])
+        data_line.append(data.get('Seq len', 'NA'))
         data_line.append(data['decode token number'])
         data_line.append(data['PNode'])
         data_line.append(data['DNode'])
@@ -510,7 +529,7 @@ def save_to_engine_step_detail_prefill(result, data_ws, start_time):
         # print(f"node is {r[-1]}")
         processed_row = []
         for cell in r:
-            processed_row.append(str(cell))
+            processed_row.append(convert_cell_value(cell))
         data_ws.append(processed_row)
 
 
@@ -530,7 +549,7 @@ def save_to_engine_step_detail_decode(result_decode, decode_data_ws):
                 if cell is None:
                     processed_row.append(None)
                 else:
-                    processed_row.append(str(cell))
+                    processed_row.append(convert_cell_value(cell))
             decode_data_ws.append(processed_row)
 
 
@@ -744,7 +763,8 @@ def save_to_engine_step_decode_die_time(result_decode, steps, ws):
     ws.add_chart(chart_tokens_max, "L25")
 
 
-def save_to_engine_step_detail(result, result_decode, start_time, output_path="engine_step.xlsx"):
+def save_to_engine_step_detail(result, result_decode, start_time, engine_step_path):
+    output_path=engine_step_path
     wb = Workbook()
     data_ws = wb.active
 
@@ -823,18 +843,204 @@ def save_to_engine_step_detail(result, result_decode, start_time, output_path="e
     save_to_engine_step_decode_die_time(result_decode, steps, decode_die_load_time_ws)
     print(f"写入 {decode_die_load_time_ws.title} 完成")
 
+    decode_avg_seqs_tokens_ws = wb.create_sheet(title="Decode_avg_seqs_tokens")
+    save_to_engine_step_prefill_avg_seqs_tokens(result, start_time, decode_avg_seqs_tokens_ws)
+    print(f"写入 {decode_avg_seqs_tokens_ws.title} 完成")
+
+    decode_avg_bs_ws = wb.create_sheet(title="Decode_avg_bs")
+    save_to_engine_step_decode_avg_bs(result_decode, decode_avg_bs_ws)
+    print(f"写入 {decode_avg_bs_ws.title} 完成")
+
     wb.save(output_path)
     print(f"已保存结果到 {output_path}")
 
 
+def save_to_engine_step_prefill_avg_seqs_tokens(result, start_time, decode_avg_seqs_tokens_ws):
+
+    engine_step_title = [
+        'Engine step开始时间', 'Engine step结束时间', '执行时间(ms)', 'Seq数量', 'Token数量',
+        '处理完成后waiting队列长度', 'reqids', 'tokens per req', '模型开始时间', '模型结束时间',
+        '模型执行时间(ms)', 'kv usage', 'kv block总数', 'step初始空闲block数', 'step结束空闲block数',
+        'step新增使用block数', '节点'
+    ]
+
+    sorted_result = sorted(result, key=lambda x: x[0])
+    idx = 0
+    for r in sorted_result:
+        if r[0] < start_time:
+            idx += 1
+    del sorted_result[:idx]
+
+    col_idx = {name: i for i, name in enumerate(engine_step_title)}
+    i_time   = col_idx['Engine step开始时间']
+    i_seqs   = col_idx['Seq数量']
+    i_tokens = col_idx['Token数量']
+    i_node   = col_idx['节点']
+
+    groups = defaultdict(list)
+    for r in sorted_result:
+        node = str(r[i_node]) if r[i_node] is not None else "UNKNOWN"
+        try:
+            t_val = float(r[i_time])
+        except (TypeError, ValueError):
+            continue
+        # Seq
+        s_val = None
+        if r[i_seqs] is not None:
+            try:
+                s_val = float(r[i_seqs])
+            except (TypeError, ValueError):
+                s_val = None
+        # Token
+        tk_val = None
+        if r[i_tokens] is not None:
+            try:
+                tk_val = float(r[i_tokens])
+            except (TypeError, ValueError):
+                tk_val = None
+
+        if s_val is not None or tk_val is not None:
+            groups[node].append((t_val, s_val, tk_val))
+
+    for k in groups:
+        groups[k].sort(key=lambda x: x[0])  # 按时间升序
+
+    # 每组占 3 列，组与组之间空 1 列；布局：
+    # P0: A-C, P1: E-G, P2: I-K, P3: M-O
+    group_order = ["P0", "P1", "P2", "P3"]
+    first_cols = {"P0": 1, "P1": 5, "P2": 9, "P3": 13}
+    start_row = 3
+
+    for g in group_order:
+        c1 = first_cols[g]
+        c2 = c1 + 1
+        c3 = c1 + 2
+        decode_avg_seqs_tokens_ws.cell(row=start_row, column=c1, value=f"{g}_Engine step开始时间")
+        decode_avg_seqs_tokens_ws.cell(row=start_row, column=c2, value=f"{g}_Seq数量")
+        decode_avg_seqs_tokens_ws.cell(row=start_row, column=c3, value=f"{g}_Token数量")
+
+    # 写数据并记录每组数据区域
+    group_ranges = {}  # g -> {'time_col','seq_col','tok_col','start_row','end_row'}
+    for g in group_order:
+        c1 = first_cols[g]
+        c2 = c1 + 1
+        c3 = c1 + 2
+        rows = groups.get(g, [])
+        r0 = start_row + 1
+        written = 0
+        for i, (t_val, s_val, tk_val) in enumerate(rows):
+            decode_avg_seqs_tokens_ws.cell(row=r0 + i, column=c1, value=t_val)
+            if s_val is not None:
+                decode_avg_seqs_tokens_ws.cell(row=r0 + i, column=c2, value=s_val)
+            if tk_val is not None:
+                decode_avg_seqs_tokens_ws.cell(row=r0 + i, column=c3, value=tk_val)
+            written += 1
+        if written:
+            group_ranges[g] = {
+                'time_col' : c1,
+                'seq_col'  : c2,
+                'tok_col'  : c3,
+                'start_row': r0,
+                'end_row'  : r0 + written - 1
+            }
+        else:
+            group_ranges[g] = None
+
+    # 折线图1（Seq）
+    chart_seq = LineChart()
+    chart_seq.title = "Seq over Engine step start time by Node"
+    chart_seq.y_axis = NumericAxis()
+    chart_seq.y_axis.title = "Seq数量"
+    chart_seq.y_axis.number_format = "0"
+    chart_seq.y_axis.scaling.min = 0
+    chart_seq.y_axis.tickLblPos = "nextTo"
+    chart_seq.y_axis.majorTickMark = "out"
+    chart_seq.y_axis.minorTickMark = "none"
+    chart_seq.x_axis.title = "Engine step开始时间"
+
+    for g in group_order:
+        gr = group_ranges.get(g)
+        if not gr:
+            continue
+        values = Reference(
+            decode_avg_seqs_tokens_ws,
+            min_col=gr['seq_col'], max_col=gr['seq_col'],
+            min_row=gr['start_row'], max_row=gr['end_row']
+        )
+        xvals = Reference(
+            decode_avg_seqs_tokens_ws,
+            min_col=gr['time_col'], max_col=gr['time_col'],
+            min_row=gr['start_row'], max_row=gr['end_row']
+        )
+        s = Series(values, title=g)
+        s.xvalues = xvals
+        chart_seq.series.append(s)
+
+    # 折线图2（Token）
+    chart_tok = LineChart()
+    chart_tok.title = "Token over Engine step start time by Node"
+    chart_tok.y_axis = NumericAxis()
+    chart_tok.y_axis.title = "Token数量"
+    chart_tok.y_axis.number_format = "0"
+    chart_tok.y_axis.scaling.min = 0
+    chart_tok.y_axis.tickLblPos = "nextTo"
+    chart_tok.y_axis.majorTickMark = "out"
+    chart_tok.y_axis.minorTickMark = "none"
+    chart_tok.x_axis.title = "Engine step开始时间"
+
+    for g in group_order:
+        gr = group_ranges.get(g)
+        if not gr:
+            continue
+        values = Reference(
+            decode_avg_seqs_tokens_ws,
+            min_col=gr['tok_col'], max_col=gr['tok_col'],
+            min_row=gr['start_row'], max_row=gr['end_row']
+        )
+        xvals = Reference(
+            decode_avg_seqs_tokens_ws,
+            min_col=gr['time_col'], max_col=gr['time_col'],
+            min_row=gr['start_row'], max_row=gr['end_row']
+        )
+        s = Series(values, title=g)
+        s.xvalues = xvals
+        chart_tok.series.append(s)
+
+    decode_avg_seqs_tokens_ws.add_chart(chart_seq, "Q3")    # 第一个图（Seq）
+    decode_avg_seqs_tokens_ws.add_chart(chart_tok, "Q21")   # 第二个图（Token）
+
+
+def save_to_engine_step_decode_avg_bs(result_decode, decode_avg_bs_ws):
+    out_dict = {}
+
+    for key, value in result_decode.items():
+        seqs = [r[3] for r in value]
+        nums = [float(x) for x in seqs if x is not None]
+        avg_bs = sum(nums) / len(nums) if nums else 0.0
+        out_dict[key] = avg_bs
+
+    sorted_items = sorted(out_dict.items(), key=lambda x: x[0])
+
+    decode_avg_bs_ws.append(["DP序号", "DP名称", "平均bs"])
+    for idx, (dp_name, avg_bs) in enumerate(sorted_items):
+        decode_avg_bs_ws.append([idx, dp_name, avg_bs])
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("请提供解析目录和时间戳")  # 2025-06-25 00:44:51.437
+    if len(sys.argv) < 4:
+        print("请按顺序分别提供解析目录、输出目录和时间戳")  # 2025-06-25 00:44:51.437
         sys.exit(-1)
 
-    print(f"log path: {sys.argv[1]}, {sys.argv[2]}")
+    print(f"log path: {sys.argv[1]}, {sys.argv[3]}")
     folder_path = sys.argv[1]
-    timestamp_str = sys.argv[2]
+    target_dir = sys.argv[2]
+    timestamp_str = sys.argv[3]
+
+    os.makedirs(target_dir, exist_ok=True)
+
+    time_analysis_path = os.path.join(target_dir, "time_analysis.xlsx")
+    engine_step_path = os.path.join(target_dir, "engine_step.xlsx")
+
     dt_obj = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
     start_time = dt_obj.timestamp()
     step_data, step_data_decode, result = parse_file(folder_path)
@@ -842,5 +1048,5 @@ if __name__ == "__main__":
     print(f"{len(step_data)=}")
     print(f"{len(step_data_decode)=}")
     print(f"{len(result)=}")
-    save_to_time_analysis_detail(result)
-    save_to_engine_step_detail(step_data, step_data_decode, start_time)
+    save_to_time_analysis_detail(result, time_analysis_path)
+    save_to_engine_step_detail(step_data, step_data_decode, start_time, engine_step_path)

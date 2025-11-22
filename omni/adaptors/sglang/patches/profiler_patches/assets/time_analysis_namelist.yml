@@ -1,0 +1,263 @@
+type: "marker"
+base_params: { }
+targets:
+
+## -- conn.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.disaggregation.mooncake.conn:MooncakeKVManager"
+    function_name: "update_status"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      from sglang.srt.disaggregation.base.conn import KVPoll
+      
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 2:
+          raw_request_id = args[0]
+          status = args[1]
+          if status == KVPoll.Success:
+              omni_logger_print_timestamp(raw_request_id, "p_14 完成发送kv cache")
+
+  - module: "sglang.srt.disaggregation.mooncake.conn:MooncakeKVManager"
+    function_name: "update_status"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      from sglang.srt.disaggregation.base.conn import KVPoll
+      
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 2:
+          raw_request_id = args[0]
+          status = args[1]
+          if status == KVPoll.WaitingForInput:
+              omni_logger_print_timestamp(raw_request_id, "P侧握手完成")
+
+  - module: "sglang.srt.disaggregation.mooncake.conn:MooncakeKVManager"
+    function_name: "update_status"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      from sglang.srt.disaggregation.base.conn import KVPoll
+      
+      if omni_logger_enable() and not omni_logger_is_prefilling() and len(args) >= 2:
+          raw_request_id = args[0]
+          status = args[1]
+          if status == KVPoll.Success:
+              omni_logger_print_timestamp(raw_request_id, "d_11 d侧收到kv传输完成通知")
+
+## -- decode.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.disaggregation.decode:DecodePreallocQueue"
+    function_name: "_pre_alloc"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          omni_logger_print_timestamp(raw_request_id, "d_8 开始分配kv缓存")
+
+  - module: "sglang.srt.disaggregation.decode:DecodePreallocQueue"
+    function_name: "_pre_alloc"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          omni_logger_print_timestamp(raw_request_id, "d_9 d侧开始握手")
+
+  - module: "sglang.srt.disaggregation.decode:SchedulerDisaggregationDecodeMixin"
+    function_name: "get_next_disagg_decode_batch_to_run"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      # batch = result
+      if result and result.forward_mode.is_extend() and omni_logger_enable() and not omni_logger_is_prefilling():
+          for request in result.reqs:
+              raw_request_id = request.bootstrap_room
+              omni_logger_print_timestamp(raw_request_id, "d_18 触发首个decode token执行")
+
+  - module: "sglang.srt.disaggregation.decode:DecodeTransferQueue"
+    function_name: "extend"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and len(args) >= 1:
+          req_conns = args[0]
+          for i, decode_req in enumerate(req_conns):
+              raw_request_id = decode_req.req.bootstrap_room
+              omni_logger_print_timestamp(raw_request_id, f'd_7 Add need pullling sequence|waiting_pull_len={len(self.queue) + i + 1}')
+
+  - module: "sglang.srt.disaggregation.decode:DecodeTransferQueue"
+    function_name: "pop_transferred"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      # reqs = result
+      if omni_logger_enable() and not omni_logger_is_prefilling():
+          for req in result: 
+              raw_request_id = req.bootstrap_room
+              omni_logger_print_timestamp(raw_request_id, "d_12 轮询到状态 kv cache传输完成 开始加入到waiting队列")
+      
+## -- prefill.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.disaggregation.prefill:SchedulerDisaggregationPrefillMixin"
+    function_name: "process_disagg_prefill_inflight_queue"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      from sglang.srt.managers.schedule_batch import Req
+      
+      if result and isinstance(result, (list, tuple, set, dict)):
+          for req in result:
+              if (isinstance(req, Req)):
+                  raw_request_id = req.bootstrap_room
+                  omni_logger_print_timestamp(raw_request_id, "p_15 P侧释放KV")
+
+  - module: "sglang.srt.disaggregation.prefill:SchedulerDisaggregationPrefillMixin"
+    function_name: "send_kv_chunk"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          omni_logger_print_timestamp(raw_request_id, "p_13 开始发送kv cache")
+
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "run_batch"
+    entry_operation: | 
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1: 
+          batch = args[0]
+          for req in batch.reqs:
+              omni_logger_print_timestamp(req.bootstrap_room, "p_7 组batch完成 开始run batch")
+
+## -- scheduler.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "_add_request_to_queue"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          omni_logger_print_timestamp(raw_request_id, 'p_5 P侧添加到bootstrap队列之后')
+
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "_add_request_to_queue"
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and not omni_logger_is_prefilling() and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          omni_logger_print_timestamp(raw_request_id, 'd_6 D侧添加到prealloc_queue队列之后')
+
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "process_input_requests"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+      
+      if omni_logger_enable() and not omni_logger_is_prefilling() and len(args) >= 1:
+          recv_reqs = args[0]
+          for recv_req in recv_reqs:
+              raw_request_id = recv_req.bootstrap_room
+              omni_logger_print_timestamp(raw_request_id, 'd_5 scheduler开始处理请求')      
+
+## -- serving_chat.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.entrypoints.openai.serving_chat:OpenAIServingChat"
+    function_name: "_generate_chat_stream"
+    entry_operation: | 
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and len(args) >= 2:
+          raw_request_id = args[1].bootstrap_room
+          if omni_logger_is_prefilling():
+              omni_logger_print_timestamp(raw_request_id, 'p_2 触发engine处理请求')
+          else:
+              omni_logger_print_timestamp(raw_request_id, 'd_2 触发engine处理请求')
+
+## -- serving_completions.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.entrypoints.openai.serving_completions:OpenAIServingCompletion"
+    function_name: "_generate_completion_stream"
+    entry_operation: | 
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and len(args) >= 2:
+          raw_request_id = args[1].bootstrap_room
+          if omni_logger_is_prefilling():
+              omni_logger_print_timestamp(raw_request_id, 'p_2 触发engine处理请求')
+          else:
+              omni_logger_print_timestamp(raw_request_id, 'd_2 触发engine处理请求')
+
+## -- tokenizer_manager.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.managers.tokenizer_manager:TokenizerManager"
+    function_name: "_send_one_request"
+    entry_operation: | 
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and len(args) >= 2:
+          raw_request_id = args[0].bootstrap_room
+          if omni_logger_is_prefilling():
+              omni_logger_print_timestamp(raw_request_id, f"p_4 tokennizer to sche|Seq len={len(args[1].input_ids)}")
+          else:
+              omni_logger_print_timestamp(raw_request_id, f"d_4 tokennizer to sche")
+
+## -- tp_worker_overlap_thread.py -------------------------------------------------------------------------------------
+  - module: "sglang.srt.speculative.mtp_worker:MTPWorker"
+    function_name: "forward_batch_speculative_generation"
+    entry_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
+          reqs = args[0].reqs
+          for req in reqs:
+              omni_logger_print_timestamp(req.bootstrap_room, "p_9 开始执行Run forward")
+
+    exit_operation: |
+      import os, time
+      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
+
+      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
+          reqs = args[0].reqs
+          for req in reqs:
+              omni_logger_print_timestamp(req.bootstrap_room, "p_9 结束执行Run forward")
+
+## ---------------------------------------------------------------------------------------
+  - module: "sglang.srt.managers.schedule_batch:ScheduleBatch"
+    function_name: "__init__"
+    exit_operation: |
+      self.engine_core_str: str = None
+
+  - module: "sglang.srt.managers.schedule_batch:ScheduleBatch"
+    function_name: "get_model_worker_batch"
+    exit_operation: |
+      result.engine_core_str = self.engine_core_str
+      result.reqs=self.reqs
+
+  - module: "sglang.srt.managers.schedule_batch:ModelWorkerBatch"
+    function_name: "__init__"
+    exit_operation: |
+      from typing import List
+      from sglang.srt.managers.schedule_batch import Req
+      self.engine_core_str: str = None
+      self.reqs: List[Req] = None
+
+  - module: "sglang.srt.model_executor.forward_batch_info:ForwardBatch"
+    function_name: "__init__"
+    entry_operation: |
+      self.engine_core_str: str = None
+
+  - module: "sglang.srt.model_executor.forward_batch_info:ForwardBatch"
+    function_name: "init_new"
+    exit_operation: |
+      batch = args[0] if len(args) >= 1 else None
+      if batch is not None and hasattr(batch, 'engine_core_str'):
+        result.engine_core_str = batch.engine_core_str

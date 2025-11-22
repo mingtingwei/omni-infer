@@ -1,0 +1,14 @@
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 161cd11b9..6ba67a4af 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -2686,3 +2686,8 @@ def run_scheduler_process(
+         traceback = get_exception_traceback()
+         logger.error(f"Scheduler hit an exception: {traceback}")
+         parent_process.send_signal(signal.SIGQUIT)
++
++import os
++if os.getenv("PROFILING_NAMELIST_TIME_ANALYSIS", None):
++    print("start time analysis, applying profiler patches.")
++    from omni.adaptors.sglang.patches.profiler_patches import apply_profiler_patches_time_analysis
+

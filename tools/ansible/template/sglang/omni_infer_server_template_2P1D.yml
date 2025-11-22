@@ -22,6 +22,7 @@
   environment:
     # Global Configuration 
     LOG_PATH: "/data/log_path"
+    TRACE_PATH: "/data/trace_path"
     MODEL_PATH: "/data/models/DeepSeek-R1-w8a8-fusion"
     LOG_PATH_IN_EXECUTOR: "/data/log_path_in_executor"
     CODE_PATH: "/data/local_code_path"
@@ -35,11 +36,14 @@
     GLOO_SOCKET_IFNAME: "network_interface"
 
   vars:
+    TRACE_PATH: "/data/trace_path"
+    TRACE_SYNC_PATH: "/data/trace_sync_path"
     
     docker_run_cmd: |
       docker run -it --shm-size=500g \
         -e CODE_PATH=$CODE_PATH \
         -e LOG_PATH=$LOG_PATH \
+        -e TRACE_PATH=$TRACE_PATH \
         --net=host \
         --privileged=true \
         -u root \
@@ -84,6 +88,9 @@
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
       export ROLE=prefill
 
+      # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
+      # export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
+
       rm -rf .torchair_cache/
       python3 -m sglang.launch_server \
         --enable-omni-placement \
@@ -125,6 +132,9 @@
       export GLOO_SOCKET_IFNAME={{ansible_env.GLOO_SOCKET_IFNAME}}
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
       export ROLE=decode
+
+      # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
+      # export OMNILOGGER_ARGS="$TRACE_PATH,D{{ node_rank }},01"
 
       dp=$(echo -n "$DECODE_DATA_PARALLEL_SIZE" | tr -cd ',' | wc -c)
       ((dp++))
@@ -843,3 +853,18 @@
       delegate_to: localhost
       tags: 
         - fetch_log
+
+    # - name: Delete the historical trace files on the server.
+    #   command: bash -c "rm -rf {{ TRACE_PATH }}/trace/*"
+    #   tags:
+    #     - rm_trace
+
+    # - name: Sync the remote trace logs to the local directory.
+    #   synchronize:
+    #     src: "{{ TRACE_PATH }}/trace/"
+    #     dest: "{{ TRACE_SYNC_PATH }}/sync"
+    #     mode: pull
+    #     rsync_opts:
+    #       - "--archive"
+    #       - "--compress"
+    #   tags: collect_trace
