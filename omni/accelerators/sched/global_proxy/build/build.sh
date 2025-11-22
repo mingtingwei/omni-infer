@@ -34,6 +34,6 @@ echo "RPM Packages has been built in $RPMBUILD/RPMS/$ARCH/"
 ls -lh $RPMBUILD/RPMS/$ARCH/
 
 DIST_DIR="$(cd "$(dirname "$0")"/../../../../.. && pwd)/build/dist"
-
+mkdir -p "$DIST_DIR"
 cp $RPMBUILD/RPMS/$ARCH/*.rpm "$DIST_DIR"
 echo "RPM packages copied to $DIST_DIR"
