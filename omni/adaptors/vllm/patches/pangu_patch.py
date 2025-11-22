@@ -1,5 +1,7 @@
 from omni.adaptors.vllm.utils import get_attr_by_names
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 # The following patches are corresponding to vllm-0.9.0 
 def patch_pangu():
     from vllm.config import ModelConfig
@@ -77,14 +79,6 @@ def patch_pangu():
                 "n_predict": n_predict,
                 "architectures": ["PanguUltraMoEMTPModel"]
             })
-        if hf_config.model_type == "qwen3_moe":
-            hf_config.model_type = "qwen3_mtp"
-        if hf_config.model_type == "qwen3_mtp":
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            hf_config.update({
-                "n_predict": n_predict,
-                "architectures": ["Qwen3MTPModel"]
-            })
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
@@ -133,6 +127,7 @@ def patch_pangu():
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
+        
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -212,16 +207,20 @@ def patch_pangu():
                       "deepseek_mtp"):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
-                        print(
+                        logger.info(
                                 "All Deepseek MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
                 elif (self.draft_model_config.hf_config.model_type ==
-                      "qwen3_mtp"):
+                      "qwen3_moe" and self.method == "deepseek_mtp"):
                     self.method = "qwen3_mtp"
-                    if self.num_speculative_tokens > 1:
-                        print(
+                    n_predict = getattr(self.draft_model_config.hf_config, "num_nextn_predict_layers", None)
+                    self.draft_model_config.hf_config.model_type = "qwen3_mtp"
+                    self.draft_model_config.hf_config.n_predict = n_predict
+                    self.draft_model_config.hf_config.architectures = ["Qwen3MTPModel"]
+                    if self.num_speculative_tokens > 1: 
+                        logger.info(
                                 "All Qwen3 MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
@@ -230,7 +229,7 @@ def patch_pangu():
                       "pangu_ultra_moe_mtp"):
                     self.method = "pangu_ultra_moe_mtp"
                     if self.num_speculative_tokens > 1:
-                        print(
+                        logger.info(
                                 "All Pangu Ultra MoE MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
@@ -317,4 +316,4 @@ def patch_pangu():
     from omni.adaptors.vllm.entrypoints.openai.tool_parsers import register_tool
     register_reasoning()
     register_tool()
-    print("++++++++++++++++++++++patch_pangu++++++++++++++++++++++++++++")
+    logger.info("++++++++++++++++++++++patch_pangu++++++++++++++++++++++++++++")
