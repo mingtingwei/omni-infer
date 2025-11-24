@@ -50,7 +50,7 @@ KV_PARALLEL_SIZE=2
 KV_PRODUCER_DP_SIZE=1
 KV_PRODUCER_PP_SIZE=1
 VLLM_PP_LAYER_PARTITION="null"
-PRINT_SCREEN=False
+PRINT_SCREEN=0
 
 GPU_UTIL=0.9
 EXTRA_ARGS=""
@@ -461,6 +461,10 @@ common_operations() {
   if [ "$NUM_SPECULATIVE_TOKENS" -ne 0 ]; then
     mtp_args="--enable-mtp --num-speculative-tokens $NUM_SPECULATIVE_TOKENS"
   fi
+  local print_screen_args=""
+  if [ "$PRINT_SCREEN" -eq 1 ]; then
+    print_screen_args="--print-screen"
+  fi
 
   python start_api_servers.py \
     --num-servers "$NUM_SERVERS" \
@@ -481,7 +485,7 @@ common_operations() {
     --additional-config "$ADDITIONAL_CONFIG" \
     $mtp_args \
     --extra-args "$EXTRA_ARGS" \
-    --print-screen "$PRINT_SCREEN" 
+    $print_screen_args 
 }
 
 start_ray_log_rotate(){
