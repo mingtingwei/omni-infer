@@ -300,7 +300,7 @@ index 24b5b374d..701c162ae 100644
  
              if skip_sample:
 diff --git a/python/sglang/srt/managers/tp_worker_overlap_thread.py b/python/sglang/srt/managers/tp_worker_overlap_thread.py
-index 3b6a7ed33..256308979 100644
+index 14e0324ca..9da62381b 100644
 --- a/python/sglang/srt/managers/tp_worker_overlap_thread.py
 +++ b/python/sglang/srt/managers/tp_worker_overlap_thread.py
 @@ -18,7 +18,7 @@ import logging
@@ -321,7 +321,7 @@ index 3b6a7ed33..256308979 100644
  from sglang.srt.managers.tp_worker import TpModelWorker
  from sglang.srt.server_args import ServerArgs
  from sglang.srt.utils import DynamicGradMode, get_compiler_backend, is_npu
-@@ -49,6 +49,22 @@ def resolve_future_token_ids(input_ids, future_token_ids_map):
+@@ -48,6 +48,22 @@ def resolve_future_token_ids(input_ids, future_token_ids_map):
          input_ids,
      )
  
@@ -344,7 +344,7 @@ index 3b6a7ed33..256308979 100644
  
  class TpModelWorkerClient:
      """A tensor parallel model worker."""
-@@ -67,6 +83,7 @@ class TpModelWorkerClient:
+@@ -66,6 +82,7 @@ class TpModelWorkerClient:
          self.worker = TpModelWorker(
              server_args, gpu_id, tp_rank, moe_ep_rank, pp_rank, dp_rank, nccl_port, enable_overlap=True
          )
@@ -352,7 +352,7 @@ index 3b6a7ed33..256308979 100644
          self.max_running_requests = self.worker.max_running_requests
          self.device = self.worker.device
          self.gpu_id = gpu_id
-@@ -77,6 +94,12 @@ class TpModelWorkerClient:
+@@ -76,6 +93,12 @@ class TpModelWorkerClient:
          self.future_token_ids_map = torch.empty(
              (self.max_running_requests * 5,), dtype=torch.int64, device=self.device
          )
@@ -365,7 +365,7 @@ index 3b6a7ed33..256308979 100644
  
          # Launch threads
          self.input_queue = Queue()
-@@ -169,22 +192,48 @@ class TpModelWorkerClient:
+@@ -168,22 +191,48 @@ class TpModelWorkerClient:
  
              # Resolve future tokens in the input
              input_ids = model_worker_batch.input_ids
@@ -421,7 +421,7 @@ index 3b6a7ed33..256308979 100644
  
              # Copy results to the CPU
              if model_worker_batch.return_logprob:
-@@ -203,7 +252,7 @@ class TpModelWorkerClient:
+@@ -202,7 +251,7 @@ class TpModelWorkerClient:
              copy_done.record()
  
              self.output_queue.put(
@@ -430,7 +430,7 @@ index 3b6a7ed33..256308979 100644
              )
  
      def resolve_last_batch_result(self, launch_done: Optional[threading.Event] = None):
-@@ -211,7 +260,7 @@ class TpModelWorkerClient:
+@@ -210,7 +259,7 @@ class TpModelWorkerClient:
          This function is called to resolve the last batch result and
          wait for the current batch to be launched. Used in overlap mode.
          """
@@ -439,7 +439,7 @@ index 3b6a7ed33..256308979 100644
              self.output_queue.get()
          )
  
-@@ -227,8 +276,10 @@ class TpModelWorkerClient:
+@@ -226,8 +275,10 @@ class TpModelWorkerClient:
                  logits_output.input_token_logprobs = tuple(
                      logits_output.input_token_logprobs.tolist()
                  )
@@ -451,7 +451,7 @@ index 3b6a7ed33..256308979 100644
  
      def forward_batch_generation(
          self, model_worker_batch: ModelWorkerBatch
-@@ -250,7 +301,7 @@ class TpModelWorkerClient:
+@@ -249,7 +300,7 @@ class TpModelWorkerClient:
          self.input_queue.put((model_worker_batch, self.future_token_ids_ct, sync_event))
  
          # Allocate output future objects
@@ -460,7 +460,7 @@ index 3b6a7ed33..256308979 100644
          future_next_token_ids = torch.arange(
              -(self.future_token_ids_ct + 1),
              -(self.future_token_ids_ct + 1 + bs),
-@@ -261,7 +312,11 @@ class TpModelWorkerClient:
+@@ -260,7 +311,11 @@ class TpModelWorkerClient:
          self.future_token_ids_ct = (
              self.future_token_ids_ct + bs
          ) % self.future_token_ids_limit
@@ -716,49 +716,6 @@ index 1cec3d21b..fe0301f98 100644
      def cache_unfinished_req(self, req: Req):
          kv_indices = self.req_to_token_pool.req_to_token[
              req.req_pool_idx, : len(req.fill_ids)
-diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
-index eeecd9ddd..a850d671c 100644
---- a/python/sglang/srt/model_executor/forward_batch_info.py
-+++ b/python/sglang/srt/model_executor/forward_batch_info.py
-@@ -363,11 +363,6 @@ class ForwardBatch:
-                     batch.extend_input_logprob_token_ids.to(device, non_blocking=True)
-                 )
- 
--        if enable_num_token_non_padded(model_runner.server_args):
--            ret.num_token_non_padded = torch.tensor(
--                len(batch.input_ids), dtype=torch.int32
--            ).to(device, non_blocking=True)
--
-         # For MLP sync
-         if batch.global_num_tokens is not None:
-             from sglang.srt.speculative.eagle_utils import (
-@@ -402,10 +397,10 @@ class ForwardBatch:
-                 global_num_tokens_for_logprob = batch.global_num_tokens_for_logprob
- 
-             ret.global_num_tokens_cpu = global_num_tokens
--            ret.global_num_tokens_gpu = ret.num_token_non_padded
-+            ret.global_num_tokens_gpu = None
- 
-             ret.global_num_tokens_for_logprob_cpu = global_num_tokens_for_logprob
--            ret.global_num_tokens_for_logprob_gpu = ret.num_token_non_padded
-+            ret.global_num_tokens_for_logprob_gpu = None
- 
-         if ret.forward_mode.is_idle():
-             ret.positions = torch.empty((0,), dtype=torch.int64, device=device)
-@@ -711,11 +706,9 @@ class ForwardBatch:
-         self.positions = self._pad_tensor_to_size(self.positions, num_tokens)
-         if not model_runner.is_draft_worker:
-             self.global_num_tokens_cpu = global_num_tokens
--            self.global_num_tokens_gpu = self.global_num_tokens_gpu.new_tensor(
--                global_num_tokens
--            )
-+            self.global_num_tokens_gpu = None
-             self.global_num_tokens_for_logprob_cpu = global_num_tokens.copy()
--            self.global_num_tokens_for_logprob_gpu = self.global_num_tokens_gpu.clone()
-+            self.global_num_tokens_for_logprob_gpu = None
-         if self.mrope_positions is not None:
-             self.mrope_positions = self._pad_tensor_to_size(self.mrope_positions, bs)
- 
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
 index 6bc85cf4b..b7a30301f 100644
 --- a/python/sglang/srt/server_args.py

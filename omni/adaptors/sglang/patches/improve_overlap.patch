@@ -1,0 +1,55 @@
+diff --git a/python/sglang/srt/managers/tp_worker_overlap_thread.py b/python/sglang/srt/managers/tp_worker_overlap_thread.py
+index 3b6a7ed33..14e0324ca 100644
+--- a/python/sglang/srt/managers/tp_worker_overlap_thread.py
++++ b/python/sglang/srt/managers/tp_worker_overlap_thread.py
+@@ -41,7 +41,6 @@ from sglang.utils import get_exception_traceback
+ logger = logging.getLogger(__name__)
+ 
+ 
+-@torch.compile(dynamic=True, backend=get_compiler_backend())
+ def resolve_future_token_ids(input_ids, future_token_ids_map):
+     input_ids[:] = torch.where(
+         input_ids < 0,
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index eeecd9ddd..a850d671c 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -363,11 +363,6 @@ class ForwardBatch:
+                     batch.extend_input_logprob_token_ids.to(device, non_blocking=True)
+                 )
+ 
+-        if enable_num_token_non_padded(model_runner.server_args):
+-            ret.num_token_non_padded = torch.tensor(
+-                len(batch.input_ids), dtype=torch.int32
+-            ).to(device, non_blocking=True)
+-
+         # For MLP sync
+         if batch.global_num_tokens is not None:
+             from sglang.srt.speculative.eagle_utils import (
+@@ -402,10 +397,10 @@ class ForwardBatch:
+                 global_num_tokens_for_logprob = batch.global_num_tokens_for_logprob
+ 
+             ret.global_num_tokens_cpu = global_num_tokens
+-            ret.global_num_tokens_gpu = ret.num_token_non_padded
++            ret.global_num_tokens_gpu = None
+ 
+             ret.global_num_tokens_for_logprob_cpu = global_num_tokens_for_logprob
+-            ret.global_num_tokens_for_logprob_gpu = ret.num_token_non_padded
++            ret.global_num_tokens_for_logprob_gpu = None
+ 
+         if ret.forward_mode.is_idle():
+             ret.positions = torch.empty((0,), dtype=torch.int64, device=device)
+@@ -711,11 +706,9 @@ class ForwardBatch:
+         self.positions = self._pad_tensor_to_size(self.positions, num_tokens)
+         if not model_runner.is_draft_worker:
+             self.global_num_tokens_cpu = global_num_tokens
+-            self.global_num_tokens_gpu = self.global_num_tokens_gpu.new_tensor(
+-                global_num_tokens
+-            )
++            self.global_num_tokens_gpu = None
+             self.global_num_tokens_for_logprob_cpu = global_num_tokens.copy()
+-            self.global_num_tokens_for_logprob_gpu = self.global_num_tokens_gpu.clone()
++            self.global_num_tokens_for_logprob_gpu = None
+         if self.mrope_positions is not None:
+             self.mrope_positions = self._pad_tensor_to_size(self.mrope_positions, bs)
+ 
