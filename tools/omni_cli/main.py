@@ -464,7 +464,8 @@ def omni_cli_start(
     entry_py: str = "start_api_servers.py",
     skip_verify_config: bool = False,
     dev: bool = False,
-    proxy_only: bool = False
+    proxy_only: bool = False,
+    skip_process_nz_config = False
 ) -> None:
     """
     Read inventory YAML, generate a per-host bash script, and run it via:
@@ -534,11 +535,19 @@ def omni_cli_start(
         export_block = _build_export_block(env)
         args_line = _build_args_line(args)
 
-
-        start_server_cmd = f"""
+        if not skip_process_nz_config:
+            start_server_cmd = f"""
 # Exec the command
 cd {_double_quotes(code_path)}/tools/scripts
 if [[ -e "/usr/local/Ascend/ascend-toolkit" ]]; then python /workspace/omniinfer/tools/scripts/process_nz_config.py /usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/config/ascend910_93/aic-ascend910_93-ops-info.json; else python /workspace/omniinfer/tools/scripts/process_nz_config.py /usr/local/Ascend/latest/opp/built-in/op_impl/ai_core/tbe/config/ascend910_93/aic-ascend910_93-ops-info.json; fi 
+echo "cd {_double_quotes(code_path)}/tools/scripts" >> {log_path}/omni_cli.log
+{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &
+echo "{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &" >> {log_path}/omni_cli.log
+"""
+        else:
+            start_server_cmd = f"""
+# Exec the command
+cd {_double_quotes(code_path)}/tools/scripts
 echo "cd {_double_quotes(code_path)}/tools/scripts" >> {log_path}/omni_cli.log
 {python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &
 echo "{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &" >> {log_path}/omni_cli.log
@@ -1244,6 +1253,8 @@ def main():
     )
     start_parser.add_argument("--skip-verify-config", action="store_true", help="Skip verification of config")
     start_parser.add_argument("--proxy-only", action="store_true", help="Start the proxy only")
+    # for temporary avoidance
+    start_parser.add_argument("--skip-process-nz-config", action="store_true", help="Skip process-nz of config for temporary avoidance")
     start_group = start_parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--normal",
@@ -1251,7 +1262,7 @@ def main():
         metavar='config_path',
         help="Start in normal mode (default) with config file"
     )
-    start_group.add_argument("--run_dev", action="store_true", help="Start in developer mode: Start the service, without ranktable and proxy")
+    start_group.add_argument("--run-dev", action="store_true", help="Start in developer mode: Start the service, without ranktable and proxy")
 
     # STOP command configuration
     subparsers.add_parser("stop", help="Stop the omni service")
@@ -1404,13 +1415,15 @@ def main():
             omni_cli_start(inventory_path=args.config_path,
                            skip_verify_config=args.skip_verify_config,
                            dev=False,
-                           proxy_only=args.proxy_only)
+                           proxy_only=args.proxy_only,
+                           skip_process_nz_config=args.skip_process_nz_config)
         elif args.run_dev:
             print(f"{INFO} Starting omni service in Developer mode...")
             omni_cli_start(inventory_path=args.config_path,
                            skip_verify_config=args.skip_verify_config,
                            dev=True,
-                           proxy_only=args.proxy_only)
+                           proxy_only=args.proxy_only,
+                           skip_process_nz_config=args.skip_process_nz_config)
     elif args.command == "stop":
         print(f"{INFO} Stopping omni service...")
         omni_cli_stop(inventory_path=default_deploy_path)
