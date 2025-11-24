@@ -228,14 +228,14 @@ class AscendSamplerV1(SamplerV1):
                 p = sampling_metadata.top_p
                 k = sampling_metadata.top_k
                 logits = logits_or_prob.type(torch.bfloat16)
-                if p:
+                if p is not None:
                     p = p.type(torch.bfloat16)
                 else:
-                    p = torch.ones(logits.shape[0], type=torch.bfloat16, device=logits.device)
-                if k:
+                    p = torch.ones(logits.shape[0], dtype=torch.bfloat16, device=logits.device)
+                if k is not None:
                     k = k.type(torch.int32)
                 else:
-                    k = torch.zeros((logits.shape[0],), type=torch.int32, device=logits.device)
+                    k = torch.ones((logits.shape[0],), dtype=torch.int32, device=logits.device) * logits.shape[1]
                 q = self.generate_random_sequence(
                     logits, sampling_metadata, spec_metadata,
                 ).type(torch.float32)

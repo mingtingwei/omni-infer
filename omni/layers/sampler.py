@@ -788,14 +788,14 @@ class AscendTopKTopPSamplerV1(TopKTopPSampler):
         The logits tensor may be updated in-place.
         """
         logits = logits.type(torch.bfloat16)
-        if p:
+        if p is not None:
             p = p.type(torch.bfloat16)
         else:
-            p = torch.ones(logits.shape[0], type=torch.bfloat16, device=logits.device)
-        if k:
+            p = torch.ones(logits.shape[0], dtype=torch.bfloat16, device=logits.device)
+        if k is not None:
             k = k.type(torch.int32)
         else:
-            k = torch.zeros((logits.shape[0],), type=torch.int32, device=logits.device)
+            k = torch.ones((logits.shape[0],), dtype=torch.int32, device=logits.device) * logits.shape[1]
         q = generate_random_sequence(logits, generators, self.dsa_stream).type(torch.float32)
         res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
         return res[0]
