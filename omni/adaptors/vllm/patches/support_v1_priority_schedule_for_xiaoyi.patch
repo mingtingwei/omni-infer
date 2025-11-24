@@ -128,7 +128,7 @@ index 000000000..60b0f6f53
 +    def prepend_requests(self, requests: RequestQueue) -> None:
 +        """Prepend all requests from another queue to the front of this
 +        queue."""
-+        self._deque.extendleft(reversed(requests))
++        self._deque.extendleft(requests)
 +
 +    def remove_request(self, request: Request) -> None:
 +        """Remove a specific request from the queue."""

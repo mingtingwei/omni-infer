@@ -266,7 +266,7 @@ class NpuHybridScheduler(Scheduler):
                         self.kv_cache_manager.free(preempted_req)
                         preempted_req.status = RequestStatus.PREEMPTED
                         preempted_req.num_computed_tokens = 0
-                        self.waiting.prepend_requests(preempted_req)
+                        self.waiting.prepend_request(preempted_req)
                         preempted_reqs.append(preempted_req)
                         if preempted_req == request:
                             # No more request to preempt.
