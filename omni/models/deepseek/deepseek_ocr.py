@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature, CLIPVisionConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -60,6 +61,7 @@ from .deepseek_ocr_utils.deepseek_ocr_processor import (
 from .deepseek_ocr_utils.tensor_schema import TensorSchema, TensorShape
 from .deepseek_ocr_utils.deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
+from omni.layers.attention.backend.attention import AscendAttentionState
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -280,6 +282,7 @@ class DeepseekOCRMultiModalProcessor(
         ]
 
 
+@support_torch_compile()
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekOCRMultiModalProcessor,
     info=DeepseekOCRProcessingInfo,
@@ -558,3 +561,13 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return autoloaded_weights
+
+    def should_use_eager_mode(self, *args, **kwargs):
+        attn_metadata = kwargs.get("attn_metadata", None)
+        if not attn_metadata:
+            return True
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.language_model.model.layers[self.language_model.model.start_layer].layer_name]
+        if attn_metadata is None:
+            return True
+        return attn_metadata.attn_state != AscendAttentionState.DecodeOnly

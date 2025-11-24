@@ -108,11 +108,16 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
         input_splits = combine_tokens_cpu[1]
         # alltoall output splits, the number of tokens each rank receives from other cards
         output_splits = combine_tokens_cpu[0]
-        # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
-        gathered_tokens = expanded_x.new_empty(
-            all_tokens.item(), expanded_x.shape[1]
-        )
-        dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
+        
+        if ep_size > 1:
+            # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
+            gathered_tokens = expanded_x.new_empty(
+                all_tokens.item(), expanded_x.shape[1]
+            )
+            dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
+        else:
+            gathered_tokens = expanded_x.clone()
+
         # reroute
         # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
         hidden_states_sorted_by_experts, _, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
@@ -136,9 +141,13 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
                                                                         group_list_type=1)[0]
         new_x = torch.index_select(hidden_states_ordered_by_experts, 0,
                                    gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
-        gathered_tokens = new_x.new_empty(*expanded_x.shape)
 
-        dist.all_to_all_single(gathered_tokens, new_x, input_splits, output_splits)
+        if ep_size > 1:
+            gathered_tokens = new_x.new_empty(*expanded_x.shape)
+
+            dist.all_to_all_single(gathered_tokens, new_x, input_splits, output_splits)
+        else:
+            gathered_tokens = new_x.clone()
 
         return hidden_states, gathered_tokens, topk_weight, expanded_row_idx
 

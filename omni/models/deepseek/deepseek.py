@@ -30,6 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -305,6 +306,7 @@ class DeepseekDecoderLayer(nn.Module):
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = config.hidden_size
+        self.layer_name = f"{prefix}.self_attn.attn"
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
@@ -411,7 +413,8 @@ class DeepseekModel(nn.Module):
         else:
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -472,6 +475,7 @@ class DeepseekModel(nn.Module):
         return loaded_params
 
 
+@support_torch_compile()
 class DeepseekForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -607,3 +611,17 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
         loaded_params = self._load_weights(weights)
 
         return loaded_params
+
+    def should_use_eager_mode(self, *args, **kwargs):
+        attn_metadata = kwargs.get('attn_metadata', None)
+
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+
+        if attn_metadata is None:
+            return True
+
+        if attn_metadata.prefill:
+            return True
+
+        return False

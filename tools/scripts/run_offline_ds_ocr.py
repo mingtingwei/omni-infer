@@ -42,8 +42,9 @@ llm = LLM(
     trust_remote_code=True,
     hf_overrides={"architectures": ["DeepseekOCRForCausalLM"]},
     block_size=256,
-    enforce_eager=True,
+    enforce_eager=False,
     max_model_len=8192,
+    additional_config={"graph_model_compile_config": {"level": 1}, "enable_hybrid_graph_mode": True},
 )
 
 sampling_params = SamplingParams(
