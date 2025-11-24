@@ -239,6 +239,10 @@ class NPUModelRunner(GPUModelRunner):
         if model_extra_config.operator_opt_config.enable_c8 and not self.vllm_config.model_config.use_mla:
             self.kv_cache_dtype = torch.int8
 
+        self.finished_sending = set()
+        self.finished_recving = set()
+        self.loading_kv_failure = set()
+
     def _init_graph_options(self):
         from vllm.utils import supports_dynamo
 
@@ -868,10 +872,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # cached return values
         cached_sampled_token_ids = None
-        finished_sending = set()
         accepted_num = 0
-        finished_recving = set()
-        loading_kv_failure = set()
         sampled_token_ids_list = []
 
         cost_upd_states = time.time() - start_0
@@ -902,12 +903,12 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states, raw_hidden_states, input_ids, temp_finished_sending, temp_finished_recving = self._execute_model(scheduler_output,
                                                    attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
             if temp_finished_sending is not None:
-                finished_sending.update(temp_finished_sending)
+                self.finished_sending.update(temp_finished_sending)
             if temp_finished_recving is not None:
-                finished_recving.update(temp_finished_recving)
+                self.finished_recving.update(temp_finished_recving)
             tmp_loading_kv_failure = self.get_loading_kv_failure_req_ids()
             if tmp_loading_kv_failure is not None:
-                loading_kv_failure.update(tmp_loading_kv_failure)
+                self.loading_kv_failure.update(tmp_loading_kv_failure)
 
             if not get_pp_group().is_last_rank:
                 return hidden_states
@@ -916,12 +917,12 @@ class NPUModelRunner(GPUModelRunner):
             if self.curr_step == 0:
                 self.sampler.prepare_cache(scheduler_output.scheduled_new_reqs, self.input_batch.req_ids, sampling_metadata, self.input_batch)
             if temp_finished_sending is not None:
-                finished_sending.update(temp_finished_sending)
+                self.finished_sending.update(temp_finished_sending)
             if temp_finished_recving is not None:
-                finished_recving.update(temp_finished_recving)
+                self.finished_recving.update(temp_finished_recving)
             tmp_loading_kv_failure = self.get_loading_kv_failure_req_ids()
             if tmp_loading_kv_failure is not None:
-                loading_kv_failure.update(tmp_loading_kv_failure)
+                self.loading_kv_failure.update(tmp_loading_kv_failure)
             start_2 = time.time()
             
             if isinstance(sample_indices, int):
@@ -1066,6 +1067,13 @@ class NPUModelRunner(GPUModelRunner):
                     f"{cost_upd_states:.6f}+{cost_proc_reqs:.6f}+{cost_logits:.6f}+{cost_bitmask:.6f}"
                     f"+{cost_disc:.6f}+{cost_sampler:.6f}+{cost_drafter:.6f}+{cost_device_output:.6f}+{cost_output:.6f}")
 
+        finished_sending = self.finished_sending
+        finished_recving = self.finished_recving
+        loading_kv_failure = self.loading_kv_failure
+        self.finished_sending = set()
+        self.finished_recving = set()
+        self.loading_kv_failure = set()
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1077,6 +1085,16 @@ class NPUModelRunner(GPUModelRunner):
             finished_recving=finished_recving,
             loading_kv_failure=loading_kv_failure,
         )
+
+    def recompute_fallback(self, scheduler_output: "SchedulerOutput"):
+        remove_req_indices = []
+        for new_req in scheduler_output.scheduled_new_reqs:
+            req_index = self.input_batch.remove_request(new_req.req_id)
+            if req_index is None:
+                continue
+            remove_req_indices.append(req_index)
+        if len(remove_req_indices) > 0:
+            self.input_batch.condense(remove_req_indices)
 
     @torch.inference_mode()
     def _dummy_run(self, num_tokens: int, is_capture_model: bool = False) -> torch.Tensor:
@@ -1249,6 +1267,14 @@ class NPUModelRunner(GPUModelRunner):
             param_dict = dict(self.model.named_parameters())
             self.planner = OmniPlanner()
             self.planner.init_dram_weights(param_dict, first_k_dense_replace=first_k_dense_replace)
+
+    def omni_placement_pause(self) -> None:
+        if model_extra_config.task_config.enable_omni_placement:
+            self.planner.placement_pause()
+
+    def omni_placement_resume(self) -> None:
+        if model_extra_config.task_config.enable_omni_placement:
+            self.planner.placement_resume()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

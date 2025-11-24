@@ -50,6 +50,10 @@ from omni.adaptors.vllm.utils import (
     check_torchair_cache_exists, check_block_num_cache_exist, read_block_num_from_file, write_block_num_to_file, delete_torchair_cache_file, clear_var
 )
 from omni.models.config_loader.loader import model_extra_config, call_config_updater
+from omni.adaptors.vllm.token_recovery.ha_patches import (stop_device, restart_device, reinit_process_group,
+                                                          is_token_recompute)
+from omni.adaptors.vllm.token_recovery.ha_monitor import token_recover_wrapper
+from omni.adaptors.vllm.token_recovery.envs import ENV
 
 
 __origin_get_device_properties__ = torch.npu.get_device_properties
@@ -111,6 +115,12 @@ class NPUWorker(WorkerBase):
         vllm_config.model_config.disable_cascade_attn = True
         self._init_graph_options()
 
+        # token recover
+        self.enable_token_recover = False
+        if self.vllm_config.kv_transfer_config is not None:
+            if ENV.use_ha and self.vllm_config.kv_transfer_config.kv_role == 'kv_consumer':
+                self.enable_token_recover = True
+
     def sleep(self, level: int = 1) -> None:
         if not NPUPlatform.is_sleep_mode_available():
             logger.error("Sleep mode is only supported on v0")
@@ -163,6 +173,11 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, self.device)
         self.profiler = self._init_profiler()
+
+        # Start token recover components: ha_server, ha_processor
+        if self.enable_token_recover and get_world_group().rank == 0:
+            from omni.adaptors.vllm.token_recovery.ha_server import start_server
+            start_server(ENV.ha_port)
 
     def _init_graph_options(self):
         from vllm.utils import supports_dynamo
@@ -320,13 +335,33 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
-        intermediate_tensors = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             if not self.profile_already_start and scheduler_output.total_num_scheduled_tokens >= self.profiler_token_threshold:
                 self.profiler.start()
                 self.profile_already_start = True
                 self.profile_step = 0
 
+        output = self.execute_model_wrapper(scheduler_output)
+        if isinstance(output, dict):
+            if is_token_recompute(output):
+                logger.warning("token recover finished, current scheduler output recompute")
+                self.model_runner.recompute_fallback(scheduler_output)
+                output = self.execute_model_wrapper(scheduler_output)
+
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            if self.profile_already_start and not self.profile_finished:
+                self.profile_step += 1
+            if not self.profile_finished and self.profile_step > self.profiler_stop_step:
+                self.profiler.stop()
+                self.profile_finished = True
+        return output if self.is_driver_worker else None
+
+    @token_recover_wrapper
+    def execute_model_wrapper(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional[ModelRunnerOutput]:
+        intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
@@ -342,13 +377,7 @@ class NPUWorker(WorkerBase):
             return None
 
         assert isinstance(output, ModelRunnerOutput)
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            if self.profile_already_start and not self.profile_finished:
-                self.profile_step += 1
-            if not self.profile_finished and self.profile_step > self.profiler_stop_step:
-                self.profiler.stop()
-                self.profile_finished = True
-        return output if self.is_driver_worker else None
+        return output
 
     def load_model(self) -> None:
         if NPUPlatform.is_sleep_mode_available():
@@ -363,6 +392,11 @@ class NPUWorker(WorkerBase):
             context = nullcontext()
         with context:
             self.model_runner.load_model()
+
+        # Start token recover component: ha_worker_server
+        if self.enable_token_recover:
+            from omni.adaptors.vllm.token_recovery.ha_worker_server import start_server
+            start_server(self)
 
     def compile_or_warm_up_model(self) -> None:
         if self.enable_torchair_graph_mode:
@@ -405,9 +439,17 @@ class NPUWorker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        output = self.execute_dummy_batch_wrapper()
+        if isinstance(output, dict):
+            if is_token_recompute(output):
+                self.execute_dummy_batch_wrapper()
+
         if model_extra_config.task_config.enable_omni_placement:
             self.model_runner.planner.place_experts()
+
+    @token_recover_wrapper
+    def execute_dummy_batch_wrapper(self) -> None:
+        self.model_runner._dummy_run(1)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -469,3 +511,14 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             return None
+
+    def stop_device(self):
+        self.model_runner.omni_placement_pause()
+        stop_device(self)
+
+    def restart_device(self, rebuild_all_resources=False):
+        restart_device(self, rebuild_all_resources)
+
+    def reinit_process_group(self):
+        reinit_process_group(self)
+        self.model_runner.omni_placement_resume()

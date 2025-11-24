@@ -55,6 +55,10 @@ RETRYABLE_CODES = [
     LLMStatusCode.LLM_LINK_BUSY,
 ]
 
+TOKEN_RETRY_CODES = [
+    LLMStatusCode.LLM_FAILED,
+]
+
 
 def get_kv_producer_pp_partitions(num_hidden_layers: int, pp_size: int, num_mtp_layers: int = 0, kv_producer_pp_partitions_str: Optional[str] = None) -> list[int]:
     if kv_producer_pp_partitions_str is not None and kv_producer_pp_partitions_str != "null":
@@ -225,7 +229,7 @@ class LLMDataDistManager:
 
 
     def _pull_blocks(self, src_cache_key, dst_cache, src_blocks, dst_blocks):
-        for _ in range(KV_CACHE_RETRY_TIMES):
+        for i in range(KV_CACHE_RETRY_TIMES):
             try:
                 self.data_dist_engine.cache_manager.pull_blocks(src_cache_key, dst_cache, src_blocks,
                                                                           dst_blocks)
@@ -234,7 +238,12 @@ class LLMDataDistManager:
                 # Use the appropriate strategy depending on the type of anomaly
                 code = e.status_code
                 if code in RETRYABLE_CODES:
-                    logger.info(f"kv cache pull blocks failed, need retry {e}")
+                    logger.warning(f"kv cache pull blocks failed, need retry {e}")
+                    time.sleep(KV_CACHE_RETRY_WAIT_SECOND)
+                elif code in TOKEN_RETRY_CODES:
+                    if i >= KV_CACHE_RETRY_TIMES - 1:
+                        logger.warning(f"kv cache pull blocks failed, need retry {e}")
+                        raise e
                     time.sleep(KV_CACHE_RETRY_WAIT_SECOND)
                 else:
                     logger.info(f"kv cache pull blocks failed, {e}")

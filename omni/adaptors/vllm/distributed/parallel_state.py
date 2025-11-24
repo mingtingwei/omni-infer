@@ -80,6 +80,9 @@ class GroupCoordinator(GroupCoordinatorGPU):
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
+                from omni.adaptors.vllm.token_recovery.ha_patches import register_process_group
+                register_process_group(device_group)
+                register_process_group(cpu_group)
                 self.ranks = ranks
                 self.world_size = len(ranks)
                 self.rank_in_group = ranks.index(self.rank)

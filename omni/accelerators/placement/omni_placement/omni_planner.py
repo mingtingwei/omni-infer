@@ -200,6 +200,14 @@ class OmniPlanner(metaclass=OmniPlannerMeta):
             print(f"Warning: world_size ({self.world_size}) is not evenly divisible by "
                   f"num_devices_per_host ({self.num_devices_per_host})")
 
+    def placement_pause(self) -> None:
+        if self.placement_manager is not None:
+            self.placement_manager.placement_pause()
+
+    def placement_resume(self) -> None:
+        if self.placement_manager is not None:
+            self.placement_manager.placement_resume()
+
     def _init_placement_manager(self) -> None:
         """Initialize placement handler, and activation tracking."""
         num_layers = self.expert_mapping.get_total_num_layers()

@@ -47,7 +47,7 @@ class Placement {
     std::thread init_thread_;   // Initialization thread
     std::atomic<bool> should_stop_{false};
     std::atomic<bool> should_stop_init_{false};
-    ; // 新增，用于 init_thread_
+    // 新增，用于 init_thread_
     std::atomic<bool> should_pause_{false};
     mutable std::mutex mtx_;
     std::atomic<bool> sub_thread_is_changing_{false};
@@ -141,6 +141,8 @@ class Placement {
     bool is_mergeful_and_merged(std::vector<std::vector<int>> &rank_used,
                                 int layer_1, int layer_2);
     std::atomic<bool> buf_ready_flag_{false};
+    void placement_pause();
+    void placement_resume();
 };
 
 #endif // PLACEMENT_H

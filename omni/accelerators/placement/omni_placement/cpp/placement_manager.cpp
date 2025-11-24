@@ -532,36 +532,45 @@ void Placement::placement_manager(aclrtContext currentContext) {
                           stream); // update the last & delta activation
 
     while (!should_stop_) {
-        dump_count++;
-        activations_->dump_and_collect(dist_ptr, stream, dump_count);
-
-        if (!enable_dynamic_) {
+        if (should_pause_) {
             std::this_thread::sleep_for(std::chrono::seconds(collect_times));
             continue;
         }
+        try {
+            dump_count++;
+            activations_->dump_and_collect(dist_ptr, stream, dump_count);
 
-        std::string log_info = "";
-        // 构建下发交换队列
-        std::vector<ChangeInstruction>
-            changeInstructions; // all rank total instructions
-        std::vector<ChangeInstruction> changeInstructions_this_rank;
+            if (!enable_dynamic_) {
+                std::this_thread::sleep_for(std::chrono::seconds(collect_times));
+                continue;
+            }
 
-        changeInstructions = optimizer_->optimize();
+            std::string log_info = "";
+            // 构建下发交换队列
+            std::vector<ChangeInstruction>
+                changeInstructions; // all rank total instructions
+            std::vector<ChangeInstruction> changeInstructions_this_rank;
 
-        std::cout << "[handle ins] placement worker before handle "
-                     "instructions. total cnt: "
-                  << changeInstructions.size() << "\n";
-        if (changeInstructions.size() > 0) {
-            TRACK_START();
-            if (check_instructions(changeInstructions))
-                placement_handle_instrucions(changeInstructions);
-            TRACK_POINT("[handle ins] process " +
-                        std::to_string(changeInstructions.size()) +
-                        " instructions.");
+            changeInstructions = optimizer_->optimize();
+
+            std::cout << "[handle ins] placement worker before handle "
+                        "instructions. total cnt: "
+                    << changeInstructions.size() << "\n";
+            if (changeInstructions.size() > 0) {
+                TRACK_START();
+                if (check_instructions(changeInstructions))
+                    placement_handle_instrucions(changeInstructions);
+                TRACK_POINT("[handle ins] process " +
+                            std::to_string(changeInstructions.size()) +
+                            " instructions.");
+            }
+
+            activations_->collect(dist_ptr,
+                                stream); // Clear the old placement activations
         }
-
-        activations_->collect(dist_ptr,
-                              stream); // Clear the old placement activations
+        catch (const std::exception& e) {
+            std::cout << "update placement activations failed: " << e.what() << "\n";
+        }
         std::this_thread::sleep_for(std::chrono::seconds(collect_times));
     }
 
@@ -592,6 +601,18 @@ void Placement::stop_thread() {
     if (init_thread_.joinable()) {
         init_thread_.join(); // 等待初始化线程完成
     }
+}
+
+void Placement::placement_pause() {
+    should_pause_ = true;
+}
+
+void Placement::placement_resume() {
+    if (dist_ptr_) {
+        dist_ptr_->resume();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    should_pause_ = false;
 }
 
 void do_placement_optimizer(Placement &placement) {
@@ -684,7 +705,9 @@ PYBIND11_MODULE(omni_placement, m) {
         .def("get_moe_weights", &Placement::get_moe_weights,
              py::return_value_policy::reference)
         .def("init_recv_buf", &Placement::init_recv_buf, "")
-        .def("start_thread", &Placement::start_thread, "");
+        .def("start_thread", &Placement::start_thread, "")
+        .def("placement_pause", &Placement::placement_pause, "")
+        .def("placement_resume", &Placement::placement_resume, "");
 
     py::class_<Tensor>(m, "Tensor")
         .def(py::init<uint64_t, size_t, size_t,

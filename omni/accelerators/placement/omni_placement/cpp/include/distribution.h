@@ -146,5 +146,6 @@ class Distribution {
     void reset_buff_cur() { recv_buff_cur_ = 0; }
     uint32_t get_buff_cur() { return recv_buff_cur_; }
     size_t queue_size() { return queue_size_; }
+    void resume();
 };
 #endif // ACL_CHECK_H

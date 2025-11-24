@@ -300,3 +300,7 @@ void Distribution::printCommInfo() {
     std::cout << "  Rank: " << rank << std::endl;
     std::cout << "  Size: " << size << std::endl;
 }
+
+void Distribution::resume() {
+    HCCLCHECK(HcclCommResume(hcclComm_));
+}
