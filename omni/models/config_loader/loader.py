@@ -114,6 +114,7 @@ class ModelOperatorOptConfig:
     use_tnd_pa: bool = False  # 稠密模型使用新CANN包FIA算子，以TND+PA格式计算attention
 
     enable_dsa: bool = False # 使能mla = Indexer + select FA
+    enable_indexer_quant: bool = False # 使能indexer量化
     max_split_token_ratio_threshold: float = 0.8 # Split hidden_states in prefill if token duplication ratio exceeds threshold, to avoid GMM OOM.
     max_split_token_count_threshold: int = 32768 # Split hidden_states in prefill if token duplication count exceeds threshold, to avoid GMM OOM.
    

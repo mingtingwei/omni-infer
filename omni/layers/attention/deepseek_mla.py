@@ -63,11 +63,15 @@ except:
 
 KVCACHE_NZ_DIM = 16
 
-def stream_context(stream_tag):
-    if model_extra_config.operator_opt_config.moe_multi_stream_tune:
-        return tng.scope.npu_stream_switch(stream_tag)
-    return nullcontext()
-
+def get_had_pow2(n, norm=True):
+    if not ((n & (n - 1) == 0) and (n > 0)):
+        raise ValueError(f"n must be a positive power of 2, got{n}")
+    had = torch.ones(1, 1, dtype=torch.bfloat16).npu()
+    while had.shape[0] != n:
+        had = torch.cat((torch.cat([had, had], 1), torch.cat([had, -had], 1)), 0)
+        if norm:
+            had /= math.sqrt(2)
+    return had
 
 class LayerNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -100,8 +104,9 @@ class Indexer(nn.Module):
         self.wq_b = ReplicatedLinear(self.q_lora_rank,
                                         self.n_heads * self.head_dim,
                                         bias=False,
-                                        quant_config=None,
+                                        quant_config=quant_config,
                                         prefix=f"{prefix}.wq_b")  # [1536,64*128]
+
         self.wk = ReplicatedLinear(self.dim,
                                     self.head_dim,
                                     bias=False,
@@ -117,14 +122,23 @@ class Indexer(nn.Module):
 
         self.k_norm = LayerNorm(self.head_dim)
         self.softmax_scale = self.head_dim ** -0.5
+        self.hadamard_matrix = nn.Parameter(get_had_pow2(128), requires_grad=False)
+
+    def apply_hadamard(self, inp):
+        matrix = self.hadamard_matrix
+        init_shape = inp.shape
+        inp = inp.view(-1, matrix.shape[0])
+        return inp.matmul(matrix).view(init_shape).to(torch.float16)
 
     def _apply_lightning_indexer(self,
-                                 q,
-                                 weights,
-                                 attn_metadata,
-                                 kv_cache,
-                                 is_prefill,
-                                 is_second=False):
+                             q,
+                             weights,
+                             attn_metadata,
+                             kv_cache,
+                             is_prefill,
+                             is_second=False,
+                             query_dequant_scale=None,
+                             key_dequant_scale=None,):
         actual_seq_lengths_query = None
         actual_seq_lengths_key = None
         block_table = None
@@ -146,21 +160,36 @@ class Indexer(nn.Module):
             actual_seq_lengths_key = attn_metadata.decode.seq_lens.to(torch.int32)
             block_table = attn_metadata.decode.block_table
 
-        topk_indices = torch.ops.custom.npu_lightning_indexer(query=q,
-                                                              key=kv_cache[2],
-                                                              weights=weights,
-                                                              actual_seq_lengths_query=actual_seq_lengths_query,
-                                                              actual_seq_lengths_key=actual_seq_lengths_key,
-                                                              block_table=block_table,
-                                                              layout_query="TND",
-                                                              layout_key="PA_BSND",
-                                                              sparse_count=2048,
-                                                              sparse_mode=3)
+        li_fusion_input_kwargs = {
+            "query": q,
+            "key": kv_cache[2],
+            "weights": weights,
+            "actual_seq_lengths_query": actual_seq_lengths_query,
+            "actual_seq_lengths_key": actual_seq_lengths_key,
+            "block_table": block_table,
+            "layout_key": 'PA_BSND',
+            "layout_query": "TND",
+            "sparse_count": 2048,
+            "sparse_mode": 3
+        }
+
+        if model_extra_config.operator_opt_config.enable_indexer_quant:
+            li_fusion = torch.ops.custom.npu_lightning_indexer_quant
+            li_fusion_input_kwargs.update({
+                "key_dequant_scale": kv_cache[3].view(-1, 128, kv_cache[3].shape[-1]),
+                "key_quant_mode": 0,
+                "query_dequant_scale": query_dequant_scale,
+                "query_quant_mode": 0,
+                "weights": weights.type(torch.float16),
+            })
+        else:
+            li_fusion = torch.ops.custom.npu_lightning_indexer
+        topk_indices = li_fusion(**li_fusion_input_kwargs)
         return topk_indices
 
     def forward(self, 
                 x: torch.Tensor, 
-                q_rope: torch.Tensor,
+                q_norm: torch.Tensor,
                 attn_metadata: AttentionMetadata,
                 kv_cache: torch.Tensor, 
                 is_prefill):
@@ -174,8 +203,9 @@ class Indexer(nn.Module):
         else:
             cos_q, sin_q = cos, sin
 
-        with stream_context("11"):
-            q_mini = self.wq_b(q_rope)[0]  # [b*s,1536] @ [1536,64*128] = [b*s,64*128]
+        with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
+                                 stream_id="11"):
+            q_mini = self.wq_b(q_norm)[0]  # [b*s,1536] @ [1536,64*128] = [b*s,64*128]
             q_mini = q_mini.reshape(-1, self.n_heads, self.head_dim)  # [b*s,64,128]
             q_rope_mini, q_nope_mini = torch.split(q_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64,64+64]
 
@@ -204,15 +234,39 @@ class Indexer(nn.Module):
 
         k_mini = torch.cat([k_mini_rope, k_mini_nope], dim=-1)  # [b*s,128]
 
+        query_dequant_scale = None
+        query_dequant_scale_2 = None
+        key_dequant_scale = None
+        if model_extra_config.operator_opt_config.enable_indexer_quant:
+            with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
+                                    stream_id="11"):
+                # q_mini quant
+                q_mini = self.apply_hadamard(q_mini)
+                q_mini, query_dequant_scale = torch_npu.npu_dynamic_quant(q_mini)
+                query_dequant_scale = query_dequant_scale.type(torch.float16)
+                if model_extra_config.parall_config.attn_sp_size > 1:
+                    q_mini_2 = self.apply_hadamard(q_mini_2)
+                    q_mini_2, query_dequant_scale_2 = torch_npu.npu_dynamic_quant(q_mini_2)
+                    query_dequant_scale_2 = query_dequant_scale_2.type(torch.float16)
+            # k_mini quant
+            k_mini = self.apply_hadamard(k_mini)
+            k_mini, key_dequant_scale = torch_npu.npu_dynamic_quant(k_mini)
+            key_dequant_scale = key_dequant_scale.type(torch.float16)
+
         if isinstance(kv_cache, Dict):
             kv_cache = kv_cache.get("kv_cache")
         # TODO: update kcache
         if kv_cache[2] is not None and kv_cache[3] is not None:
+            if model_extra_config.operator_opt_config.enable_indexer_quant:
+                torch_npu.npu_scatter_nd_update_(kv_cache[3].view(-1, 1, key_dequant_scale.shape[-1]),
+                                                 attn_metadata.slot_mapping.view(-1, 1),
+                                                 key_dequant_scale.view(-1, key_dequant_scale.shape[-1]))
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, 1, k_mini.shape[-1]),
                                              attn_metadata.slot_mapping.view(-1, 1), 
                                              k_mini.view(-1, 1, k_mini.shape[-1]))   # b, s, n, d
 
-        with stream_context("22"):
+        with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
+                                 stream_id="22"):
             if not is_prefill:
                 if model_extra_config.operator_opt_config.moe_multi_stream_tune:
                     if isinstance(x, Dict):
@@ -225,11 +279,11 @@ class Indexer(nn.Module):
             if model_extra_config.parall_config.attn_sp_size > 1:
                 weights, weights_2 = torch.split(weights, weights.size(0) // 2, dim=0)
 
-        topk_indices = self._apply_lightning_indexer(q_mini, weights, attn_metadata, kv_cache, is_prefill)
+        topk_indices = self._apply_lightning_indexer(q_mini, weights, attn_metadata, kv_cache, is_prefill, False, query_dequant_scale, key_dequant_scale)
 
         topk_indices_2 = None
         if model_extra_config.parall_config.attn_sp_size > 1:
-            topk_indices_2 = self._apply_lightning_indexer(q_mini_2, weights_2, attn_metadata, kv_cache, is_prefill, True)
+            topk_indices_2 = self._apply_lightning_indexer(q_mini_2, weights_2, attn_metadata, kv_cache, is_prefill, True, query_dequant_scale_2, key_dequant_scale)
 
         return topk_indices, topk_indices_2
 
@@ -472,10 +526,11 @@ class DeepseekMLA(nn.Module):
                 self.actual_seq_lengths[batch_size] = (1 + self.num_speculative_tokens) * \
                     torch.arange(1, batch_size * self.tp_size // (1 + self.num_speculative_tokens) + 1, dtype=torch.int64, device=current_platform.device_type)
         if self.quant_symbol and model_extra_config.operator_opt_config.use_mlaprolog:
-            self.q_a_proj.weight_scale.data = self.q_a_proj.weight_scale.data.to(torch.float)
+            if not model_extra_config.operator_opt_config.enable_dsa:
+                self.q_a_proj.weight_scale.data = self.q_a_proj.weight_scale.data.to(torch.float)
+                if self.kv_a_proj_with_mqa is not None:
+                    self.kv_a_proj_with_mqa.weight_scale.data = self.kv_a_proj_with_mqa.weight_scale.data.to(torch.float)
             self.q_b_proj.weight_scale.data = self.q_b_proj.weight_scale.data.to(torch.float)
-            if self.kv_a_proj_with_mqa is not None:
-                self.kv_a_proj_with_mqa.weight_scale.data = self.kv_a_proj_with_mqa.weight_scale.data.to(torch.float)
         if model_extra_config.operator_opt_config.c8_calib_path is not None:
             os.makedirs(model_extra_config.operator_opt_config.c8_calib_path, exist_ok=True)
 
@@ -605,7 +660,6 @@ class DeepseekMLA(nn.Module):
         attn_metadata: AttentionMetadata,
         comm_group: Optional[GroupCoordinator] = None,
     ) -> torch.Tensor:
-        # only support batch size 1
         if self.q_lora_rank is not None:
             q_lora = self.q_a_proj(hidden_states)[0]
             latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
@@ -672,9 +726,9 @@ class DeepseekMLA(nn.Module):
                 kv_cache[1],
                 kv_cache[0],
                 k_rope_scale=None,
-                # c_kv_scale=torch.reciprocal(self.kv_scale).repeat(self.kv_lora_rank).view(-1) if self.use_faquant else None,
-                c_kv_scale=self.kv_scale_reci_tile,
-                k_rope_offset=None, c_kv_offset=None,
+                c_kv_scale=None,
+                k_rope_offset=None,
+                c_kv_offset=None,
                 epsilon=self.kv_a_layernorm.variance_epsilon,
                 cache_mode="PA")
         else:
@@ -937,6 +991,83 @@ class DeepseekMLA(nn.Module):
                 output = self.o_proj.forward(attn_output, comm_group=comm_group)[0]
         return output
 
+    def _forward_mlaprolog_decode(
+        self,
+        hidden_states,
+        nope_cache,
+        rope_cache,
+        attn_metadata,
+        nz_block_size
+    ):
+        block_num, block_size, head_size, _ = nope_cache.shape
+        bsz, _ = hidden_states.view(-1, hidden_states.shape[-1]).shape
+        if self.quant_symbol and not model_extra_config.operator_opt_config.enable_dsa:
+            hidden_states_mla_prolog, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        else:
+            hidden_states_mla_prolog = hidden_states
+        cos, sin = attn_metadata.decode.cos, attn_metadata.decode.sin
+        q_norm = None
+        dequant_scale_q_norm = None
+        if model_extra_config.operator_opt_config.enable_dsa:
+            cache_mode = "PA_BSND"
+            q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
+                token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
+                weight_dq=self.q_a_proj.weight,
+                weight_uq_qr=self.q_b_proj.weight,
+                weight_uk=self.W_UK,
+                weight_dkv_kr=self.kv_a_proj_with_mqa.weight,
+                rmsnorm_gamma_cq=self.q_a_layernorm.weight,
+                rmsnorm_gamma_ckv=self.kv_a_layernorm.weight,
+                rope_sin=sin.squeeze(1),
+                rope_cos=cos.squeeze(1),
+                kv_cache=nope_cache,
+                kr_cache=rope_cache,
+                cache_index=attn_metadata.slot_mapping.view(bsz, -1),
+                dequant_scale_x=None,
+                dequant_scale_w_dq=None,
+                dequant_scale_w_uq_qr=self.q_b_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
+                dequant_scale_w_dkv_kr=None,
+                rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+                rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+                cache_mode=cache_mode,
+                query_norm_flag=True,
+                weight_quant_mode=1 if self.quant_symbol else 0)
+        else:
+            cache_mode = "PA_NZ"
+            q_nope, q_pe, k_nope, k_rope, dequant_scale_q_nope = torch.ops.npu.npu_mla_prolog_v2(
+                token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
+                weight_dq=self.q_a_proj.weight,
+                weight_uq_qr=self.q_b_proj.weight,
+                weight_uk=self.W_UK,
+                weight_dkv_kr=self.kv_a_proj_with_mqa.weight,
+                rmsnorm_gamma_cq=self.q_a_layernorm.weight,
+                rmsnorm_gamma_ckv=self.kv_a_layernorm.weight,
+                rope_sin=sin.squeeze(1),
+                rope_cos=cos.squeeze(1),
+                cache_index=attn_metadata.slot_mapping.view(bsz, -1),
+                kv_cache=nope_cache.view(-1, 128, 1, 512),
+                kr_cache=rope_cache.view(-1, 128, 1, 64),
+                dequant_scale_x=pertoken_scale.view(-1, 1) if self.quant_symbol else None, # pertoken quant
+                dequant_scale_w_dq=self.q_a_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
+                dequant_scale_w_uq_qr=self.q_b_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
+                dequant_scale_w_dkv_kr=self.kv_a_proj_with_mqa.weight_scale.view(1, -1) if self.quant_symbol else None,
+                quant_scale_ckv=self.kv_scale_reci_tile,
+                quant_scale_ckr=None,
+                smooth_scales_cq=None,
+                rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
+                rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
+                cache_mode=cache_mode)
+
+        if cache_mode == "PA_NZ":
+            k_nope = k_nope.view(block_num, 1, self.kv_lora_rank // nz_block_size, block_size, nz_block_size)
+            k_rope = k_rope.view(block_num, 1, self.qk_rope_head_dim // KVCACHE_NZ_DIM, block_size, KVCACHE_NZ_DIM)
+        else:
+            k_nope = nope_cache
+            k_rope = rope_cache
+        q_nope = q_nope.view(bsz, self.num_local_heads, self.kv_lora_rank)
+        q_pe = q_pe.view(bsz, self.num_local_heads, -1)
+        return q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_norm
+
     def _forward_decode(
         self,
         positions: torch.Tensor,
@@ -945,101 +1076,34 @@ class DeepseekMLA(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
-        if model_extra_config.operator_opt_config.enable_dsa:
-            key_cache, value_cache, _, _ = kv_cache
-        else:
-            key_cache, value_cache = kv_cache
+        nope_cache = kv_cache[0]
+        rope_cache = kv_cache[1]
 
         q_len = 1
         dequant_scale_q_nope = None
         nz_block_size = 32 if self.fa_quant else 16
         if model_extra_config.operator_opt_config.use_mlaprolog:
-            block_num, block_size, head_size, _ = key_cache.shape
-            bsz, _ = hidden_states.view(-1, hidden_states.shape[-1]).shape
-            if self.quant_symbol:
-                hidden_states_mla_prolog, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            else:
-                hidden_states_mla_prolog = hidden_states
-            cos, sin = attn_metadata.decode.cos, attn_metadata.decode.sin
-            cache_index = attn_metadata.slot_mapping.view(bsz, -1)
-
-            if model_extra_config.operator_opt_config.enable_dsa:
-                cache_mode = "PA_BSND"
-                q_nope, q_pe, dequant_scale_q_nope, qr, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
-                    token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
-                    weight_dq=self.q_a_proj.weight,
-                    weight_uq_qr=self.q_b_proj.weight,
-                    weight_uk=self.W_UK,
-                    weight_dkv_kr=self.kv_a_proj_with_mqa.weight,
-                    rmsnorm_gamma_cq=self.q_a_layernorm.weight,
-                    rmsnorm_gamma_ckv=self.kv_a_layernorm.weight,
-                    rope_sin=sin.squeeze(1),
-                    rope_cos=cos.squeeze(1),
-                    kv_cache=key_cache,
-                    kr_cache=value_cache,
-                    cache_index=cache_index,
-                    dequant_scale_x=pertoken_scale.view(-1, 1) if self.quant_symbol else None, # pertoken quant
-                    dequant_scale_w_dq=self.q_a_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    dequant_scale_w_uq_qr=self.q_b_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    dequant_scale_w_dkv_kr=self.kv_a_proj_with_mqa.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
-                    rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
-                    cache_mode=cache_mode,
-                    query_norm_flag=True,
-                    weight_quant_mode=2 if self.quant_symbol else 0)
-            else:
-                cache_mode = "PA_NZ"
-                q_nope, q_pe, k_nope, k_rope, dequant_scale_q_nope = torch.ops.npu.npu_mla_prolog_v2(
-                    token_x = hidden_states_mla_prolog.view(bsz, 1, -1),
-                    weight_dq=self.q_a_proj.weight, weight_uq_qr=self.q_b_proj.weight,
-                    weight_uk=self.W_UK, weight_dkv_kr=self.kv_a_proj_with_mqa.weight,
-                    rmsnorm_gamma_cq=self.q_a_layernorm.weight, rmsnorm_gamma_ckv=self.kv_a_layernorm.weight,
-                    rope_sin=sin.squeeze(1), rope_cos=cos.squeeze(1), cache_index=cache_index,
-                    kv_cache=key_cache.view(-1, 128, 1, 512), kr_cache=value_cache.view(-1, 128, 1, 64),
-                    dequant_scale_x=pertoken_scale.view(-1, 1) if self.quant_symbol else None, # pertoken quant
-                    dequant_scale_w_dq=self.q_a_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    dequant_scale_w_uq_qr=self.q_b_proj.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    dequant_scale_w_dkv_kr=self.kv_a_proj_with_mqa.weight_scale.view(1, -1) if self.quant_symbol else None,
-                    quant_scale_ckv=self.kv_scale_reci_tile,
-                    quant_scale_ckr=None,
-                    smooth_scales_cq=None,
-                    rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
-                    rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
-                    cache_mode=cache_mode)
-
-            if cache_mode == "PA_NZ":
-                k_nope = k_nope.view(block_num, 1, self.kv_lora_rank // nz_block_size, block_size, nz_block_size)
-                k_rope = k_rope.view(block_num, 1, self.qk_rope_head_dim // KVCACHE_NZ_DIM, block_size, KVCACHE_NZ_DIM)
-            else:
-                k_nope = key_cache
-                k_rope = value_cache
-            q_nope = q_nope.view(bsz, self.num_local_heads, self.kv_lora_rank)
-            q_pe = q_pe.view(bsz, self.num_local_heads, -1)
+            q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_norm= self._forward_mlaprolog_decode(hidden_states, nope_cache, rope_cache, attn_metadata, nz_block_size)
         else:
-            if self.quant_symbol and model_extra_config.operator_opt_config.enable_dsa:
-                hidden_states_quant, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                hidden_states_quant = {"x_int8": hidden_states_quant, "pertoken_scale": pertoken_scale}
-            else:
-                hidden_states_quant = hidden_states
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
                 if self.q_lora_rank is not None:
-                    q_lowrank = self.q_a_proj(hidden_states_quant)[0]
+                    q_lowrank = self.q_a_proj(hidden_states)[0]
                 else:
-                    q_lowrank = self.q_proj(hidden_states_quant)[0]
+                    q_lowrank = self.q_proj(hidden_states)[0]
 
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
                                         stream_id='11', 
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
-                kv = self.kv_a_proj_with_mqa(hidden_states_quant)[0]
+                kv = self.kv_a_proj_with_mqa(hidden_states)[0]
             if model_extra_config.operator_opt_config.moe_multi_stream_tune:
                 tng.scope.npu_wait_tensor(q_lowrank, q_lowrank)
 
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune, 
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
                 if self.q_lora_rank is not None:
-                    qr, _ = self.q_a_layernorm(q_lowrank, self.norm_res[q_lowrank.shape[0]])
-                    q = self.q_b_proj(qr)[0]
+                    q_norm, _ = self.q_a_layernorm(q_lowrank, self.norm_res[q_lowrank.shape[0]])
+                    q = self.q_b_proj(q_norm)[0]
                 else:
                     q = q_lowrank
                 bsz, _ = q.shape
@@ -1060,11 +1124,11 @@ class DeepseekMLA(nn.Module):
                 kv = kv.unsqueeze(1).unsqueeze(1)
                 cos, sin = attn_metadata.decode.cos, attn_metadata.decode.sin
                 tmp_slot_mapping = attn_metadata.slot_mapping
-                block_num, block_size, head_size, _ = key_cache.shape
+                block_num, block_size, head_size, _ = nope_cache.shape
                 k_rope, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
                     kv, self.kv_a_layernorm.weight,
                     cos, sin, tmp_slot_mapping,
-                    value_cache, key_cache,
+                    rope_cache, nope_cache,
                     c_kv_scale=self.kv_scale_reci_tile,
                     epsilon=self.kv_a_layernorm.variance_epsilon, cache_mode=cache_mode) # adapter NZ
 
@@ -1112,9 +1176,13 @@ class DeepseekMLA(nn.Module):
             )
         elif model_extra_config.operator_opt_config.enable_dsa:
             if model_extra_config.operator_opt_config.moe_multi_stream_tune:
-                tng.scope.npu_wait_tensor(qr, k_rope)
+                tng.scope.npu_wait_tensor(q_norm, k_rope)
+            if self.quant_symbol and model_extra_config.operator_opt_config.use_mlaprolog:
+                q_norm =  q_norm.view(-1, q_norm.size(-1))
+                dequant_scale_q_norm = dequant_scale_q_norm.view(-1)
+                q_norm = {'x_int8':q_norm, 'pertoken_scale':dequant_scale_q_norm}
             # todo indexer only support bsnd
-            topk_indices, _ = self.indexer(hidden_states, qr, attn_metadata,
+            topk_indices, _ = self.indexer(hidden_states, q_norm, attn_metadata,
                                         kv_cache=kv_cache, is_prefill=False)
             attn_output = torch.ops.custom.npu_sparse_flash_attention(
                 query=q_nope,
@@ -1165,7 +1233,7 @@ class DeepseekMLA(nn.Module):
         else:
             output, _ = self.o_proj.forward(attn_output)
         return output
-    
+
     def _forward_prefill_a2(
             self,
             positions: torch.Tensor,

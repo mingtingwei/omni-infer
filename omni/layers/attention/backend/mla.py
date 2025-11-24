@@ -120,13 +120,13 @@ class AscendMLABackend(AttentionBackend):
             layer_indexer_k_nope = torch.zeros(
                             kv_cache_shape[:-2] +
                             (1, 128, ),
-                            dtype=dtype,
+                            dtype= dtype if not model_extra_config.operator_opt_config.enable_indexer_quant else torch.int8,
                             pin_memory=True,
                             device=device)
             layer_indexer_k_nope_scale = torch.zeros(
                             kv_cache_shape[:-2] +
                             (1, 1, ),
-                            dtype=torch.float32,
+                            dtype=torch.float16,
                             pin_memory=True,
                             device=device)
             return (layer_kv_cache_nope, layer_kv_cache_pe, layer_indexer_k_nope, layer_indexer_k_nope_scale)
