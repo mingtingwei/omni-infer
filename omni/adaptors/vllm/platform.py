@@ -335,9 +335,22 @@ class NPUPlatform(Platform):
 
     def __init__(self):
         """Initialize the NPU platform and configure environment."""
+        self._check_required_env_vars()
         EnvironmentSetup.configure_visible_devices()
         update_utils_custom_op()
         super().__init__()
+
+    @staticmethod
+    def _check_required_env_vars():
+        """Check if THINK_START_TOKEN_ID,THINK_END_TOKEN_ID,AFTER_THINK_TOKEN_IDS are set."""
+        ENABLE_MAX_TOKENS_EXCLUDE_REASONING = (os.environ.get("ENABLE_MAX_TOKENS_EXCLUDE_REASONING","0") == "1")
+        ENABLE_REASONING_MAX_TOKENS = (os.environ.get("ENABLE_REASONING_MAX_TOKENS","0") == "1")
+        THINK_START_TOKEN_ID: int = int(os.environ.get("THINK_START_TOKEN_ID","0"))
+        THINK_END_TOKEN_ID: int = int(os.environ.get("THINK_END_TOKEN_ID","0"))
+        AFTER_THINK_TOKEN_IDS: list[int] = list(map(int,os.environ.get("AFTER_THINK_TOKEN_IDS","0").split(",")))
+        
+        if (ENABLE_MAX_TOKENS_EXCLUDE_REASONING or ENABLE_REASONING_MAX_TOKENS) and not (THINK_START_TOKEN_ID and THINK_END_TOKEN_ID and AFTER_THINK_TOKEN_IDS):
+            raise ValueError("Environment variable THINK_START_TOKEN_ID,THINK_END_TOKEN_ID,AFTER_THINK_TOKEN_IDS not set")
 
     @classmethod
     def is_sleep_mode_available(cls) -> bool:
@@ -359,6 +372,7 @@ class NPUPlatform(Platform):
         Args:
             parser: Optional argument parser to update with NPU-specific options.
         """
+        cls._check_required_env_vars()
         ConfigUpdater.update_parser(parser)
         update_parallel_state()
         if os.getenv("ENABLE_APC_EVENT", "0") == "1":
