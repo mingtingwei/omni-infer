@@ -34,7 +34,7 @@ USER root
 WORKDIR /workspace
 
 COPY --from=builder /usr/local /usr/local/
-COPY msgpack-c-6.1.0.tar.gz /workspace/
+COPY ./copy_data/msgpack-c-6.1.0.tar.gz /workspace/
 
 # Install python and packages
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/python3.11.conf && \
@@ -43,7 +43,7 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/python3.11.conf && \
     ln -sf /usr/local/bin/pip3 /usr/bin/pip3 && \
     export http_proxy=${HTTP_PROXY} && \
     export https_proxy=${HTTP_PROXY} && \
-    yum -y install zeromq findutils && \
+    yum -y install zeromq findutils zeromq-devel boost-devel && \
     python -m pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --upgrade pip==25.1.1 && \
     pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --no-cache-dir --upgrade \
         setuptools requests wheel && \
@@ -57,7 +57,8 @@ RUN export http_proxy=${HTTP_PROXY} && \
     cd msgpack-c-6.1.0 && \
     mkdir build && cd build && \
     cmake .. -DMSGPACK_BUILD_EXAMPLES=OFF -DMSGPACK_BUILD_TESTS=OFF -DMSGPACK_USE_BOOST=OFF -DCMAKE_INSTALL_PREFIX=/usr && \
-    make -j8 && make install 
+    make -j8 && make install && \
+    rm -rf /workspace/msgpack-c-6.1.0 /workspace/msgpack-c-6.1.0.tar.gz 
 #################### BASE IMAGE ####################
 
 #################### CANN Pytorch IMAGE ####################
@@ -74,7 +75,7 @@ RUN mkdir -p /workspace/copy_data && \
 # Copy Ascend files
 COPY --from=driver /driver /usr/local/Ascend/driver
 COPY --from=etc /ascend_install.info /etc/ascend_install.info
-COPY A*-cann*run *whl /workspace/copy_data/
+COPY ./copy_data/A*-cann*run ./copy_data/*whl /workspace/copy_data/
 
 # Install PyTorch according to architecture
 RUN cd /workspace/copy_data && \
@@ -84,11 +85,13 @@ RUN cd /workspace/copy_data && \
         echo "Building for x86_64, installing torch and torch_npu from local WHLs..."; \
         TORCH_FILE=$(find . -type f -name "torch-*x86_64.whl" | head -n 1); \
         TORCHNPU_FILE=$(find . -maxdepth 1 -type f -name "torch_npu-*x86_64.whl" | head -n 1); \
-        pip install --no-cache-dir "$TORCH_FILE" "$TORCHNPU_FILE"; \
+        TORCHVISION_FILE=$(find . -maxdepth 1 -type f -name "torchvision-*x86_64.whl" | head -n 1); \
+        pip install --no-cache-dir "$TORCH_FILE" "$TORCHNPU_FILE" "$TORCHVISION_FILE";  \
     elif [ "$ARCHITECTURE" = "aarch64" ]; then \
         echo "Building for aarch64, installing torch and torch_npu from local WHLs..."; \
         TORCHNPU_FILE=$(find . -maxdepth 1 -type f -name "torch_npu-*aarch64.whl" | head -n 1); \
-        pip install --no-cache-dir "$TORCHNPU_FILE"; \
+        TORCHVISION_FILE=$(find . -maxdepth 1 -type f -name "torchvision-*aarch64.whl" | head -n 1); \
+        pip install --no-cache-dir "$TORCHNPU_FILE" "$TORCHVISION_FILE"; \
     else \
         echo "ERROR: Unsupported ARCHITECTURE='$ARCHITECTURE'. Only 'aarch64' or 'x86_64' allowed."; \
         exit 1; \

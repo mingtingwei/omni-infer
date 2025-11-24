@@ -7,7 +7,7 @@ FROM ${BASE_IMAGE} AS whl_builder
 ARG HTTP_PROXY
 ARG PIP_INDEX_URL
 ARG PIP_TRUSTED_HOST
-ARG OMNI_VERSION_NUM=0.5.0
+ARG OMNI_VERSION_NUM
 
 WORKDIR /workspace
 
@@ -50,6 +50,7 @@ ENTRYPOINT ["bash"]
 
 ######################### USER IMAGE #########################
 FROM ${BASE_IMAGE} AS user_image
+COPY requirements /workspace/requirements/
 COPY --from=whl_builder /workspace/omniinfer/build/dist /workspace/dist
 COPY --from=whl_builder /workspace/omniinfer/build/lib /workspace/dist/lib
 COPY --from=whl_builder /workspace/omniinfer/tools/scripts /workspace/omniinfer/tools/scripts/
@@ -65,10 +66,18 @@ ARG PIP_TRUSTED_HOST
 # Install nessary pip packages for runtime
 RUN export http_proxy=${HTTP_PROXY} && \
     export https_proxy=${HTTP_PROXY} && \
+    echo "export HCCL_IF_BASE_PORT=59000" >> ~/.bashrc; \
+    echo "export HCCL_OP_RETRY_ENABLE=\"L0:0, L1:0, L2:0\"" >> ~/.bashrc; \
+    source ~/.bashrc && \
     pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
         -r /workspace/requirements/develop.txt && \
     yum -y install glibc-devel gcc-c++ git gmock-devel vim wget iputils zeromq-devel && \
-    yum install -y /workspace/dist/omni-proxy*.rpm && \
+    if [ -f /workspace/dist/omni-proxy*.rpm ];then \
+        yum install -y /workspace/dist/omni-proxy*.rpm; \
+    fi && \
+    if [ -f /workspace/dist/global-proxy*.rpm ];then \
+        rpm -ivh --replacefiles /workspace/dist/global-proxy*.rpm; \
+    fi && \
     pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
         decorator==5.2.1 absl-py==2.3.1 ml-dtypes==0.5.1 \
         scipy==1.16.0 tornado==6.5.1 dataflow==0.11.1 sympy==1.13.1 pytz && \
@@ -84,6 +93,7 @@ RUN export http_proxy=${HTTP_PROXY} && \
     if [ -f /workspace/dist/ascend*.whl ]; then \
         pip install /workspace/dist/ascend*.whl; \
     fi && \
+    rm -rf /workspace/dist && \
     echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64:/usr/local/lib:/workspace/dist/lib' >> ~/.bashrc;
 
 ENTRYPOINT ["bash"]

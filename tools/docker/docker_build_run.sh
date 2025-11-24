@@ -11,6 +11,7 @@ MODEL_NAME="Qwen/Qwen2.5-0.5B"
 BASE_IMAGE=test-infer-base:0.1
 DEV_IMAGE=test-infer-dev:0.1
 USER_IMAGE=test-infer-apiserver:0.1
+OMNI_VERSION_NUM=master
 
 ## BASE_IMAGE: build base image witch CANN pytorch torch_npu
 docker build -f Dockerfile.base \
@@ -32,6 +33,7 @@ docker build -f Dockerfile.omniinfer \
     --build-arg HTTP_PROXY="${PROXY}" \
     --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
     --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+    --build-arg OMNI_VERSION_NUM="${OMNI_VERSION_NUM}" \
     --build-arg BASE_IMAGE=${BASE_IMAGE} \
     --target omininfer_openai \
     -t ${USER_IMAGE} .

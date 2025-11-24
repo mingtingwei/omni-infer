@@ -11,6 +11,10 @@ BASE_DIR=$(
 export http_proxy=${HTTP_PROXY}
 export https_proxy=${HTTP_PROXY}
 branch="release_v${OMNI_VERSION_NUM}"
+# If OMNI_VERSION_NUM is 'master', use the master branch name instead of release_v*
+if [ "${OMNI_VERSION_NUM}" = "master" ]; then
+    branch="master"
+fi
 
 version_ge() {
     local ver1="$1"
@@ -50,7 +54,8 @@ cd ${BASE_DIR}/omniinfer
 chmod +x build/build.sh
 chmod +x infer_engines/bash_install_code.sh
 
-if version_ge "${OMNI_VERSION_NUM}" "0.5.0"; then
+if [ "${OMNI_VERSION_NUM}" = "master" ] || version_ge "${OMNI_VERSION_NUM}" "0.5.0"; then
+    # For 'master' branch or versions >= 0.5.0 we use the cached build path
     bash -xe build/build.sh --cache 1
     cd ${BASE_DIR}/omniinfer/tools/quant/python
     python setup.py bdist_wheel
