@@ -65,6 +65,7 @@ from sglang.srt.utils import (
 import logging
 logger = logging.getLogger(__name__)
 
+torch._dynamo.config.inline_inbuilt_nn_modules = False
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -325,7 +326,7 @@ def {method_name}(self, input_ids, positions, forward_batch, **kwargs):
                     self.model_runner.model,
                     compile_method_name,
                     torchair.inference.cache_compile(
-                        getattr(self.model_runner.model, method_name), backend=backend
+                        getattr(self.model_runner.model, method_name), backend=backend, dynamic=False
                     ),
                 )
 

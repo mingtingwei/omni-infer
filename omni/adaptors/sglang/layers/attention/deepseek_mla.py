@@ -255,7 +255,7 @@ class DeepseekMLA(nn.Module):
             self.q_b_proj.weight_scale.data = self.q_b_proj.weight_scale.data.to(torch.float)
             if self.kv_a_proj_with_mqa is not None:
                 self.kv_a_proj_with_mqa.weight_scale.data = self.kv_a_proj_with_mqa.weight_scale.data.to(torch.float)
-        self.enable_mla_multi_stream = False
+        self.enable_mla_multi_stream = model_extra_config.operator_opt_config.moe_multi_stream_tune
 
         if get_attention_dp_size() > 1:
             kv_b_proj_weight = self.kv_b_proj.weight.T
@@ -284,7 +284,6 @@ class DeepseekMLA(nn.Module):
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
     ):
-        self.enable_mla_multi_stream = forward_batch.can_run_graph
         if (
             forward_batch.is_decode_or_idle and not forward_batch.is_prefill_idle
         ) or forward_batch.is_target_verify:

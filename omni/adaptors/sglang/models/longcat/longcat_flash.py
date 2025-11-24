@@ -30,6 +30,8 @@ from omni.adaptors.sglang.layers.moe.fused_moe.layer import FusedMoE
 from omni.adaptors.sglang.layers.layernorm import RMSNorm
 from omni.adaptors.sglang.models.deepseek.deepseek_v3 import ParallelDeepseekMLP
 from omni.adaptors.sglang.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from omni.models.config_loader.loader import model_extra_config
+from omni.adaptors.sglang.utils import ConditionalTNGScope
 logger = logging.getLogger(__name__)
 
 """MLP module activation split length, split by 64G VRAM, need to confirm the optimal split length based on sequence length and performance"""
@@ -55,8 +57,8 @@ class LongcatFlashDecoderLayer(nn.Module):
         self.layer_id = layer_id
         self.is_nextn = is_nextn
         self.quant_symbol = False
-        self.use_super_kernel = os.environ.get("USE_SUPER_KERNEL", "0") == "1"
-        self.use_mla_prolog = os.environ.get("USE_MLA_PROLOG", "0") == "1"
+        self.use_super_kernel = model_extra_config.operator_opt_config.use_super_kernel
+        self.use_mla_prolog = model_extra_config.operator_opt_config.use_mlaprolog
 
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -267,7 +269,7 @@ class LongcatFlashForCausalLM(nn.Module):
 
         # for quark model load
         # Fuse q_a_proj and kv_a_proj_with_mqa along output dimension when q_lora_rank is not None
-        self.fuse_qkv_a_proj = os.environ.get("USE_FUSE_QKV_A_PROJ", "0") == "1"
+        self.fuse_qkv_a_proj = model_extra_config.operator_opt_config.merge_qkv
         if self.fuse_qkv_a_proj:
             self.packed_modules_mapping["fused_qkv_a_proj_with_mqa"] = [
                 "q_a_proj",
@@ -411,7 +413,7 @@ class LongcatFlashForCausalLM(nn.Module):
         )
 
         # Fuse q_a_proj and kv_a_proj_with_mqa along output dimension when q_lora_rank is not None
-        fuse_qkv_a_proj = os.environ.get("USE_FUSE_QKV_A_PROJ", "0") == "1"
+        fuse_qkv_a_proj = model_extra_config.operator_opt_config.merge_qkv
         cached_a_proj = {} if fuse_qkv_a_proj else None
 
         if is_nextn:
