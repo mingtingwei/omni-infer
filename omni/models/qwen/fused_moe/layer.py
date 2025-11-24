@@ -11,7 +11,7 @@ import torch
 import torch_npu
 import torchair as tng
 import torch.distributed as dist
-
+from vllm.config import CompilationLevel
 from vllm.distributed import get_pp_group, get_world_group
 from vllm.distributed import get_tp_group, get_dp_group, get_ep_group
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -22,7 +22,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 
 from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
-
+from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
 class FusedMoeWeightScaleSupported(Enum):
     CHANNEL = 'channel'
 
@@ -808,6 +808,7 @@ class FusedMoE(torch.nn.Module):
         ep_size: Optional[int] = None,
         dp_size: Optional[int] = None,
         prefix: str = "",
+        compilation_config: Optional[NPUCompilationConfig] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -836,7 +837,6 @@ class FusedMoE(torch.nn.Module):
         )
 
         self.global_num_experts = num_experts
-
         moe_dispatch_combine = os.environ.get('MOE_DISPATCH_COMBINE', '0') == '1'
         if moe_dispatch_combine:
             # 适配dispatch_combine算子
@@ -849,7 +849,10 @@ class FusedMoE(torch.nn.Module):
                 self.all2all_global_rank)
             self.moe_rs_group = get_pp_group().device_group
             self.moe_rs_group_rank = get_pp_group().rank_in_group
-            self.moe_rs_group_name = self.moe_rs_group._get_backend(torch.device('npu')).get_hccl_comm_name(self.moe_rs_group_rank)
+            if os.getenv("ASCEND_PLATFORM", "A3") == "A2" and compilation_config.level != CompilationLevel.NO_COMPILATION:
+                self.moe_rs_group_name = self.moe_all_to_all_group_name
+            else:
+                self.moe_rs_group_name = self.moe_rs_group._get_backend(torch.device('npu')).get_hccl_comm_name(self.moe_rs_group_rank)
 
         # Determine expert maps
         if self.use_ep:

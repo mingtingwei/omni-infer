@@ -68,7 +68,7 @@ from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
 from omni.adaptors.vllm.utils import get_attr_by_names
-
+from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
 if model_extra_config.task_config.enable_omni_placement:
     from omni_placement.omni_planner import OmniPlanner
 
@@ -81,6 +81,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        compilation_config: Optional[NPUCompilationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -110,6 +111,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 planner=self.planner,
                                 moe_layer_idx=self.moe_layer_idx,
                                 expert_mapping=self.expert_mapping,
+                                compilation_config=compilation_config,
                                 first_k_dense_replace=self.first_k_dense_replace)
 
         self.gate = ReplicatedLinear(config.hidden_size,
@@ -286,6 +288,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        compilation_config: Optional[NPUCompilationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -319,6 +322,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen3MoeSparseMoeBlock(config=config,
                                               quant_config=quant_config,
+                                              compilation_config=compilation_config,
                                               prefix=f"{prefix}.mlp")
         else:
             raise NotImplementedError("Qwen3MoeMLP not implemented")
@@ -388,6 +392,7 @@ class Qwen3MoeModel(nn.Module):
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
+                 compilation_config: Optional[NPUCompilationConfig] = None,
                  prefix: str = ""):
         super().__init__()
 
@@ -408,6 +413,7 @@ class Qwen3MoeModel(nn.Module):
             lambda prefix: Qwen3MoeDecoderLayer(config=config,
                                                 cache_config=cache_config,
                                                 quant_config=quant_config,
+                                                compilation_config=compilation_config,
                                                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
@@ -578,9 +584,13 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, GraphCompileConfiguration):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        compilation_config = vllm_config.npu_compilation_config
         self.config = config
         self.quant_config = quant_config
-        self.model = Qwen3MoeModel(config, vllm_config.cache_config, quant_config,
+        self.model = Qwen3MoeModel(config, 
+                                   vllm_config.cache_config, 
+                                   quant_config,
+                                   compilation_config=compilation_config,
                                    prefix=f"model")
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
