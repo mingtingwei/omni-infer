@@ -335,7 +335,7 @@ def monkey_patch_async_generate_completions_stream_logger():
     print("<<< Monkey patch monkey_patch_async_generate_completions_stream_logger is applied")
 
 
-profiling_namelist = os.getenv("PROFILING_NAMELIST", None)
+profiling_namelist = os.getenv("PROFILING_NAMELIST_ENGINE_STEP", None)
 if profiling_namelist is not None:
     if os.path.isfile(profiling_namelist):
         apply_patches(profiling_namelist)

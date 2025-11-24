@@ -97,6 +97,7 @@
       export CPU_AFFINITY_CONF=1
       export OMP_NUM_THREADS=1
 
+      # export PROFILING_NAMELIST_ENGINE_STEP=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/sglang_trace_namelist_engine_step.yml
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
       # export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
 
@@ -133,7 +134,6 @@
       #!/bin/bash
 
       . ~/.bashrc
-
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
@@ -145,6 +145,7 @@
       export ASCEND_TRANSFER_TIMEOUT=30000
       export ROLE=decode
 
+      # export PROFILING_NAMELIST_ENGINE_STEP=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/sglang_trace_namelist_engine_step.yml
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
       # export OMNILOGGER_ARGS="$TRACE_PATH,D{{ node_rank }},01"
 
@@ -871,12 +872,13 @@
     #   tags:
     #     - rm_trace
 
+
     # - name: Sync the remote trace logs to the local directory.
     #   synchronize:
     #     src: "{{ TRACE_PATH }}/trace/"
     #     dest: "{{ TRACE_SYNC_PATH }}/sync"
-    #     mode: pull
+    #     mode: pull  
     #     rsync_opts:
-    #       - "--archive"
-    #       - "--compress"
+    #       - "--archive"  
+    #       - "--compress" 
     #   tags: collect_trace
