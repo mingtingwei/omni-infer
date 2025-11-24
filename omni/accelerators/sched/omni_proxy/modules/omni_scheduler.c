@@ -698,7 +698,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
                     continue;
                 }
                 cnt++;
-                uint32_t m = req->match_depths[j];
+                uint32_t m = req->prefill_match_depths[j];
 
                 uint32_t load_tokens = gs->prefill_states[j].num_tokens;
                 uint32_t running = gs->prefill_states[j].num_running;
@@ -721,7 +721,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
             {
                 selected = best_idx;
                 ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0, "[Prefill-%d] Prefix cache hit on: %d with match_depth %d",
-                              req->slot_index, selected, req->match_depths[selected]);
+                              req->slot_index, selected, req->prefill_match_depths[selected]);
             } else {
                 uint32_t least_load = UINT32_MAX;
                 for (uint32_t m = gs->last_selected_prefill, cnt = 0;
@@ -812,6 +812,37 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
         uint32_t least_load = UINT32_MAX;
         uint32_t selected = rand() % gs->num_decode_endpoints;
         uint32_t cnt = 0;
+
+        uint32_t best_match = 0;
+        uint32_t best_load_tokens = UINT32_MAX;
+        uint32_t best_running = UINT32_MAX;
+        uint32_t best_idx = UINT32_MAX;
+
+        for (uint32_t j = 0; j < MAX_DECODE_UPSTREAMS && cnt < gs->num_decode_endpoints; j++)
+        {
+            if (gs->decode_states[j].comm.status != STATUS_ENABLE){
+                continue;
+            }
+            cnt++;
+            uint32_t m = req->decode_match_depths[j];
+
+            uint32_t load_tokens = gs->decode_states[j].num_tokens;
+            uint32_t running = gs->decode_states[j].num_running;
+            if (load_tokens > olcf->max_batch_num_token || running > olcf->decode_max_num_seqs)
+            {
+                continue;
+            }
+            if (m > best_match ||
+                (m == best_match && load_tokens < best_load_tokens) ||
+                (m == best_match && load_tokens == best_load_tokens && running < best_running))
+            {
+                best_match = m;
+                best_load_tokens = load_tokens;
+                best_running = running;
+                best_idx = j;
+            }
+        }
+
         for (int m = gs->last_selected_decode;
             m < MAX_DECODE_UPSTREAMS + gs->last_selected_decode && cnt < gs->num_decode_endpoints; m++) {
             int j = m % MAX_DECODE_UPSTREAMS;

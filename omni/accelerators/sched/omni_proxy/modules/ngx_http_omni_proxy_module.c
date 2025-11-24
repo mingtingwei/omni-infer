@@ -29,7 +29,8 @@ enum req_metrics_tokens_var {
     VAR_PROMPT_NUM_TOKENS,
     VAR_DECODED_TOKENS,
     VAR_MAX_TOKENS,
-    VAR_MAX_MATCH_DEPTH,
+    VAR_MAX_PREFILL_MATCH_DEPTH,
+    VAR_MAX_DECODE_MATCH_DEPTH,
     VAR_PREFILL_UPSTREAM_IDX,
     VAR_DECODE_UPSTREAM_IDX,
 };
@@ -205,25 +206,39 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
     ngx_shmtx_lock(&g_state->shmtx);
     /* snapshot radix_tree pointers */
     uint16_t num_prefill = g_state->num_prefill_endpoints;
-    omni_radix_tree_t *local_trees[MAX_PREFILL_UPSTREAMS];
-    ngx_memzero(local_trees, sizeof(omni_radix_tree_t *) * MAX_PREFILL_UPSTREAMS);
-    uint16_t cnt = 0;
-    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < num_prefill; i++) {
+    omni_radix_tree_t *local_prefill_trees[MAX_PREFILL_UPSTREAMS];
+    ngx_memzero(local_prefill_trees, sizeof(omni_radix_tree_t *) * MAX_PREFILL_UPSTREAMS);
+    uint16_t prefill_cnt = 0;
+    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && prefill_cnt < num_prefill; i++) {
         omni_upstream_prefill_t *prefill = &g_state->prefill_states[i];
         if (prefill->comm.status != STATUS_ENABLE) {
             continue;
         }
-        cnt++;
-        local_trees[i] = prefill->radix_tree;
+        prefill_cnt++;
+        local_prefill_trees[i] = prefill->radix_tree;
+    }
+
+    uint16_t num_decode = g_state->num_decode_endpoints;
+    omni_radix_tree_t *local_decode_trees[MAX_DECODE_UPSTREAMS];
+    ngx_memzero(local_decode_trees, sizeof(omni_radix_tree_t *) * MAX_DECODE_UPSTREAMS);
+    uint16_t decode_cnt = 0;
+    for (int i = 0; i < MAX_DECODE_UPSTREAMS && decode_cnt < num_decode; i++) {
+        omni_upstream_decode_t *decode = &g_state->decode_states[i];
+        if (decode->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        decode_cnt++;
+        local_decode_trees[i] = decode->radix_tree;
     }
     ngx_shmtx_unlock(&g_state->shmtx);
 
     /* 2) Compute matches without holding g_state lock */
-    uint32_t local_match_depths[MAX_PREFILL_UPSTREAMS];
-    ngx_uint_t computed_max = 0;
+    // Prefill Matching
+    uint32_t local_prefill_match_depths[MAX_PREFILL_UPSTREAMS];
+    ngx_uint_t computed_max_prefill = 0;
 
     for (uint16_t i = 0, cnt = 0; i < MAX_PREFILL_UPSTREAMS && cnt < num_prefill; i++) {
-        omni_radix_tree_t *tree = local_trees[i];
+        omni_radix_tree_t *tree = local_prefill_trees[i];
         ngx_uint_t match_depth = 0;
         if (tree != NULL) {
             cnt++;
@@ -231,31 +246,65 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
                                                             (uint64_t *)req->tokenizer_req.block_hashes,
                                                             req->tokenizer_req.block_hashes_len);
         }
-        local_match_depths[i] = (uint32_t)match_depth;
+        local_prefill_match_depths[i] = (uint32_t)match_depth;
         ngx_log_error(NGX_LOG_INFO,
                       omni_get_http_request(req)->connection->log,
                       0,
                       "[APC_MATCHING-%d] prefill[%ui] match_depth=%ui",
                       req->slot_index,
                       i,
-                      local_match_depths[i]);
+                      local_prefill_match_depths[i]);
 
-        if ((ngx_uint_t)match_depth > computed_max)
-            computed_max = match_depth;
+        if ((ngx_uint_t)match_depth > computed_max_prefill)
+            computed_max_prefill = match_depth;
     }
 
     ngx_log_error(NGX_LOG_INFO,
                   omni_get_http_request(req)->connection->log,
                   0,
-                  "[APC_MATCHING-%d] computed num_prefill=%ui, max_match_depth=%ui",
+                  "[APC_MATCHING-%d] computed num_prefill=%ui, max_prefill_match_depth=%ui",
                   req->slot_index,
                   num_prefill,
-                  computed_max);
+                  computed_max_prefill);
+    
+    // Decode Matching
+    uint32_t local_decode_match_depths[MAX_DECODE_UPSTREAMS];
+    ngx_uint_t computed_max_decode = 0;
+    for (uint16_t i = 0, cnt = 0; i < MAX_DECODE_UPSTREAMS && cnt < num_decode; i++) {
+        omni_radix_tree_t *tree = local_decode_trees[i];
+        ngx_uint_t match_depth = 0;
+        if (tree != NULL) {
+            cnt++;
+            match_depth = omni_radix_tree_match_optimistic(tree,
+                                                            (uint64_t *)req->tokenizer_req.block_hashes,
+                                                            req->tokenizer_req.block_hashes_len);
+        }
+        local_decode_match_depths[i] = (uint32_t)match_depth;
+        ngx_log_error(NGX_LOG_INFO,
+                      omni_get_http_request(req)->connection->log,
+                      0,
+                      "[APC_MATCHING-%d] decode[%ui] match_depth=%ui",
+                      req->slot_index,
+                      i,
+                      local_decode_match_depths[i]);
 
+        if ((ngx_uint_t)match_depth > computed_max_decode)
+            computed_max_decode = match_depth;
+    }
+
+    ngx_log_error(NGX_LOG_INFO,
+                  omni_get_http_request(req)->connection->log,
+                  0,
+                  "[APC_MATCHING-%d] computed num_decode=%ui, max_decode_match_depth=%ui",
+                  req->slot_index,
+                  num_decode,
+                  computed_max_decode);
 
     /* 3) write results to shared request */
-    ngx_memcpy(req->match_depths, local_match_depths, sizeof(local_match_depths));
-    req->max_match_depth = (uint32_t)computed_max;
+    ngx_memcpy(req->prefill_match_depths, local_prefill_match_depths, sizeof(local_prefill_match_depths));
+    req->max_prefill_match_depth = (uint32_t)computed_max_prefill;
+    ngx_memcpy(req->decode_match_depths, local_decode_match_depths, sizeof(local_decode_match_depths));
+    req->max_decode_match_depth = (uint32_t)computed_max_decode;
 
     /* Finally perform phase transition and timestamp updates */
     omni_phase_transition_all(req, 0, PHASE_PREFILL_WAITING_SCHEDULE);
@@ -1979,7 +2028,17 @@ static ngx_int_t omni_upstream_add(bool is_prefill, ngx_cycle_t *cycle, ngx_http
                     if (g_state->prefill_states[j].radix_tree == NULL) {
                         ngx_http_upstream_rr_peer_unlock(peers, peer);
                         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                                      "Failed to create radix hash_tree, idx=%ui", cnt);
+                                      "Failed to create prefill radix hash_tree, idx=%ui", cnt);
+                        return NGX_ERROR;
+                    }
+                }
+
+                if (!is_prefill && local_state.loc_conf->vllm_kv_port_offset != NGX_CONF_UNSET) {
+                    g_state->decode_states[j].radix_tree = omni_radix_tree_init(g_state->shm);
+                    if (g_state->decode_states[j].radix_tree == NULL) {
+                        ngx_http_upstream_rr_peer_unlock(peers, peer);
+                        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                                      "Failed to create decode radix hash_tree, idx=%ui", cnt);
                         return NGX_ERROR;
                     }
                 }
@@ -2283,13 +2342,27 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
     ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0, "[Worker %d] Received KV event batch with %d events",
         ngx_worker, batch->events_count);
 
-    omni_upstream_prefill_t *prefill = &g_state->prefill_states[handler->index];
-    // assert(!prefill->radix_tree==null)
-    if (!prefill->radix_tree)
+    omni_radix_tree_t *target_radix_tree = NULL;
+
+    if (handler->index < MAX_PREFILL_UPSTREAMS){
+        omni_upstream_prefill_t *prefill = &g_state->prefill_states[handler->index];
+        target_radix_tree = prefill->radix_tree;
+    } else {
+        omni_upstream_decode_t *decode = &g_state->decode_states[handler->index - MAX_PREFILL_UPSTREAMS];
+        target_radix_tree = decode->radix_tree;
+    }
+    // assert(target_radix_tree==null)
+    if (!target_radix_tree)
     {
-        ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, 0,
-                      "omni_proxy_kv_event_handler: Radix tree for prefill %d is not initialized; shared state corrupted. Aborting.",
-                      handler->index);
+        if (handler->index < MAX_PREFILL_UPSTREAMS){
+            ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, 0,
+                "omni_proxy_kv_event_handler: Radix tree for prefill %d is not initialized; shared state corrupted. Aborting.",
+                handler->index);
+        } else {
+            ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, 0,
+                "omni_proxy_kv_event_handler: Radix tree for decode %d is not initialized; shared state corrupted. Aborting.",
+                handler->index - MAX_PREFILL_UPSTREAMS);
+        }
 
         free_kv_event_batch(batch);
 
@@ -2298,7 +2371,7 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
         ngx_shmtx_unlock(&g_state->shmtx);
 
         /* Ensure failure is loud in both debug and release builds */
-        assert(prefill->radix_tree != NULL && "omni_proxy_kv_event_handler: radix_tree for prefill not initialized");
+        assert(target_radix_tree != NULL && "omni_proxy_kv_event_handler: radix_tree not initialized");
         abort();
         return;
     }
@@ -2318,7 +2391,7 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
             int64_t parent_block_hash = event->data.block_stored.parent_block_hash;
             if (block_hashes_count > 0 && block_hashes != NULL)
             {
-                omni_radix_tree_add_chain(prefill->radix_tree,
+                omni_radix_tree_add_chain(target_radix_tree,
                                           (uint64_t *)block_hashes,
                                           (ngx_uint_t)block_hashes_count);
             }
@@ -2333,17 +2406,29 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
                 for (size_t k = 0; k < count; ++k)
                 {
                     uint64_t h = (uint64_t)hashes[k];
-                    if (omni_radix_tree_remove(prefill->radix_tree, h) == NGX_OK)
+                    if (omni_radix_tree_remove(target_radix_tree, h) == NGX_OK)
                     {
-                        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
-                                      "Removed block hash %" PRIu64 " from radix tree (prefill %d)",
-                                      h, handler->index);
+                        if (handler->index < MAX_PREFILL_UPSTREAMS){
+                            ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
+                                "Removed block hash %" PRIu64 " from radix tree (prefill %d)",
+                                h, handler->index);
+                        } else {
+                            ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
+                                "Removed block hash %" PRIu64 " from radix tree (decode %d)",
+                                h, handler->index - MAX_PREFILL_UPSTREAMS);                           
+                        }
                     }
                     else
                     {
-                        ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
-                                      "Block hash %" PRIu64 " not found in radix tree (prefill %d)",
-                                      h, handler->index);
+                        if (handler->index < MAX_PREFILL_UPSTREAMS){
+                            ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                                "Block hash %" PRIu64 " not found in radix tree (prefill %d)",
+                                h, handler->index);
+                        } else {
+                            ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                                "Block hash %" PRIu64 " not found in radix tree (decode %d)",
+                                h, handler->index - MAX_PREFILL_UPSTREAMS);
+                        }
                     }
                 }
             }
@@ -2352,11 +2437,16 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
         case KV_EVENT_ALL_BLOCKS_CLEARED:
         {
             // Re-initialize the radix tree for this upstream
-            omni_radix_tree_destroy(prefill->radix_tree);
-            prefill->radix_tree = omni_radix_tree_init(g_state->shm);
-            if (prefill->radix_tree == NULL) {
+            omni_radix_tree_destroy(target_radix_tree);
+            target_radix_tree = omni_radix_tree_init(g_state->shm);
+            if (target_radix_tree == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, ngx_cycle->log, 0,
                               "Failed to create radix hash_tree in KV_EVENT_ALL_BLOCKS_CLEARED");
+            }
+            if (handler->index < MAX_PREFILL_UPSTREAMS){
+                g_state->prefill_states[handler->index].radix_tree = target_radix_tree;
+            } else {
+                g_state->decode_states[handler->index - MAX_PREFILL_UPSTREAMS].radix_tree = target_radix_tree;
             }
             break;
         }
@@ -2377,20 +2467,20 @@ static ngx_int_t omni_proxy_init_kv_listener(ngx_cycle_t *cycle)
 
     ngx_core_conf_t *ccf = (ngx_core_conf_t *)ngx_get_conf(ngx_cycle->conf_ctx, ngx_core_module);
 
-    uint16_t cnt = 0;
-    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && cnt < g_state->num_prefill_endpoints; i++) {
+    uint16_t prefill_cnt = 0;
+    for (int i = 0; i < MAX_PREFILL_UPSTREAMS && prefill_cnt < g_state->num_prefill_endpoints; i++) {
         omni_upstream_prefill_t *prefill = &g_state->prefill_states[i];
         if (prefill->comm.status != STATUS_ENABLE) {
             continue;
         }
-        cnt++;
+        prefill_cnt++;
 
-        if (cnt % ccf->worker_processes == ngx_worker)
+        if (prefill_cnt % ccf->worker_processes == ngx_worker)
         {
             if (prefill->radix_tree == NULL)
             {
                 ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                              "radix hash_tree is NULL, idx=%d", i);
+                              "prefill radix hash_tree is NULL, idx=%d", i);
                 return NGX_ERROR;
             }
 
@@ -2413,6 +2503,51 @@ static ngx_int_t omni_proxy_init_kv_listener(ngx_cycle_t *cycle)
                 return NGX_ERROR;
             }
             kv_handler->index = i;
+            ngx_int_t ret = omni_zmq_handler_init(cycle, kv_handler, addr, topic, omni_proxy_kv_event_handler);
+            if (ret != NGX_OK) {
+                return ret;
+            }
+            kv_handler->next = local_state.kv_handler_list;
+            local_state.kv_handler_list = kv_handler;
+        }
+    }
+
+    uint16_t decode_cnt = 0;
+    for (int i = 0; i < MAX_DECODE_UPSTREAMS && decode_cnt < g_state->num_decode_endpoints; i++) {
+        omni_upstream_decode_t *decode = &g_state->decode_states[i];
+        if (decode->comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        decode_cnt++;
+
+        if (decode_cnt % ccf->worker_processes == ngx_worker)
+        {
+            if (decode->radix_tree == NULL)
+            {
+                ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                              "decode radix hash_tree is NULL, idx=%d", i);
+                return NGX_ERROR;
+            }
+
+            printf("Start radix tree unit test...\n");
+            omni_radix_tree_test(decode->radix_tree);
+            printf("Radix tree unit test done.\n");
+
+            u_char *buf = ngx_palloc(cycle->pool, 64);
+            u_char *last = ngx_snprintf((u_char *)buf, 64, "%s:%d",
+                                        decode->comm.address.ip,
+                                        decode->comm.address.port + local_state.loc_conf->vllm_kv_port_offset);
+
+            printf("address: %s\n", buf);
+            ngx_str_t addr = {last - buf, buf};
+
+            ngx_str_t topic = ngx_string(""); 
+            omni_zmq_handler_t *kv_handler = ngx_pcalloc(cycle->pool, sizeof(omni_zmq_handler_t));
+            if (kv_handler == NULL) {
+                ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "kv_handler alloc fail, idx=%d", MAX_PREFILL_UPSTREAMS + i);
+                return NGX_ERROR;
+            }
+            kv_handler->index = MAX_PREFILL_UPSTREAMS + i;
             ngx_int_t ret = omni_zmq_handler_init(cycle, kv_handler, addr, topic, omni_proxy_kv_event_handler);
             if (ret != NGX_OK) {
                 return ret;
@@ -2646,8 +2781,11 @@ static ngx_int_t omni_req_uint_var_get(ngx_http_request_t *r,
         case VAR_MAX_TOKENS:
             value = ctx->metrics.max_tokens;
             break;
-        case VAR_MAX_MATCH_DEPTH:
-            value = ctx->max_match_depth;
+        case VAR_MAX_PREFILL_MATCH_DEPTH:
+            value = ctx->max_prefill_match_depth;
+            break;
+        case VAR_MAX_DECODE_MATCH_DEPTH:
+            value = ctx->max_decode_match_depth;
             break;
         case VAR_PREFILL_UPSTREAM_IDX:
             value = ctx->prefill_upstream_endpoint_idx;
@@ -2752,8 +2890,10 @@ static ngx_http_variable_t ngx_http_omni_variables[] = {
      VAR_DECODED_TOKENS, NGX_HTTP_VAR_CHANGEABLE, 0},
     {ngx_string("max_tks"), NULL, omni_req_uint_var_get,
      VAR_MAX_TOKENS, NGX_HTTP_VAR_CHANGEABLE, 0},
-    {ngx_string("max_match"), NULL, omni_req_uint_var_get,
-     VAR_MAX_MATCH_DEPTH, NGX_HTTP_VAR_CHANGEABLE, 0},
+    {ngx_string("prefill_max_match"), NULL, omni_req_uint_var_get,
+     VAR_MAX_PREFILL_MATCH_DEPTH, NGX_HTTP_VAR_CHANGEABLE, 0},
+    {ngx_string("decode_max_match"), NULL, omni_req_uint_var_get,
+     VAR_MAX_DECODE_MATCH_DEPTH, NGX_HTTP_VAR_CHANGEABLE, 0},
     {ngx_string("prefill_idx"), NULL, omni_req_uint_var_get,
      VAR_PREFILL_UPSTREAM_IDX, NGX_HTTP_VAR_CHANGEABLE, 0},
     {ngx_string("decode_idx"), NULL, omni_req_uint_var_get,

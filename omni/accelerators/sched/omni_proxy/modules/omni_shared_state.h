@@ -84,8 +84,10 @@ typedef struct omni_request_s
     uint16_t decode_upstream_endpoint_idx;
     omni_request_metrics_t metrics;
     omni_tokenizer_request tokenizer_req;
-    uint32_t match_depths[MAX_PREFILL_UPSTREAMS];
-    uint32_t max_match_depth;
+    uint32_t prefill_match_depths[MAX_PREFILL_UPSTREAMS];
+    uint32_t max_prefill_match_depth;
+    uint32_t decode_match_depths[MAX_DECODE_UPSTREAMS];
+    uint32_t max_decode_match_depth;
 
     char request_id[37];
 } omni_req_t;
