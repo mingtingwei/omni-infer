@@ -31,6 +31,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.model_executor.layers.rotary_embedding import DynamicNTKScalingRotaryEmbedding
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import (direct_register_custom_op, supports_dynamo, is_pin_memory_available)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -43,11 +44,20 @@ from omni.layers.rotary_embedding import QwenMRotaryEmbedding
 from omni.layers.attention.backend.attention_dummy_builder import DummyAttentionMetadataBuilder
 from omni.models.config_loader.loader import model_extra_config
 
+# 延迟导入避免循环依赖
+BaseOmniCache = None
+PrefixCopyMeta = None
+def _load_cache_classes():
+    global BaseOmniCache, PrefixCopyMeta
+    if BaseOmniCache is None:
+        from omni.accelerators.cache.omni_cache import BaseOmniCache as _BC, PrefixCopyMeta as _PCM
+        BaseOmniCache = _BC
+        PrefixCopyMeta = _PCM
+
+
 def get_nz_dim():
-    #NZ_DIM = 16 for float16/bfloat16, 32 for int8.
-    if model_extra_config.operator_opt_config.enable_c8:
-        return 32
-    return 16
+    enable_c8 = getattr(model_extra_config.operator_opt_config, "enable_c8", False)
+    return 32 if enable_c8 else 16
 
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
@@ -128,6 +138,8 @@ class AscendMetadata:
     is_pd_seperate_d: bool = False
     kv_index: Optional[torch.Tensor] = None
     mc2_mask: Optional[torch.Tensor] = None
+    prefix_meta: Optional[PrefixCopyMeta] = None
+    omni_cache: Optional[BaseOmniCache] = None
 
     @staticmethod
     def advance_step(metadata, positions, block_size, pad_mask, model_layer):
@@ -168,6 +180,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                 current_layers_names = kv_cache_group.layer_names
         self.is_spec_metadata = hasattr(self.runner, "drafter") \
             and sorted(self.runner.drafter.attn_layer_names) == sorted(current_layers_names)
+        self.omni_cache = getattr(self.runner, "omni_cache", None)
 
     def generate_activate_mask(self, actual_seqs_num, batch_size):
         if len(self.decode_gear_list) > 1:
@@ -291,6 +304,24 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         attn_state = self.runner.attn_state
 
+        prefix_meta: Optional[PrefixCopyMeta] = None
+        kv_transfer_cfg = self.runner.vllm_config.kv_transfer_config
+        if (self.omni_cache is not None
+            and model_extra_config.operator_opt_config.use_omni_cache
+            and kv_transfer_cfg is not None
+            and kv_transfer_cfg.kv_role != "kv_consumer"
+            and attn_state != AscendAttentionState.DecodeOnly):
+            kv_lens = self.runner.input_batch.num_computed_tokens_cpu[:num_reqs]
+            query_lens_list = query_lens.tolist()
+            block_tables_np = self.block_table.get_numpy_array()[:num_reqs]
+            prefix_meta = self.omni_cache.get_prefill_prefix_copy_meta(
+                block_size=self.block_size,
+                kv_lens=kv_lens,
+                query_lens_list=query_lens_list,
+                block_tables=block_tables_np,
+                attn_state=attn_state,
+            )
+
         if graph_pad_size > 0:
             padding = torch.full((graph_pad_size, ),
                                     0,
@@ -393,7 +424,9 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
                                        sin=sin,
                                        is_pd_seperate_d=is_pd_seperate_d,
                                        kv_index=kv_index,
-                                       mc2_mask=self.mc2_mask)
+                                       mc2_mask=self.mc2_mask,
+                                       prefix_meta=prefix_meta,
+                                       omni_cache=self.omni_cache)
         return attn_metadata
 
     def build_dummy(self, num_tokens: int, max_pad_size: int = -1) -> AscendMetadata:
@@ -455,7 +488,10 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
             cos=cos,
             sin=sin,
             is_pd_seperate_d=is_pd_seperate_d,
-            mc2_mask=self.mc2_mask
+            kv_index=None,
+            mc2_mask=self.mc2_mask,
+            prefix_meta=None,
+            omni_cache=self.omni_cache,
         )
 
     def mark_static_for_attn_metadata(self, attn_metadata):
@@ -856,31 +892,57 @@ class AscendAttentionBackendImpl(AttentionImpl):
             v_scale = None
             sparse_mode = 3
             atten_mask = AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE
+        use_omni_cache = model_extra_config.operator_opt_config.use_omni_cache
+        omni_cache = getattr(attn_metadata, "omni_cache", None)
+        block_size = kv_cache[0].shape[-2] if kv_cache[0].numel() > 0 else 128
 
         # update kv cache
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
-            block_size = kv_cache[0].shape[-2]
             assert block_size == 128, f"{block_size}"
-            if model_extra_config.operator_opt_config.enable_c8:
-                quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
-                quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
-                quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
-                quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
-                torch_npu.npu_scatter_pa_kv_cache(
-                    quant_key,
-                    quant_value,
-                    kv_cache[0],
-                    kv_cache[1],
-                    attn_metadata.slot_mapping.int()
-                )   
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly and use_omni_cache and omni_cache is not None:
+                kv_states = [
+                    key.view(-1, 1, self.num_kv_heads * self.head_size),
+                    value.view(-1, 1, self.num_kv_heads * self.head_size),
+                ]
+                stream_for_copy = torch.npu.current_stream()
+                kv_event = torch.npu.Event(blocking=False, enable_timing=False)
+                with torch.npu.stream(stream_for_copy):
+                    kv_event.record(stream_for_copy)
+                try:
+                    layer_idx = extract_layer_index(layer.layer_name)
+                except Exception:
+                    layer_idx = 0
+                omni_cache.synchronize_d2h(kv_states, layer_idx, kv_event)
             else:
-                torch_npu.npu_scatter_pa_kv_cache(
-                    key,
-                    value,
-                    kv_cache[0],
-                    kv_cache[1],
-                    attn_metadata.slot_mapping
-                )         
+                if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and use_omni_cache and omni_cache is not None and getattr(attn_metadata, "prefix_meta", None) is not None:
+                    try:
+                        layer_idx = extract_layer_index(layer.layer_name)
+                    except Exception:
+                        layer_idx = 0
+                    omni_cache.synchronize_h2d(
+                        prefix_meta=attn_metadata.prefix_meta,
+                        layer_idx=layer_idx,
+                    )
+                if model_extra_config.operator_opt_config.enable_c8:
+                    quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
+                    quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
+                    quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
+                    quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
+                    torch_npu.npu_scatter_pa_kv_cache(
+                        quant_key,
+                        quant_value,
+                        kv_cache[0],
+                        kv_cache[1],
+                        attn_metadata.slot_mapping.int()
+                    )
+                else:
+                    torch_npu.npu_scatter_pa_kv_cache(
+                        key,
+                        value,
+                        kv_cache[0],
+                        kv_cache[1],
+                        attn_metadata.slot_mapping
+                    )
   
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and model_extra_config.operator_opt_config.enable_c8:
@@ -1009,38 +1071,64 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         value = value.contiguous()
-
+        use_omni_cache = model_extra_config.operator_opt_config.use_omni_cache
         # update kv cache
+        omni_cache = getattr(attn_metadata, "omni_cache", None)
+        stream_for_reshape_and_cache = torch.npu.current_stream()
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             block_size = self.key_cache.shape[1]
 
             if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-                # if prefill does not use paged attention,
-                # (1) saving keys and values into kv_cache, and
-                # (2) GQA
-                # can run simultaneously in two streams
-                if model_extra_config.operator_opt_config.enable_c8:
-                    quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
-                    quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
-                    quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
-                    quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
-
-                if self.kv_stream is not None and not hasattr(layer, 'quant_method') and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                    stream_for_reshape_and_cache = self.kv_stream
-                    self.kv_stream.wait_stream(torch.npu.current_stream())
+                if use_omni_cache and omni_cache is not None:
+                    kv_states = [
+                        key.view(-1, 1, self.num_kv_heads * self.head_size),
+                        value.view(-1, 1, self.num_kv_heads * self.head_size),
+                    ]
+                    stream_for_copy = self.kv_stream if (
+                        self.kv_stream is not None
+                        and not hasattr(layer, 'quant_method')
+                        and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+                    ) else torch.npu.current_stream()
+                    kv_event = torch.npu.Event(blocking=False, enable_timing=False)
+                    with torch.npu.stream(stream_for_copy):
+                        kv_event.record(stream_for_copy)
+                    try:
+                        layer_idx = extract_layer_index(layer.layer_name)
+                    except Exception:
+                        layer_idx = 0
+                    omni_cache.synchronize_d2h(kv_states, layer_idx, kv_event)
                 else:
-                    stream_for_reshape_and_cache = torch.npu.current_stream()
-                with torch.npu.stream(stream_for_reshape_and_cache):
-                    torch_npu._npu_reshape_and_cache(
-                        key if not model_extra_config.operator_opt_config.enable_c8 else quant_key,
-                        value if not model_extra_config.operator_opt_config.enable_c8 else quant_value,
-                        self.key_cache.view(self.key_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
-                        self.value_cache.view(self.value_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
-                        attn_metadata.slot_mapping.int()
-                    )
+                    if model_extra_config.operator_opt_config.enable_c8:
+                        quant_key = torch_npu.npu_quantize(key.view(-1, self.num_kv_heads * self.head_size), k_scale.view(-1), None, torch.qint8, -1, True)
+                        quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
+                        quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
+                        quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
+
+                    if self.kv_stream is not None and not hasattr(layer, 'quant_method') and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+                        stream_for_reshape_and_cache = self.kv_stream
+                        self.kv_stream.wait_stream(torch.npu.current_stream())
+                    else:
+                        stream_for_reshape_and_cache = torch.npu.current_stream()
+                    with torch.npu.stream(stream_for_reshape_and_cache):
+                        torch_npu._npu_reshape_and_cache(
+                            key if not model_extra_config.operator_opt_config.enable_c8 else quant_key,
+                            value if not model_extra_config.operator_opt_config.enable_c8 else quant_value,
+                            self.key_cache.view(self.key_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
+                            self.value_cache.view(self.value_cache.shape[0], block_size, self.num_kv_heads, self.head_size),
+                            attn_metadata.slot_mapping.int()
+                        )
             else:
+                if use_omni_cache and omni_cache is not None and getattr(attn_metadata, "prefix_meta", None) is not None:
+                    try:
+                        layer_idx = extract_layer_index(layer.layer_name)
+                    except Exception:
+                        layer_idx = 0
+                    omni_cache.synchronize_h2d(
+                        prefix_meta=attn_metadata.prefix_meta,
+                        layer_idx=layer_idx,
+                    )
                 if model_extra_config.operator_opt_config.enable_c8:
                     torch_npu.npu_quant_scatter_(self.key_cache, attn_metadata.slot_indices, key.view(-1, 1, self.num_kv_heads * self.head_size), k_scale.view(-1), axis=-2, quant_axis=-1)
                     torch_npu.npu_quant_scatter_(self.value_cache, attn_metadata.slot_indices, value.view(-1, 1, self.num_kv_heads * self.head_size), v_scale.view(-1), axis=-2, quant_axis=-1)
@@ -1113,6 +1201,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if stream_for_reshape_and_cache != torch.npu.current_stream():
                 torch.npu.current_stream().wait_stream(stream_for_reshape_and_cache)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            if model_extra_config.operator_opt_config.use_omni_cache and omni_cache is not None and attn_metadata.prefix_meta is not None:
+                try:
+                    layer_idx = extract_layer_index(layer.layer_name)
+                except Exception:
+                    layer_idx = 0
+                omni_cache.synchronize_h2d(
+                    prefix_meta=attn_metadata.prefix_meta,
+                    layer_idx=layer_idx,
+                )
 
             block_num, block_size = self.key_cache.shape[0], self.key_cache.shape[1]
 
@@ -1258,9 +1355,12 @@ class AscendAttentionBackend(AttentionBackend):
     tuple[torch.Tensor, ...]:
         # KVCache needs to store the shape of the reduced dimension [num_blocks, block_size, 1, kv_lora_rank] [num_blocks, block_size, 1, rope_dim]
         # The shape of the augmented dimension is [num_blocks, block_size, head_num, head_dim]
-        layer_kv_caches = torch.zeros(kv_cache_shape,
-                                      dtype=dtype if not model_extra_config.operator_opt_config.enable_c8 else torch.int8,
-                                      device=device)
+        layer_kv_caches = torch.zeros(
+            kv_cache_shape,
+            dtype=dtype if not getattr(model_extra_config.operator_opt_config, "enable_c8", False) else torch.int8,
+            device=device,
+        )
+
         if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
             torch_npu.npu_format_cast(layer_kv_caches, 2)
         return (layer_kv_caches[0], layer_kv_caches[1])
