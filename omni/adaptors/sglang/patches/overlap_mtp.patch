@@ -164,7 +164,7 @@ index 56ac4d1a1..161cd11b9 100644
              if self.pp_group.is_last_rank:
                  batch.output_ids = next_token_ids
 diff --git a/python/sglang/srt/managers/scheduler_output_processor_mixin.py b/python/sglang/srt/managers/scheduler_output_processor_mixin.py
-index 9b6e7ec7c..9fc3e461d 100644
+index 9b6e7ec7c..78731d647 100644
 --- a/python/sglang/srt/managers/scheduler_output_processor_mixin.py
 +++ b/python/sglang/srt/managers/scheduler_output_processor_mixin.py
 @@ -4,6 +4,7 @@ import logging
@@ -274,15 +274,15 @@ index 9b6e7ec7c..9fc3e461d 100644
 +                    unfree_kv_indices = self.tree_cache.cache_finished_req(req, 
 +                                                                           rejected_tokens = 1 - accept_length[i],
 +                                                                           num_speculative_tokens = 1)
++                    # TODO:should get from num speculative tokens in config
++                    maybe_need_free_loc = unfree_kv_indices[unfree_kv_indices != 0]
++                    rollback_lens = accept_length[i] - 1
++                    if rollback_lens < 0:
++                        maybe_need_free_loc = maybe_need_free_loc[:rollback_lens]
++                    need_free_loc = maybe_need_free_loc[maybe_need_free_loc % self.page_size == 0]
++                    self.unfree_kv_indices_dict[req.rid] = need_free_loc
 +                else:
 +                    unfree_kv_indices = self.tree_cache.cache_finished_req(req)
-+                # TODO:should get from num speculative tokens in config
-+                maybe_need_free_loc = unfree_kv_indices[unfree_kv_indices != 0]
-+                rollback_lens = accept_length[i] - 1
-+                if rollback_lens < 0:
-+                    maybe_need_free_loc = maybe_need_free_loc[:rollback_lens]
-+                need_free_loc = maybe_need_free_loc[maybe_need_free_loc % self.page_size == 0]
-+                self.unfree_kv_indices_dict[req.rid] = need_free_loc
                  req.time_stats.completion_time = time.time()
  
              if req.return_logprob and batch.spec_algorithm.is_none():
