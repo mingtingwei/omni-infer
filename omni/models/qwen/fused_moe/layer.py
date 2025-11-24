@@ -814,12 +814,8 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        **kwargs
     ):
         super().__init__()
-        self.planner = kwargs.get("planner", None)
-        self.moe_layer_idx = kwargs.get("moe_layer_idx", None)
-        self.expert_mapping = kwargs.get("expert_mapping", None)
         self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         self.prefix = prefix
 
@@ -853,6 +849,21 @@ class FusedMoE(torch.nn.Module):
                 self.moe_rs_group_name = self.moe_all_to_all_group_name
             else:
                 self.moe_rs_group_name = self.moe_rs_group._get_backend(torch.device('npu')).get_hccl_comm_name(self.moe_rs_group_rank)
+        self.planner = None
+        self.moe_layer_idx = None
+        self.expert_mapping = None
+        self.num_of_redundant_experts = 0
+        if model_extra_config.task_config.enable_omni_placement:
+            from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
+            self.planner = OmniPlanner(device="npu",
+                                       rank=get_world_group().rank_in_group,
+                                       world_size=get_world_group().world_size,
+                                       num_experts=self.global_num_experts)
+            self.moe_layer_idx = int(self.prefix.split(sep='.')[-3])
+            self.expert_mapping = self.planner.expert_mapping_on_current_layer(self.moe_layer_idx)
+            self.num_of_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
+                                                                                      num_expert_per_device_origin=self.global_num_experts // self.ep_size,
+                                                                                      rank_device=self.ep_rank)
 
         # Determine expert maps
         if self.use_ep:
@@ -886,7 +897,7 @@ class FusedMoE(torch.nn.Module):
                              "non-grouped topk.")
 
         moe = MoEConfig(
-            num_experts=self.global_num_experts,
+            num_experts=self.global_num_experts + self.num_of_redundant_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             intermediate_size_per_partition=self.intermediate_size_per_partition,
@@ -914,14 +925,6 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        
-        self.num_of_redundant_experts = 0
-        if model_extra_config.task_config.enable_omni_placement:
-            self.num_of_redundant_experts = self.planner.get_num_of_redundant_experts(moe_layer_idx=self.moe_layer_idx,
-                                                                                      num_expert_per_device_origin=self.local_num_experts,
-                                                                                      rank_device=get_world_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num)
-        
-
         moe_quant_params = {
             "num_experts": self.local_num_experts + self.num_of_redundant_experts,
             "hidden_size": hidden_size,
@@ -999,6 +1002,9 @@ class FusedMoE(torch.nn.Module):
                                        loaded_weight: torch.Tensor,
                                        tp_rank: int):
         # for per channel weight quantization
+
+        if loaded_weight.dim() > 1:
+            loaded_weight = loaded_weight.squeeze(-1)
         if shard_id == "w2":
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -1056,19 +1062,18 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-        ep_rank = get_ep_group().rank_in_group - model_extra_config.parall_config.redundancy_shared_expert_num
         # ENABLE_OMNI_PLANNER
         if model_extra_config.task_config.enable_omni_placement:
             # OMNI_PLANNER: determine the expert deployment based on the pattern
+            local_num_experts = self.global_num_experts // self.ep_size
             exists_locally, local_pos = self.planner.is_expert_on_current_rank(self.moe_layer_idx, expert_id,
-                                                                                ep_rank, self.local_num_experts)
+                                                                                self.ep_rank, local_num_experts)
             # if the re-deployed expert is not on the current rank, then skip the weight_loader
             if not exists_locally:
                 return
             # if the re-deployed expert is on the current rank, then update the id of the expert
             else:
-                expert_id = ep_rank * self.local_num_experts + local_pos
-            expert_id -= ep_rank * self.local_num_experts
+                expert_id = local_pos
         else:
             expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id is None:
@@ -1114,16 +1119,18 @@ class FusedMoE(torch.nn.Module):
 
     def apply_expert_load_balance(
             self,
-            topk_ids: torch.Tensor,
+            tokens: torch.Tensor = None,
+            topk_ids: torch.Tensor = None,
+            token_expert_scores: torch.Tensor = None,
             best_topk_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # omni placement
         if self.planner is not None:
             _, topk_ids, _ = self.planner.plan(
                 layer_idx_moe=self.moe_layer_idx,
-                tokens=None,
+                tokens=tokens,
                 token_expert_ids=topk_ids,
-                token_expert_scores=None,
+                token_expert_scores=token_expert_scores,
                 expert_mapping=self.expert_mapping
             )
 

@@ -1308,7 +1308,7 @@ class NPUModelRunner(GPUModelRunner):
         if model_extra_config.task_config.enable_omni_placement:
             from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
             first_k_dense_replace_names = ['num_dense_layers', 'first_k_dense_replace']
-            first_k_dense_replace = get_attr_by_names(self.model.config, first_k_dense_replace_names, 3)
+            first_k_dense_replace = get_attr_by_names(self.model.config, first_k_dense_replace_names, 0)
             param_dict = dict(self.model.named_parameters())
             self.planner = OmniPlanner()
             self.planner.init_dram_weights(param_dict, first_k_dense_replace=first_k_dense_replace)

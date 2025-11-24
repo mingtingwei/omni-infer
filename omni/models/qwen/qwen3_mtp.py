@@ -143,7 +143,7 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
             kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
-            residual=None,
+            residual=None
         )
 
         hidden_states, _ = self.shared_head.norm(encoded_states, residual)

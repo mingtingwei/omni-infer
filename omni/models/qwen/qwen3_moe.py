@@ -69,8 +69,7 @@ from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
 from omni.adaptors.vllm.utils import get_attr_by_names
 from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
-if model_extra_config.task_config.enable_omni_placement:
-    from omni_placement.omni_planner import OmniPlanner
+from omni.layers.attention.layer import attention_init_c8
 
 logger = init_logger(__name__)
 SEQ_SPLIT_LENGTH = 4096
@@ -87,20 +86,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         super().__init__()
 
         self.n_routed_experts = config.num_experts
-        self.moe_prefix = f"{prefix}.experts"
-        self.planner = None
-        self.moe_layer_idx = None
-        self.expert_mapping = None
-        self.first_k_dense_replace = 0
-        self.redundancy_shared_expert_num = model_extra_config.parall_config.redundancy_shared_expert_num
-        if model_extra_config.task_config.enable_omni_placement:
-            self.planner = OmniPlanner(device="npu",
-                                       rank=get_world_group().rank_in_group,
-                                       world_size=get_world_group().world_size,
-                                       num_experts=self.n_routed_experts,
-                                       num_redundancy_shared_expert_rank=self.redundancy_shared_expert_num)
-            self.moe_layer_idx = OmniPlanner.get_deepseek_v3_moe_layer_idx(self.moe_prefix, first_k_dense_replace=self.first_k_dense_replace)
-            self.expert_mapping = self.planner.expert_mapping_on_current_layer(self.moe_layer_idx)
         self.experts = FusedMoE(num_experts=self.n_routed_experts,
                                 top_k=config.num_experts_per_tok,
                                 hidden_size=config.hidden_size,
@@ -108,11 +93,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 renormalize=config.norm_topk_prob,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
-                                planner=self.planner,
-                                moe_layer_idx=self.moe_layer_idx,
-                                expert_mapping=self.expert_mapping,
-                                compilation_config=compilation_config,
-                                first_k_dense_replace=self.first_k_dense_replace)
+                                compilation_config=compilation_config)
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
@@ -214,14 +195,28 @@ class Qwen3MoeAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn")
+        if model_extra_config.operator_opt_config.enable_c8:
+            Attention.__init__ = attention_init_c8
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                total_num_kv_heads=self.total_num_kv_heads
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+            )
         
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -231,7 +226,7 @@ class Qwen3MoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        attn_metadata: AttentionMetadata
     ) -> torch.Tensor:
         is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
         qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
@@ -341,31 +336,30 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
+        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
         # Self Attention
         if residual is None:
             residual = hidden_states
-            if model_extra_config.operator_opt_config.use_prefetch:
-                QKV_PREFETCH_SIZE = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
-                torch_npu.npu_prefetch(self.self_attn.qkv_proj.weight, residual , QKV_PREFETCH_SIZE)
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
+        if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
+            torch_npu.npu_prefetch(self.self_attn.qkv_proj.weight, hidden_states, model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024)
+            torch_npu.npu_prefetch(self.self_attn.o_proj.weight, hidden_states, model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
+            attn_metadata=attn_metadata
         )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[next(iter(attn_metadata))]
-        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
+    
         if is_prefill and model_extra_config.operator_opt_config.enable_mlp_seq_split:
             local_length = hidden_states.shape[0]
             reduce_length = torch.tensor(local_length, dtype=torch.int64, device="npu")
@@ -403,6 +397,7 @@ class Qwen3MoeModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
+        self.quant_config = quant_config
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -434,7 +429,7 @@ class Qwen3MoeModel(nn.Module):
         tp_size = get_tp_group().world_size
         tp_rank = get_tp_group().rank_in_group
 
-        assert x.shape[0] % tp_size == 0, f"x can't be divided along tp_size {tp_size}!"
+        assert x.shape[0] % tp_size == 0, f"x {x.shape[0]} can't be divided along tp_size {tp_size}!"
         slice_size = x.shape[0] // tp_size
         x_slice = x[tp_rank * slice_size: (tp_rank + 1) * slice_size]
 
@@ -472,7 +467,8 @@ class Qwen3MoeModel(nn.Module):
                                             hidden_states,
                                             residual,
                                             kv_caches[i] if kv_caches is not None else None,
-                                            attn_metadata)
+                                            attn_metadata
+                                            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -483,7 +479,7 @@ class Qwen3MoeModel(nn.Module):
         if len(aux_hidden_states) > 0:
             return aux_hidden_states, hidden_states
         return hidden_states
-
+    
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -502,19 +498,33 @@ class Qwen3MoeModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+
+        # Pre-compute MTP layer prefixex to skip
+        num_mtp_layers = getattr(self.config, "num_nextn_predict_layers", 0)
+        mtp_prefix = []
+        if self.config.architectures[0] == "Qwen3MoeForCausalLM" and num_mtp_layers > 0:
+            mtp_prefix = [f"layers.{self.config.num_hidden_layers+layer_idx}" 
+                            for layer_idx in range(num_mtp_layers)]
+
         for name, loaded_weight in weights:
-            ### The weight_scale often has shape (n,1)
+            # Skip MTP layers
+            if mtp_prefix and name.startswith(tuple(mtp_prefix)):
+                continue
+
+            # The weight_scale often has shape (n,1)
             if 'weight_scale' in name:
                 loaded_weight = loaded_weight.view(-1)
-
-            num_mtp_layers = getattr(self.config, "num_nextn_predict_layers", 0)
-
-            if self.config.architectures[0] == "Qwen3MoeForCausalLM" and num_mtp_layers > 0:
-                mtp_prefix = [f"layers.{self.config.num_hidden_layers+layer_idx}" for layer_idx in range(num_mtp_layers)]
-
-                if name.startswith(tuple(mtp_prefix)):
+            if (self.quant_config is not None and 
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                if scale_name not in params_dict:
                     continue
-
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
 
                 if weight_name not in name:

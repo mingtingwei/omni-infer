@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase
 )
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped
 )
@@ -101,6 +102,7 @@ class NpuW8A8DynamicConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
         if isinstance(layer, FlashCommLinearBase) or isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedFlashCommLinearMethod()
@@ -109,12 +111,27 @@ class NpuW8A8DynamicConfig(QuantizationConfig):
             return W8A8DynamicFusedMLPMethod(self)
         elif isinstance(layer, FusedMoE):
             return NpuW8A8DynamicFusedMoEMethod(self)
+        elif isinstance(layer, Attention) and model_extra_config.operator_opt_config.enable_c8:
+            return NpuW8A8DynamicKVCacheMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
     
     def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Check whether the param name matches the format for k/v cache scales
+        in NPU W8A8 Dynamic. If this is the case, return its equivalent
+        param name expected by vLLM
+
+        :param name: param name
+        :return: matching param name for KV cache scale in vLLM
+        """
+        if name.endswith(".kv_cache_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.kv_cache_scale", ".attn.k_scale")
+        if name.endswith(".kv_cache_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.kv_cache_scale", ".attn.v_scale")
+        # If no matches, return None
         return None
 
 
@@ -272,7 +289,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
 
         if NpuW8A8DynamicFusedMoEMethod.ONES_SCALE is None:
             NpuW8A8DynamicFusedMoEMethod.ONES_SCALE = torch.ones(
-                (layer.local_num_experts, layer.intermediate_size_per_partition), dtype=torch.float32, device='npu'
+                (num_experts, layer.intermediate_size_per_partition), dtype=torch.float32, device='npu'
             )
             torch._dynamo.mark_static(NpuW8A8DynamicFusedMoEMethod.ONES_SCALE)
 
@@ -381,6 +398,12 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
                 indices_type=None
             )
+            if layer.planner is not None:
+                topk_ids = layer.apply_expert_load_balance(tokens=x,
+                                                           topk_ids=topk_ids,
+                                                           token_expert_scores=topk_weights,
+                                                           best_topk_ids=None)
+                global_num_experts = layer.w13_weight.shape[0] * layer.all2all_world_size
             topk_weights = topk_weights.to(x.dtype)
             topk_ids = topk_ids.int()
 
@@ -428,6 +451,13 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 per_token_scales=gathered_pertoken_scale
             )
             group_list = tokens_per_local_expert.to(torch.int64)
+        
+            if model_extra_config.task_config.enable_omni_placement:
+                layer.planner.record_activation(
+                    layer.moe_layer_idx,
+                    group_list,
+                    support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune and (not is_prefill)
+                )
 
             gate_up_proj = torch_npu.npu_grouped_matmul(
                 [hidden_states_sorted_by_experts],
@@ -504,6 +534,12 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
                 indices_type=None
             )
+            if layer.planner is not None:
+                topk_ids = layer.apply_expert_load_balance(tokens=x,
+                                                           topk_ids=topk_ids,
+                                                           token_expert_scores=topk_weights,
+                                                           best_topk_ids=None)
+                global_num_experts = layer.w13_weight.shape[0] * layer.all2all_world_size
             topk_ids = topk_ids.int()
 
             if model_extra_config.operator_opt_config.use_prefetch:
@@ -531,6 +567,13 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 global_bs=0
             )
             group_list = expert_token_nums.to(torch.int64)
+
+            if model_extra_config.task_config.enable_omni_placement:
+                layer.planner.record_activation(
+                    layer.moe_layer_idx,
+                    group_list,
+                    support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune and (not is_prefill)
+                )
 
             gate_up_proj = torch_npu.npu_grouped_matmul(
                 [expand_x],
@@ -730,3 +773,64 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             y = get_ep_group().reduce_scatter(y)
 
         return y
+
+class NpuW8A8DynamicKVCacheMethod(BaseKVCacheMethod):
+    """
+    KV cache method for NPU W8A8 Dynamic.
+    Creates k_scale and v_scale for attention layers when enable_c8 is True.
+    """
+
+    def __init__(self, quant_config: NpuW8A8DynamicConfig):
+        super().__init__(quant_config)
+
+    def create_weights(self, layer: torch.nn.Module, total_num_kv_heads: int, head_size: int):
+        """
+        Create k_scale and v_scale for attention layer.
+        For npu_w8a8_dynamic, we use per_channel quantization strategy.
+        """
+        self.total_num_kv_heads = total_num_kv_heads
+        scale_num = total_num_kv_heads * head_size
+        layer.k_scale = torch.nn.Parameter(
+            torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+            requires_grad=False
+        )
+        layer.v_scale = torch.nn.Parameter(
+            torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+            requires_grad=False
+        )
+    
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Process weights after loading from checkpoint.
+        Handles tensor model parallel slicing of k_scale and v_scale.
+        """
+        from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+        scale_num = layer.k_scale.shape[0]
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        slice_size = scale_num // min(self.total_num_kv_heads, tp_size)
+        num_kv_head_replicas = tp_size // self.total_num_kv_heads if tp_size >= self.total_num_kv_heads else 1
+        local_index = tp_rank // num_kv_head_replicas
+        slice_start = local_index * slice_size
+        slice_end = slice_start + slice_size
+
+        # Per-channel quantization: slice and reshape to (1, -1)
+        layer.k_scale = torch.nn.Parameter(
+            layer.k_scale[slice_start:slice_end].view(1, -1), 
+            requires_grad=False
+        )
+        layer.v_scale = torch.nn.Parameter(
+            layer.v_scale[slice_start:slice_end].view(1, -1),
+            requires_grad=False
+        )
+
+        # Create reciprocal scales for optimization
+        layer.k_scale_reciprocal = torch.nn.Parameter(
+            1 / layer.k_scale.to(torch.float32),
+            requires_grad=False
+        )
+        layer.v_scale_reciprocal = torch.nn.Parameter(
+            1 / layer.v_scale.to(torch.float32),
+            requires_grad=False
+        )
