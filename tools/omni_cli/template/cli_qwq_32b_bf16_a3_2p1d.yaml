@@ -31,7 +31,7 @@ all:
               graph_model_compile_config:
                 level: 1
                 use_ge_graph_cached: true
-              multi_step: true
+              multi_step: 4
               async_pull_kv: true
               combine_block: 8
             base-api-port: $API_PORT

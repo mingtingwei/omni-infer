@@ -577,6 +577,42 @@ class NPUModelRunner(GPUModelRunner):
 
         return attn_metadata, graph_pad_size, sample_indices, positions, spec_decode_metadata
 
+    def advance_step_spec(self,
+            input_tokens, sampled_tokens, spec_tokens, input_positions,
+            seq_lens, slot_mapping, block_table, accepted_num,
+            num_reqs, num_queries, block_size):
+        if spec_tokens is None:
+            token_each_reqs = 1
+        else:
+            token_each_reqs = 1 + len(spec_tokens[0])
+        total_num_scheduled_tokens = token_each_reqs * num_reqs
+        if accepted_num is None:
+            input_positions += 1
+        else:
+            input_positions += torch.repeat_interleave(accepted_num, token_each_reqs) + 1
+        seq_lens.copy_((input_positions + 1).to(seq_lens.dtype))
+        index = torch.argmin(torch.cat([sampled_tokens,
+            torch.full((num_reqs, 1), -1, device=sampled_tokens.device)],
+            dim = 1), dim = 1) - 1
+        last_tokens = sampled_tokens[torch.arange(num_reqs, device='npu'), index]
+        if token_each_reqs == 1:
+            input_tokens[:num_reqs] = last_tokens.to(dtype=input_tokens.dtype)
+        else:
+            input_tokens_2d = input_tokens.view(-1, token_each_reqs)
+            input_tokens_2d[:num_reqs, 0] = last_tokens
+            input_tokens_2d[:num_reqs, 1:] = spec_tokens
+
+        req_indices = torch.repeat_interleave(torch.arange(num_reqs, device='npu'),
+            token_each_reqs, dim=0)
+        max_num_blocks_per_req = block_table.shape[1]
+        block_table_indices = (
+            req_indices * max_num_blocks_per_req +
+            input_positions // block_size
+        )
+        block_numbers = block_table.flatten()[block_table_indices]
+        block_offsets = input_positions % block_size
+        slot_mapping.copy_(block_numbers * block_size + block_offsets)
+
     def _simple_prepare_inputs(
         self,
         attn_metadata,
@@ -612,23 +648,30 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 positions.copy_(backup_positions)
 
-            torch_npu.npu_advance_step_flashattn(
-                input_tokens=self.input_ids[:total_num_scheduled_tokens],
-                sampled_token_ids=cached_token.to(dtype=torch.int64),
-                spec_token=None if cached_spec is None else cached_spec.contiguous().to(dtype=torch.int64),
-                input_positions=positions[:total_num_scheduled_tokens],
-                seq_lens=seq_lens[:total_num_scheduled_tokens],
-                slot_mapping=slot_mapping[:total_num_scheduled_tokens],
-                block_tables=block_table.get_device_tensor()[:num_reqs].to(dtype=torch.int64),
-                accepted_num=accepted_num.to(dtype=torch.int64),
-                num_seqs=num_reqs,
-                num_queries=num_reqs, # for shape checking bug. num_queries has no actual effect
-                block_size=block_size)
+            if accepted_num is None:
+                self.advance_step_spec(self.input_ids[:total_num_scheduled_tokens], cached_token,
+                    cached_spec, positions[:total_num_scheduled_tokens],
+                    seq_lens[:total_num_scheduled_tokens],
+                    slot_mapping[:total_num_scheduled_tokens],
+                    block_table.get_device_tensor(), accepted_num,
+                    num_reqs, num_reqs, block_size)
+            else:
+                torch_npu.npu_advance_step_flashattn(
+                    input_tokens=self.input_ids[:total_num_scheduled_tokens],
+                    sampled_token_ids=cached_token.to(dtype=torch.int64),
+                    spec_token=cached_spec.contiguous().to(dtype=torch.int64),
+                    input_positions=positions[:total_num_scheduled_tokens],
+                    seq_lens=seq_lens[:total_num_scheduled_tokens],
+                    slot_mapping=slot_mapping[:total_num_scheduled_tokens],
+                    block_tables=block_table.get_device_tensor()[:num_reqs].to(dtype=torch.int64),
+                    accepted_num=accepted_num.to(dtype=torch.int64),
+                    num_seqs=num_reqs,
+                    num_queries=num_reqs,
+                    block_size=block_size)
 
             if kv_cache_group_spec.kv_cache_spec.use_mla:
                 attn_metadata_i.slot_mapping[:total_num_scheduled_tokens] = block_table.slot_mapping[:total_num_scheduled_tokens]
-                input_positions = positions[:total_num_scheduled_tokens]
-                attn_metadata_i.decode.input_positions[:total_num_scheduled_tokens] = input_positions
+                attn_metadata_i.decode.input_positions[:total_num_scheduled_tokens] = positions[:total_num_scheduled_tokens]
                 first_layer_ind = self.model.model.start_layer
                 cos, sin = self.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(attn_metadata_i.decode.input_positions)
                 attn_metadata_i.decode.cos = cos
@@ -637,11 +680,13 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata_i.slot_mapping[:total_num_scheduled_tokens] = block_table.slot_mapping[:total_num_scheduled_tokens]
                 attn_metadata_i.slot_indices = torch.stack([attn_metadata_i.slot_mapping // block_size,
                     attn_metadata_i.slot_mapping % block_size], dim=1)
-                input_positions = positions[:total_num_scheduled_tokens]
                 if attn_metadata_i.attn_state == AscendAttentionState.PrefillNoCache:
                     attn_metadata_i.seq_lens_list = attn_metadata_i.seq_lens.tolist()
                 else:
                     attn_metadata_i.seq_lens_list = []
+                cos, sin = self.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+                attn_metadata_i.cos = cos
+                attn_metadata_i.sin = sin
             if kv_cache_group_id == 0:
                 self.full_attn_metadata = attn_metadata_i
 

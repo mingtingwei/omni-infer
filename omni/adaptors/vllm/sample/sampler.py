@@ -214,13 +214,12 @@ class AscendSamplerV1(SamplerV1):
         logits = self.apply_penalties(logits, sampling_metadata, spec_metadata, input_ids)
 
         if not sampling_metadata.all_greedy:
-            use_npu_top_k_top_p_sample = model_extra_config.operator_opt_config.enable_topktoppsample_op
             # Apply temperature.
             logits = self.apply_temperature(logits, sampling_metadata.temperature)
             # Apply min_p.
             if sampling_metadata.min_p is not None:
-                logits_or_prob = self.apply_min_p(logits, sampling_metadata.min_p, return_logits=use_npu_top_k_top_p_sample)
-                is_logits = use_npu_top_k_top_p_sample
+                logits_or_prob = self.apply_min_p(logits, sampling_metadata.min_p, return_logits=True)
+                is_logits = True
             else:
                 logits_or_prob = logits
                 is_logits = True
@@ -228,22 +227,20 @@ class AscendSamplerV1(SamplerV1):
             if do_sample:
                 p = sampling_metadata.top_p
                 k = sampling_metadata.top_k
-                if use_npu_top_k_top_p_sample == False or p is None or k is None:
-                    probs, idx = apply_top_k_top_p(
-                        logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits,
-                    )
-                    return self.do_sample(
-                        probs, idx, sampling_metadata, spec_metadata,
-                    )
-                else:
-                    logits = logits_or_prob.type(torch.bfloat16)
+                logits = logits_or_prob.type(torch.bfloat16)
+                if p:
                     p = p.type(torch.bfloat16)
+                else:
+                    p = torch.ones(logits.shape[0], type=torch.bfloat16, device=logits.device)
+                if k:
                     k = k.type(torch.int32)
-                    q = self.generate_random_sequence(
-                        logits, sampling_metadata, spec_metadata,
-                    )
-                    res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
-                    return res[0]
+                else:
+                    k = torch.zeros((logits.shape[0],), type=torch.int32, device=logits.device)
+                q = self.generate_random_sequence(
+                    logits, sampling_metadata, spec_metadata,
+                ).type(torch.float32)
+                res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
+                return res[0]
             else:
                 return apply_top_k_top_p(
                     logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits

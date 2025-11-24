@@ -787,18 +787,18 @@ class AscendTopKTopPSamplerV1(TopKTopPSampler):
 
         The logits tensor may be updated in-place.
         """
-        use_npu_top_k_top_p_sample = model_extra_config.operator_opt_config.enable_topktoppsample_op
-        if use_npu_top_k_top_p_sample == False or p is None or k is None:
-            logits, idx = apply_top_k_top_p(logits, k, p)
-            probs = logits.softmax(dim=-1, dtype=torch.float32)
-            return random_sample(probs, idx, generators, self.dsa_stream)
-        else:
-            logits = logits.type(torch.bfloat16)
+        logits = logits.type(torch.bfloat16)
+        if p:
             p = p.type(torch.bfloat16)
+        else:
+            p = torch.ones(logits.shape[0], type=torch.bfloat16, device=logits.device)
+        if k:
             k = k.type(torch.int32)
-            q = generate_random_sequence(logits, generators, self.dsa_stream)
-            res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
-            return res[0]
+        else:
+            k = torch.zeros((logits.shape[0],), type=torch.int32, device=logits.device)
+        q = generate_random_sequence(logits, generators, self.dsa_stream).type(torch.float32)
+        res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
+        return res[0]
 
 def _apply_penalties_v1(logits: torch.Tensor, prompt_mask: torch.Tensor,
                     output_mask: torch.Tensor,
