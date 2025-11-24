@@ -93,6 +93,9 @@
       export SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=128
       export ASCEND_CONNECT_TIMEOUT=30000
       export ASCEND_TRANSFER_TIMEOUT=30000
+      export TASK_QUEUE_ENABLE=2
+      export CPU_AFFINITY_CONF=1
+      export OMP_NUM_THREADS=1
 
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
       # export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
@@ -117,14 +120,14 @@
         --mem-fraction-static 0.80 \
         --disaggregation-transfer-backend mooncake \
         --disable-radix-cache \
-        --max-prefill-tokens 43000 \
+        --max-prefill-tokens 21000 \
         --max-total-tokens 43000 \
         --speculative-algorithm MTP \
         --speculative-num-steps 1 \
         --speculative-num-draft-tokens 1 \
         --speculative-eagle-topk 1 \
         --chunked-prefill-size -128 \
-        --max-running-requests 32 > ${LOG_PATH}/run_prefill_sglang.log 2>&1 &
+        --max-running-requests 16 > ${LOG_PATH}/run_prefill_sglang.log 2>&1 &
 
     run_sglang_server_decode_cmd: |
       #!/bin/bash

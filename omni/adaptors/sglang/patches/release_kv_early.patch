@@ -1,5 +1,27 @@
+diff --git a/python/sglang/srt/disaggregation/mooncake/conn.py b/python/sglang/srt/disaggregation/mooncake/conn.py
+index c08805904..8b17d2a22 100644
+--- a/python/sglang/srt/disaggregation/mooncake/conn.py
++++ b/python/sglang/srt/disaggregation/mooncake/conn.py
+@@ -900,6 +900,8 @@ class MooncakeKVManager(BaseKVManager):
+         )
+ 
+     def check_status(self, bootstrap_room: int):
++        if bootstrap_room not in self.request_status:
++            return None
+         return self.request_status[bootstrap_room]
+ 
+     def update_status(self, bootstrap_room: int, status: KVPoll):
+@@ -1384,6 +1386,8 @@ class MooncakeKVReceiver(BaseKVReceiver):
+     def poll(self) -> KVPoll:
+         if self.conclude_state is None:
+             status = self.kv_mgr.check_status(self.bootstrap_room)
++            if status is None:
++                return None
+             if status in (KVPoll.Success, KVPoll.Failed):
+                 self.conclude_state = status
+             elif status == KVPoll.WaitingForInput:
 diff --git a/python/sglang/srt/disaggregation/prefill.py b/python/sglang/srt/disaggregation/prefill.py
-index 92483ef5d..8a5402ff8 100644
+index 92483ef5d..9c9b4a4ee 100644
 --- a/python/sglang/srt/disaggregation/prefill.py
 +++ b/python/sglang/srt/disaggregation/prefill.py
 @@ -26,6 +26,7 @@ from http import HTTPStatus
@@ -25,6 +47,16 @@ index 92483ef5d..8a5402ff8 100644
              if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                  self.self_check_during_idle()
  
+@@ -504,7 +513,8 @@ class SchedulerDisaggregationPrefillMixin:
+         undone_reqs: List[Req] = []
+         # Check .poll() for the reqs in disagg_prefill_inflight_queue. If Success, respond to the client and remove it from the queue
+         for req, poll in zip(self.disagg_prefill_inflight_queue, polls):
+-
++            if poll is None:
++                continue
+             if rids_to_check is not None:
+                 if req.rid not in rids_to_check:
+                     undone_reqs.append(req)
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
 index 7eba576c5..652ab82ee 100644
 --- a/python/sglang/srt/server_args.py
@@ -64,4 +96,4 @@ index 7eba576c5..652ab82ee 100644
  
      @classmethod
      def from_cli_args(cls, args: argparse.Namespace):
-
+     

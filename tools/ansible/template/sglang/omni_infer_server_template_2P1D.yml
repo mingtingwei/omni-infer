@@ -26,7 +26,6 @@
     MODEL_PATH: "/data/models/DeepSeek-R1-w8a8-fusion"
     LOG_PATH_IN_EXECUTOR: "/data/log_path_in_executor"
     CODE_PATH: "/data/local_code_path"
-    NAMELIST: "/noninvasive_path"
 
     # Configuration for containers 
     DOCKER_IMAGE_ID: "REPOSITORY:TAG"
@@ -39,12 +38,11 @@
   vars:
     TRACE_PATH: "/data/trace_path"
     TRACE_SYNC_PATH: "/data/trace_sync_path"
-    
+
     docker_run_cmd: |
       docker run -it --shm-size=500g \
         -e CODE_PATH=$CODE_PATH \
         -e LOG_PATH=$LOG_PATH \
-        -e NAMELIST=$NAMELIST \
         -e TRACE_PATH=$TRACE_PATH \
         --net=host \
         --privileged=true \
@@ -83,15 +81,21 @@
       #!/bin/bash
 
       . ~/.bashrc
-
-      export PROFILING_NAMELIST=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/${NAMELIST}
-      export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
       export GLOO_SOCKET_IFNAME={{ansible_env.GLOO_SOCKET_IFNAME}}
+      export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
       export ROLE=prefill
+      export SGLANG_DISAGGREGATION_THREAD_POOL_SIZE=6
+      export SGLANG_DISAGGREGATION_QUEUE_SIZE=2
+      export SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION=128
+      export ASCEND_CONNECT_TIMEOUT=30000
+      export ASCEND_TRANSFER_TIMEOUT=30000
+      export TASK_QUEUE_ENABLE=2
+      export CPU_AFFINITY_CONF=1
+      export OMP_NUM_THREADS=1
 
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
       # export OMNILOGGER_ARGS="$TRACE_PATH,P{{ kv_rank }},01"
@@ -113,32 +117,32 @@
         --port $API_PORT \
         --trust-remote-code \
         --tp-size 16 \
-        --mem-fraction-static 0.90 \
+        --mem-fraction-static 0.80 \
         --disaggregation-transfer-backend mooncake \
         --disable-radix-cache \
-        --max-prefill-tokens 30000 \
-        --max-total-tokens 30000 \
+        --max-prefill-tokens 21000 \
+        --max-total-tokens 43000 \
         --speculative-algorithm MTP \
         --speculative-num-steps 1 \
         --speculative-num-draft-tokens 1 \
         --speculative-eagle-topk 1 \
         --chunked-prefill-size -128 \
-        --max-running-requests 32 > ${LOG_PATH}/run_prefill_sglang.log 2>&1 &
+        --max-running-requests 16 > ${LOG_PATH}/run_prefill_sglang.log 2>&1 &
 
     run_sglang_server_decode_cmd: |
       #!/bin/bash
 
       . ~/.bashrc
 
-      export PROFILING_NAMELIST=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/${NAMELIST}
-      export OMNILOGGER_ARGS="$TRACE_PATH,D{{ node_rank }},01"
-
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
-      export HCCL_BUFFSIZE=550
+      export HCCL_BUFFSIZE=700
       export GLOO_SOCKET_IFNAME={{ansible_env.GLOO_SOCKET_IFNAME}}
       # export PYTHONPATH=${CODE_PATH}/omniinfer/infer_engines/sglang/python:${CODE_PATH}/omniinfer:$PYTHONPATH
+      export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+      export ASCEND_CONNECT_TIMEOUT=30000
+      export ASCEND_TRANSFER_TIMEOUT=30000
       export ROLE=decode
 
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
@@ -185,7 +189,7 @@
         --ep-size ${dp} \
         --pp-size 1 \
         --enable-multi-api-server \
-        --max-running-requests 2048 > ${LOG_PATH}/run_decode_sglang.log 2>&1 &
+        --max-running-requests 1024 > ${LOG_PATH}/run_decode_sglang.log 2>&1 &
 
     run_proxy_cmd: |
       #!/bin/bash
@@ -862,19 +866,17 @@
       tags: 
         - fetch_log
 
-    - name: 删除宿主机上的历史 trace 文件
-      command: bash -c "rm -rf {{ TRACE_PATH }}/trace/*"
-      tags:
-        - rm_trace
+    # - name: Delete the historical trace files on the server.
+    #   command: bash -c "rm -rf {{ TRACE_PATH }}/trace/*"
+    #   tags:
+    #     - rm_trace
 
-
-    - name: 同步远程 trace 日志到本地日期目录
-      synchronize:
-        src: "{{ TRACE_PATH }}/trace/"
-        dest: "{{ TRACE_SYNC_PATH }}/sync"
-        mode: pull  # 从远程拉取到本地
-        rsync_opts:
-          - "--archive"  # 保留权限、时间戳等
-          - "--compress" # 压缩传输
-            #- "--mkpath"
-      tags: collect_trace
+    # - name: Sync the remote trace logs to the local directory.
+    #   synchronize:
+    #     src: "{{ TRACE_PATH }}/trace/"
+    #     dest: "{{ TRACE_SYNC_PATH }}/sync"
+    #     mode: pull
+    #     rsync_opts:
+    #       - "--archive"
+    #       - "--compress"
+    #   tags: collect_trace
