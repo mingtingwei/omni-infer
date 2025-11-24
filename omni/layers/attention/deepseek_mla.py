@@ -3,7 +3,7 @@
 import os
 import time
 import math
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from typing import Any, Optional, Tuple, Dict
 import torch
 from torch import nn
@@ -292,6 +292,18 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
 
+@contextmanager
+def switch_a2_platform():
+    should_use_a3_attn = not model_extra_config.operator_opt_config.prefill_moe_all_to_all and model_extra_config.operator_opt_config.enable_dsa
+    if model_extra_config.task_config.hardware_platform.startswith("A2") and should_use_a3_attn:
+        import os
+        os.environ["ASCEND_PLATFORM"] = "A3"
+        try:
+            yield
+        finally:
+            os.environ["ASCEND_PLATFORM"] = "A2"
+    else:
+        yield
 
 class DeepseekMLA(nn.Module):
 
@@ -629,7 +641,11 @@ class DeepseekMLA(nn.Module):
                 torch.reciprocal(self.kv_scale).repeat(self.kv_lora_rank).view(1, -1), requires_grad=False)
         if attn_metadata is None or attn_metadata.prefill is not None:
             if os.getenv("ASCEND_PLATFORM", "A3")=="A2" and os.getenv('ROLE', None)=='prefill':
-                output = self._forward_prefill_a2(positions, hidden_states, kv_cache, attn_metadata)
+                if model_extra_config.operator_opt_config.enable_dsa:
+                    with switch_a2_platform():
+                        output = self._forward_prefill_absorb(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)
+                else:
+                    output = self._forward_prefill_a2(positions, hidden_states, kv_cache, attn_metadata)
             else:
                 if model_extra_config.operator_opt_config.enable_dsa:
                     output = self._forward_prefill_absorb(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)

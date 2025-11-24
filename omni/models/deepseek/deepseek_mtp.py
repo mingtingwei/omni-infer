@@ -32,7 +32,8 @@ from omni.adaptors.vllm.distributed import get_eh_proj_tp_group
 from omni.layers.moe.fused_moe.fused_moe import set_num_speculative_tokens
 from omni.models.config_loader.loader import model_extra_config
 
-if os.getenv("ASCEND_PLATFORM", "A3")=="A2" and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
+should_use_a2_layer = not model_extra_config.operator_opt_config.prefill_moe_all_to_all and not model_extra_config.operator_opt_config.enable_dsa
+if os.getenv("ASCEND_PLATFORM", "A3")=="A2" and should_use_a2_layer:
     from .deepseek_v3_a2 import DeepseekDecoderLayer
 else:
     from .deepseek_v3 import DeepseekDecoderLayer, generate_sp_inputs

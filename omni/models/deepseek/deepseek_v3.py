@@ -877,7 +877,8 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
         return self.model.get_input_embeddings(input_ids)
 
     def get_model(self):
-        if model_extra_config.task_config.hardware_platform.startswith("A2") and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
+        should_use_a2_model = not model_extra_config.operator_opt_config.prefill_moe_all_to_all and not model_extra_config.operator_opt_config.enable_dsa
+        if model_extra_config.task_config.hardware_platform.startswith("A2") and should_use_a2_model:
             from omni.models.deepseek.deepseek_v3_a2 import DeepseekV3Model as DeepseekV3Model_A2
             return DeepseekV3Model_A2(vllm_config=self.vllm_config, prefix="model")
         else:
