@@ -54,7 +54,7 @@ all:
               max-num-seqs: 92
               no-enable-prefix-caching: ''
               preemption-mode: swap
-            gpu-util: '0.965'
+            gpu-util: '0.92'
             kv-transfer-config:
               engine_id: 2
               kv_buffer_device: npu
@@ -189,7 +189,7 @@ all:
               max-num-seqs: 92
               no-enable-prefix-caching: ''
               preemption-mode: swap
-            gpu-util: '0.965'
+            gpu-util: '0.92'
             kv-transfer-config:
               engine_id: 2
               kv_buffer_device: npu
@@ -324,7 +324,7 @@ all:
               max-num-seqs: 92
               no-enable-prefix-caching: ''
               preemption-mode: swap
-            gpu-util: '0.965'
+            gpu-util: '0.92'
             kv-transfer-config:
               engine_id: 2
               kv_buffer_device: npu
@@ -459,7 +459,7 @@ all:
               max-num-seqs: 92
               no-enable-prefix-caching: ''
               preemption-mode: swap
-            gpu-util: '0.965'
+            gpu-util: '0.92'
             kv-transfer-config:
               engine_id: 2
               kv_buffer_device: npu
