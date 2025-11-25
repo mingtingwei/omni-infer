@@ -59,7 +59,7 @@ class LongcatFlashDecoderLayer(nn.Module):
         self.quant_symbol = False
         self.use_super_kernel = model_extra_config.operator_opt_config.use_super_kernel
         self.use_mla_prolog = model_extra_config.operator_opt_config.use_mlaprolog
-
+        self.enable_multi_stream = model_extra_config.operator_opt_config.enable_scmoe_multi_stream
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         self.self_attn = nn.ModuleList(
@@ -115,6 +115,71 @@ class LongcatFlashDecoderLayer(nn.Module):
             prefix=add_prefix("mlp", prefix),
         )
 
+    def forward_multi_stream(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        zero_allocator: BumpAllocator,
+        **kwargs,
+    ) -> torch.Tensor:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm[0](hidden_states)
+        else:
+            # Adapt: adapt for w8a8 dynamic, do quant
+            # Combines residual add and rmsnorm
+            hidden_states, residual = self.input_layernorm[0](
+                hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog)
+            # Adapt end.
+        hidden_states = self.self_attn[0](
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+            zero_allocator=zero_allocator,
+        )
+        hidden_states_norm, residual = self.post_attention_layernorm[0](hidden_states, residual)
+    
+        with ConditionalTNGScope(multi_stream=True, stream_id="longcat_scmoe", core_num="8|16"):
+            moe_hidden_states = self.mlp(hidden_states_norm, forward_batch)
+
+        with tng.scope.limit_core_num(16, 32):
+            hidden_states = self.mlps[0](hidden_states_norm, forward_batch)
+
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm[1](hidden_states)
+            else:
+                # Adapt: adapt for w8a8 dynamic, do quant
+                # Combines residual add and rmsnorm
+                hidden_states, residual = self.input_layernorm[1](
+                    hidden_states, residual, quant_symbol=self.quant_symbol and not self.use_mla_prolog)
+
+            hidden_states = self.self_attn[1](
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
+                zero_allocator=zero_allocator,
+            )
+
+            hidden_states, residual = self.post_attention_layernorm[1](hidden_states, residual)
+
+            hidden_states = self.mlps[1](hidden_states, forward_batch)
+            
+            try:
+                tng.scope.npu_wait_tensor(hidden_states, moe_hidden_states)
+            except:
+                pass
+
+            if isinstance(moe_hidden_states, (tuple, list)):
+                assert len(moe_hidden_states) == 2
+                # 0 is the shared expert hidden_states, 1 is the routing expert hidden_states, add operation cannot be placed in the super kernel
+                moe_hidden_states = moe_hidden_states[0] + moe_hidden_states[1]
+            hidden_states = moe_hidden_states + hidden_states
+
+        return hidden_states, residual
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -124,6 +189,12 @@ class LongcatFlashDecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
         **kwargs,
     ) -> torch.Tensor:
+        is_prefill = forward_batch.is_extend_in_batch
+        if self.enable_multi_stream and not is_prefill:
+            return self.forward_multi_stream(
+                positions, hidden_states, forward_batch, residual, zero_allocator, **kwargs
+            )
+
         # Self Attention
         if residual is None:
             residual = hidden_states

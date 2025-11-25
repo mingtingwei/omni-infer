@@ -20,6 +20,7 @@
         "expert_gate_up_prefetch": 0,
         "expert_down_prefetch": 0,
         "attn_prefetch": 0,
+        "enable_scmoe_multi_stream": true,
         "ascend_operator_fusion_pass_set": "InplaceAddRmsNormFusionPass:off"
     }
 }
