@@ -190,6 +190,7 @@ class PanguEmbeddedAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         x_transform: Optional[str] = None,
+        reduce_type: Optional[str] = "AR",
         next_layer: List[torch.nn.Module] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states, x_transform=x_transform)
@@ -199,7 +200,7 @@ class PanguEmbeddedAttention(nn.Module):
         else:
             q, k = self.rotary_emb(positions, q, k, cos, sin)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output, reduce_type="RS", next_layer=next_layer)
+        output, _ = self.o_proj(attn_output, reduce_type=reduce_type, next_layer=next_layer)
         return output
 
     def _init_rotary_emb(self, config: PretrainedConfig,
@@ -259,6 +260,15 @@ class PanguEmbeddedDecoderLayer(nn.Module):
             attn_type = AttentionType.DECODER
         else:
             attn_type = AttentionType.ENCODER_ONLY
+        
+        tp_size = get_tensor_model_parallel_world_size()
+        self.enable_flashcomm = True
+
+        decode_gear_list = model_extra_config.task_config.decode_gear_list
+        for gear in decode_gear_list:
+            if gear < tp_size:
+                self.enable_flashcomm = False
+                break
 
         self.self_attn = PanguEmbeddedAttention(
             config=config,
@@ -298,6 +308,20 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         sin: torch.Tensor,
         next_layer: torch.nn.Module = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.enable_flashcomm:
+            return self.forward_flashcomm(positions, hidden_states, residual, cos, sin, next_layer)
+        else:
+            return self.forward_norm(positions, hidden_states, residual, cos, sin)
+    
+    def forward_flashcomm(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        next_layer: torch.nn.Module = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
             is_prefill = True
@@ -327,12 +351,46 @@ class PanguEmbeddedDecoderLayer(nn.Module):
                 torch_npu.npu_prefetch(layer.weight, hidden_states, attn_prefetch_size)
 
         hidden_states = self.self_attn(positions=positions,
-                                    hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, next_layer=mlp_layer)
+                                    hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, reduce_type="RS", next_layer=mlp_layer)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states, x_transform="AG", reduce_type="RS", is_prefill=is_prefill)
+        return hidden_states, residual
+
+    def forward_norm(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
+            is_prefill = True
+        else:
+            is_prefill = False    
+        if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
+            mlp_layer = [self.mlp.gate_up_proj, self.mlp.down_proj]
+        else:
+            mlp_layer = None
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        
+        hidden_states = self.self_attn(positions=positions,
+                                    hidden_states=hidden_states, cos=cos, sin=sin, next_layer=mlp_layer)
+
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        hidden_states = self.mlp(hidden_states, is_prefill=is_prefill)
         return hidden_states, residual
 
 
