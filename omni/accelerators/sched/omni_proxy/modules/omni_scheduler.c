@@ -534,8 +534,7 @@ static void update_prefill_weights(omni_req_group_t *group)
             max_prompt_tokens = req->metrics.prompt_num_tokens;
         }
 
-        ngx_msec_t waited = ngx_current_msec - req->metrics.time_received;
-
+        ngx_msec_t waited = ngx_current_msec - TIMEVAL_TO_MSEC(req->metrics.time_received);
         if (max_wait_time < waited)
         {
             max_wait_time = waited;
@@ -555,8 +554,8 @@ static void update_prefill_weights(omni_req_group_t *group)
             continue;
         }
         omni_req_t *req = omni_info_to_req(info);
-        ngx_msec_t waited = ngx_current_msec - req->metrics.time_received;
 
+        ngx_msec_t waited = ngx_current_msec - TIMEVAL_TO_MSEC(req->metrics.time_received);
         double token_weight = (double)(max_prompt_tokens - req->metrics.prompt_num_tokens) / max_prompt_tokens;
         double time_weight = (double)waited / max_wait_time;
 
@@ -658,7 +657,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
                 ngx_msec_t delta_ms = algo_estimated_time - now_ms;
 
                 struct timeval est_tv;
-                gettimeofday(&est_tv, NULL);
+                omni_get_current_time(&est_tv);
                 est_tv.tv_sec += delta_ms / 1000;
                 est_tv.tv_usec += (delta_ms % 1000) * 1000;
                 if (est_tv.tv_usec >= 1000000)
@@ -776,10 +775,9 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
 
         omni_global_phase_change_to(req, PHASE_PREFILL_WAITING_SCHEDULE, PHASE_PREFILL_SCHEDULED);
         req->has_prefill_sched = true;
-
-        req->metrics.time_prefill_scheduled = ngx_current_msec;
         struct timeval tv;
-        gettimeofday(&tv, NULL);
+        omni_get_current_time(&tv);
+        req->metrics.time_prefill_scheduled = tv;
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                             "<<<Action: Enter state P scheduled; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 
@@ -874,9 +872,10 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
         omni_global_phase_change_to(req, PHASE_DECODE_WAITING_SCHEDULE, PHASE_DECODE_SCHEDULED);
         req->has_decode_sched = true;
 
-        req->metrics.time_decode_scheduled = ngx_current_msec;
         struct timeval tv;
-        gettimeofday(&tv, NULL);
+        omni_get_current_time(&tv);
+        req->metrics.time_decode_scheduled = tv;
+
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                             "<<<Action: Enter state D scheduled; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 
