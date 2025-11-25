@@ -489,13 +489,6 @@ class DeepseekV3Model(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         attn_metadata_first = self.get_layer_attn_metadata(attn_metadata, self.start_layer_key)
 
-        if model_extra_config.operator_opt_config.use_omni_cache:
-            if attn_metadata_first is not None and attn_metadata_first.prefill is not None:
-                attn_metadata_first.omni_cache.synchronize_h2d(
-                    prefix_meta=attn_metadata_first.prefill.prefix_meta,
-                    layer_idx=self.start_layer,
-                )
-
         if model_extra_config.operator_opt_config.enable_prefill_micro_batch and \
             attn_metadata is not None and attn_metadata_first is not None \
             and attn_metadata_first.prefill is not None and \

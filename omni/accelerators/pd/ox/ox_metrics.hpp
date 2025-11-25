@@ -11,6 +11,17 @@ inline void global_stats_update(size_t n)
     g_total_bytes_received += n;
 }
 
+int g_running = 0;
+int g_total = 0;
+
+inline void global_stats_update_running(int n)
+{
+    if(n > 0){
+        g_total += n;
+    }
+    g_running += n;
+}
+
 awaitable<void> print_statistics()
 {
     while (true)
@@ -27,6 +38,7 @@ awaitable<void> print_statistics()
             std::lock_guard<std::mutex> lock(g_output_mutex);
             std::cout << "\nGlobal bandwidth: " << global_bandwidth_mbps
                       << " MB | Total data: " << g_total_bytes_received / (1024 * 1024) << " MB"
+                      << " Running: " << g_running << " Total: " << g_total
                       << std::flush;
         }
     }

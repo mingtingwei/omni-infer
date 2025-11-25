@@ -92,7 +92,6 @@ class ModelOperatorOptConfig:
     shared_experts_to_gmm: bool = False # 当redundancy_shared_expert_num > 0时，共享专家使用GMM代替BMM进行计算（限定收益场景：EP288 + 单die bs >= 48，仅针对Decode阶段）
     enable_gmm_swiglu_quant: bool = False # 当redundancy_shared_expert_num > 0时，使用npu_grouped_matmul_swiglu_quant_v2融合算子
     mtp_remove_redundant_kv: bool = False # MTP场景下，去除FIA算子对同一请求的冗余KV cache搬运，当前不支持与Omni Attention同时使用
-
     use_prefetch: bool = True # 是否开启预取
     expert_gate_up_prefetch: int = 50 # 默认预取大小为 50Mb；如果是权重是BF16型，设置为 30Mb
     expert_down_prefetch: int = 28 # 当权重是w8a8且ep_size > 64 时，默认预取大小为 28Mb，否则为0
@@ -109,6 +108,7 @@ class ModelOperatorOptConfig:
     prefill_enable_mla_alltoall_local: bool = False
     fa_quant: bool = False
     use_omni_cache: bool = False
+    tp_nnodes: int = 1
     c8_calib_path: str = None # 计算faquant的scale采集的kv_cache的calib地址，在test_config_prefill.json赋值
     experts_pruning: bool = False
     use_tnd_pa: bool = False  # 稠密模型使用新CANN包FIA算子，以TND+PA格式计算attention
@@ -349,6 +349,10 @@ def _init_model_extra_config(task_config):
             operator_opt_config = ModelOperatorOptConfig(**filter_dict_by_dataclass(ModelOperatorOptConfig, config_data['operator_optimization_config']))
         except KeyError:
             operator_opt_config = ModelOperatorOptConfig(**filter_dict_by_dataclass(ModelOperatorOptConfig, config_data['operator_optimizition_config']))
+
+        setattr(operator_opt_config, 'use_omni_cache', getattr(operator_opt_config, 'use_omni_cache', False))
+        setattr(operator_opt_config, 'use_omni_cache', os.getenv("ENABLE_OMNI_CACHE") == "1")
+        setattr(operator_opt_config, 'tp_nnodes', int(os.environ.get("OMNI_CACHE_TP_NNODES", "1")))
 
         setattr(model_extra_config, 'task_config', task_config)
         setattr(model_extra_config, 'parall_config', parall_config)

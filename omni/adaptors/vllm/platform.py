@@ -144,23 +144,22 @@ def apply_kv_cache_patch():
     import vllm.v1.core.kv_cache_utils as kv_cache_utils
     from vllm.v1.core.kv_cache_utils import BlockHashType
     logger.info("apply_kv_cache_hash_patch")
-    NONE_HASH = kv_cache_utils.NONE_HASH               
+    NONE_HASH = kv_cache_utils.NONE_HASH
     def patched(hash_function,
                     parent_block_hash,
                     curr_block_token_ids,
                     extra_keys):
         if not parent_block_hash:
-                parent_block_hash = NONE_HASH             
+                parent_block_hash = NONE_HASH
         curr_block_token_ids_tuple = tuple(curr_block_token_ids)
         h = hash_function((parent_block_hash, curr_block_token_ids_tuple, 0))
         return BlockHashType(
-                h,                                                      
+                h,
                 curr_block_token_ids_tuple,
                 extra_keys
         )
     kv_cache_utils.hash_block_tokens = patched
     patched.is_patched = True
-
 
 def register() -> str:
     """Register the NPU platform for vLLM.
@@ -228,12 +227,9 @@ class ConfigUpdater:
         cls._update_parallel_config(vllm_config)
         cls._update_cache_config(vllm_config)
         cls._enable_custom_ops(vllm_config)
-        
+
         cls._update_scheduler_config(vllm_config)
-        if os.getenv("ENABLE_OMNI_CACHE", "0") == "1":
-            cls._may_enable_omni_cache(vllm_config)
-        else:
-            cls._may_enable_omni_attn(vllm_config)
+        cls._may_enable_omni_attn(vllm_config)
 
     @staticmethod
     def _handle_graph_mode(vllm_config: 'VllmConfig') -> None:
@@ -279,31 +275,35 @@ class ConfigUpdater:
 
     @staticmethod
     def _may_enable_omni_attn(vllm_config: 'VllmConfig') -> None:
-        if vllm_config.additional_config is None or "enable_omni_attn" not in vllm_config.additional_config:
-            return
         from omni.accelerators.cache import apply_omni_attn_patch, check_omni_attn_cmd_arg
         enable_omni_attn = check_omni_attn_cmd_arg(vllm_config.additional_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         is_kv_consumer = kv_transfer_config is None or kv_transfer_config.kv_role == 'kv_consumer'
         omni_attn_config = vllm_config.additional_config.get("omni_attn_config", None)
-        apply_omni_attn_patch(enable=enable_omni_attn, is_kv_consumer=is_kv_consumer, config=omni_attn_config)
-    
+        enable_omni_cache = os.getenv("ENABLE_OMNI_CACHE", "0") == "1"
+        apply_omni_attn_patch(
+            enable_attn=enable_omni_attn,
+            enable_cache=enable_omni_cache,
+            is_kv_consumer=is_kv_consumer,
+            config=omni_attn_config,
+        )
+
     @staticmethod
     def _may_enable_omni_cache(vllm_config: 'VllmConfig') -> None:
         from omni.models.config_loader.loader import model_extra_config
         enable_omni_cache = model_extra_config.operator_opt_config.use_omni_cache
         if not enable_omni_cache:
             return
-        
+
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is None:
             logger.warning(f"Omni cache will not be enabled in PD mixed deployment.")
             return
-        
+
         from omni.accelerators.cache import apply_omni_cache_patch
         is_kv_consumer = kv_transfer_config.kv_role == "kv_consumer"
         apply_omni_cache_patch(enable=enable_omni_cache, is_kv_consumer=is_kv_consumer)
-    
+
     @staticmethod
     def _update_scheduler_config(vllm_config: 'VllmConfig') -> None:
         scheduler_config = vllm_config.scheduler_config
@@ -461,7 +461,7 @@ class NPUPlatform(Platform):
 
         Args:
             vllm_config: The vLLM configuration to update.
-        """            
+        """
         ConfigUpdater.update_vllm_config(vllm_config)
 
         if (vllm_config.kv_transfer_config and vllm_config.kv_transfer_config.kv_connector and

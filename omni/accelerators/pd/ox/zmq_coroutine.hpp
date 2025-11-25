@@ -43,7 +43,6 @@ public:
         while (true)
         {
             bool more = true;
-            bool received_any = false;
 
             while (more)
             {
@@ -54,28 +53,18 @@ public:
                 {
                     messages.push_back(std::move(message));
                     more = socket.get(zmq::sockopt::rcvmore);
-                    received_any = true;
                 }
                 else
                 {
                     if (errno == EAGAIN)
                     {
-                        if (!received_any)
-                        {
-                            co_await wait_for_read();
-                            break;
-                        }
-                        else
-                        {
-                            co_await wait_for_read();
-                            continue;
-                        }
+                        co_await wait_for_read();
                     }
-                    co_return std::nullopt;
+                    // co_return std::nullopt;
                 }
             }
 
-            if (received_any && !more)
+            if (!more)
             {
                 co_return messages;
             }
@@ -98,7 +87,8 @@ public:
                 }
                 else if (errno == EAGAIN)
                 {
-                    co_await wait_for_write();
+                    // co_await wait_for_write();
+                    co_await asio::post(asio::use_awaitable);
                 }
                 else
                 {
@@ -124,40 +114,48 @@ private:
 
     awaitable<void> wait_for_read()
     {
-        while (!read_ready)
-        {
-            co_await zmq_read_event.async_wait(
-                asio::posix::stream_descriptor::wait_read,
-                asio::use_awaitable);
-
+        while(true){
             int events = socket.get(zmq::sockopt::events);
-
             if (events & ZMQ_POLLIN)
             {
-                read_ready = true;
+                // std::cout << "wait_for_read: immediate ready" << std::endl;
+                co_return;
             }
-
-            if (events & ZMQ_POLLOUT)
-            {
-                write_ready = true;
+            else{
+                // Fast loop
+                co_await asio::post(asio::use_awaitable);
+                // Use a timer for the time being, need a better fix
+                // asio::steady_timer timer(co_await asio::this_coro::executor);
+                // timer.expires_after(std::chrono::milliseconds(1));
+                // co_await timer.async_wait(use_awaitable);
             }
         }
-        read_ready = false;
-    }
 
-    awaitable<void> wait_for_write()
-    {
-        while (!write_ready)
-        {
-            co_await asio::post(asio::use_awaitable);
-        }
-        write_ready = false;
+        // int events = socket.get(zmq::sockopt::events);
+        // if (events & ZMQ_POLLIN)
+        // {
+        //     std::cout << "wait_for_read: immediate ready" << std::endl;
+        //     co_return;
+        // }
+        
+        // std::cout << "wait_for_read: waiting..." << std::endl;
+        // This not work because ZMQ is edge triggered
+        // co_await zmq_read_event.async_wait(
+        //     asio::posix::stream_descriptor::wait_read,
+        //     asio::use_awaitable);
+
+        // events = socket.get(zmq::sockopt::events);
+        // if (!(events & ZMQ_POLLIN))
+        // {
+        //     std::cout << "wait_for_read: spurious wakeup, waiting again" << std::endl;
+        //     co_await wait_for_read(); 
+        // }
+        
+        // std::cout << "wait_for_read: done" << std::endl;
     }
 
     zmq::context_t context;
     zmq::socket_t socket;
     int zmq_fd;
     asio::posix::stream_descriptor zmq_read_event;
-    bool read_ready = false;
-    bool write_ready = false;
 };

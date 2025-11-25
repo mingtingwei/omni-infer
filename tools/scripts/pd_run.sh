@@ -387,7 +387,7 @@ export AUTO_USE_UC_MEMORY=1
 export TASK_QUEUE_ENABLE=2
 
 # enable to overwrite request IDs
-export ENABLE_OVERWRITE_REQ_IDS=1
+export ENABLE_OVERWRITE_REQ_IDS=0
 
 if [[ "$VLLM_PP_LAYER_PARTITION" != "null" ]] && [ "$PP" -gt 1 ]; then
     export VLLM_PP_LAYER_PARTITION
@@ -455,6 +455,11 @@ echo "PRINT_SCREEN: $PRINT_SCREEN"
 echo "=================="
 
 # Execute Python script
+
+if [ "${ENABLE_OMNI_CACHE}" = "1" ]; then
+    echo "Setting up hugetlbfs for omni_cache..."
+    bash setup_hugetlbfs_2MB.sh
+fi
 
 common_operations() {
   local mtp_args=""

@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 import math
-from typing import TYPE_CHECKING, Any, Optional, List, Type, TypeVar, Dict
+from typing import TYPE_CHECKING, Any, Optional, List, Type, TypeVar, Dict, Tuple
 import itertools
 import numpy as np
 import torch
@@ -37,6 +37,8 @@ from omni.layers.attention.backend.attention_dummy_builder import DummyAttention
 from omni.accelerators.cache import OmniAttentionSpec, compute_omni_attn_metadata
 from omni.accelerators.cache.omni_cache import BaseOmniCache, PrefixCopyMeta
 from omni.adaptors.vllm.utils import get_attr_by_names
+from vllm.logger import logger
+import os, time, numpy as np, torch
 
 def group_request_list(seq_lens, query_lens, block_tables, threshold):
     s_lens_result = []
@@ -92,7 +94,13 @@ class AscendMLABackend(AttentionBackend):
         return AscendMLAImpl
 
     @staticmethod
-    def init_kv_cache_each_layer(kv_cache_shape, dtype, device, model_config: "ModelConfig", enable_graph_mode) -> tuple[torch.Tensor, ...]:
+    def init_kv_cache_each_layer(
+                            kv_cache_shape,
+                            dtype,
+                            device,
+                            model_config: "ModelConfig",
+                            enable_graph_mode,
+                            is_prefill: bool = True) -> tuple[torch.Tensor, ...]:
         # KVCache needs to store the shape of the reduced dimension as [num_blocks, block_size, 1, kv_lora_rank] [num_blocks, block_size, 1, rope_dim]
         # The shape of the augmented dimension is [num_blocks, block_size, head_num, head_dim]
         kv_lora_dim_names = ['attention_kv_lora_dim', 'kv_lora_rank']
@@ -115,7 +123,6 @@ class AscendMLABackend(AttentionBackend):
             # force tensor format to ND
             layer_kv_cache_nope = torch_npu.npu_format_cast(layer_kv_cache_nope, 2)
             layer_kv_cache_pe = torch_npu.npu_format_cast(layer_kv_cache_pe, 2)
-
         if model_extra_config.operator_opt_config.enable_dsa:
             layer_indexer_k_nope = torch.zeros(
                             kv_cache_shape[:-2] +
@@ -129,6 +136,9 @@ class AscendMLABackend(AttentionBackend):
                             dtype=torch.float16,
                             pin_memory=True,
                             device=device)
+            # if use omni_cache, only keep k_indexer in decoder side
+            if model_extra_config.operator_opt_config.use_omni_cache and not is_prefill:
+                return (layer_indexer_k_nope, layer_indexer_k_nope_scale)
             return (layer_kv_cache_nope, layer_kv_cache_pe, layer_indexer_k_nope, layer_indexer_k_nope_scale)
         else:
             return (layer_kv_cache_nope, layer_kv_cache_pe)
@@ -188,7 +198,6 @@ class AscendMLADecodeMetadata:
     cos: Optional[torch.Tensor] = None
     sin: Optional[torch.Tensor] = None
     best_topk: Optional[torch.Tensor] = None
-
 
 @dataclass
 class AscendMLAMetadata:
@@ -434,7 +443,6 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             zigzag_index.extend([batch_id * cp_piece_num + sp_rank,
                 (batch_id + 1) * cp_piece_num - sp_rank - 1])
         zigzag_index = zigzag_index[::2] + zigzag_index[1::2]
-
         # get zigzag reverse index
         cp_reverse_index = []
         for batch_id in range(bsz):
@@ -552,33 +560,10 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 seq_qlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_qlen_group]
                 seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
                 tmp_input_position = input_positions[tokens_start:]
-                first_layer_ind = self.runner.model.model.start_layer
-                if not model_extra_config.operator_opt_config.enable_dsa:
-                    query_lens = query_lens_list[reqs_start:]
-                    seq_lens = seq_lens_list
-                else:
-                    actual_query_lens = torch.tensor(query_lens_list[reqs_start:], dtype=torch.int64).npu()
-                    if model_extra_config.parall_config.attn_sp_size == 1:
-                        query_lens = torch.cumsum(actual_query_lens, dim=0)
-                    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int64).npu()
-                if model_extra_config.parall_config.attn_sp_size > 1:
-                    sp_split_list, sp_zigzag_index, sp_reverse_index, sp_reverse_split_list, positions, seq_lens, computed_seq_lens, cos, sin, slot_mapping, query_lens  = \
-                        self.prepare_sp_inputs(positions=input_positions[tokens_start:],
-                                            query_lens_list=query_lens_list[reqs_start:],
-                                            seq_lens_list=seq_lens_list,
-                                            slot_mapping=slot_mapping,
-                                            query_lens=actual_query_lens,
-                                            )
-                    # 在sp场景下，只有切分后长度的位置信息
-                    cos_q, sin_q = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(positions)
-                else:
-                    if isinstance(self.runner.model.model.layers[first_layer_ind].self_attn, torch.nn.ModuleList):
-                        cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn[0].rotary_emb.get_cos_sin(tmp_input_position)
-                    else:
-                        cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(tmp_input_position)
             else:
                 seq_qlen_group = [list(itertools.accumulate(query_lens_list))]
                 seq_kvlen_group = [list(itertools.accumulate(seq_lens_list))]
+                kv_index_list = None
 
                 prefix_meta = omni_cache.get_prefill_prefix_copy_meta(
                     block_size=self.block_size,
@@ -587,6 +572,49 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     block_tables=self.block_table.get_numpy_array()[:num_reqs],
                     attn_state=self.runner.attn_state,
                 )
+
+                omni_cache.synchronize_h2d(
+                    prefix_meta=prefix_meta,
+                    layer_idx=0,
+                )
+
+                volatile_block_table, volatile_slot_mapping = omni_cache.get_volatile_metadata(
+                    query_lens_list,
+                    seq_lens_list,
+                    graph_pad_size,
+                    PAD_SLOT_ID,
+                    slot_mapping,
+                )
+                if volatile_block_table is not None:
+                    block_table = volatile_block_table[:num_reqs]
+                    slot_mapping = volatile_slot_mapping
+
+                tmp_input_position = input_positions[tokens_start:]
+
+            first_layer_ind = self.runner.model.model.start_layer
+            if not model_extra_config.operator_opt_config.enable_dsa:
+                query_lens = query_lens_list[reqs_start:]
+                seq_lens = seq_lens_list
+            else:
+                actual_query_lens = torch.tensor(query_lens_list[reqs_start:], dtype=torch.int64).npu()
+                if model_extra_config.parall_config.attn_sp_size == 1:
+                    query_lens = torch.cumsum(actual_query_lens, dim=0)
+                seq_lens = torch.tensor(seq_lens_list, dtype=torch.int64).npu()
+            if model_extra_config.parall_config.attn_sp_size > 1:
+                sp_split_list, sp_zigzag_index, sp_reverse_index, sp_reverse_split_list, tmp_input_position, seq_lens, computed_seq_lens, cos, sin, slot_mapping, query_lens  = \
+                    self.prepare_sp_inputs(positions=input_positions[tokens_start:],
+                                        query_lens_list=query_lens_list[reqs_start:],
+                                        seq_lens_list=seq_lens_list,
+                                        slot_mapping=slot_mapping,
+                                        query_lens=actual_query_lens,
+                                        )
+                # 在sp场景下，只有切分后长度的位置信息
+                cos_q, sin_q = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(tmp_input_position)
+            else:
+                if isinstance(self.runner.model.model.layers[first_layer_ind].self_attn, torch.nn.ModuleList):
+                    cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn[0].rotary_emb.get_cos_sin(tmp_input_position)
+                else:
+                    cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(tmp_input_position)
 
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.runner.attn_mask,
@@ -617,6 +645,46 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             if self.runner.attn_state == AscendAttentionState.DecodeOnly:
                 if self._num_decode_tokens % self._num_decodes != 0:
                     raise RuntimeError("self._num_decode_tokens must be divisible by self._num_decodes")
+                num_tokens_per_req = self._num_decode_tokens // self._num_decodes
+
+                if model_extra_config.operator_opt_config.enable_dsa and model_extra_config.operator_opt_config.use_omni_cache:
+                    time0 = time.perf_counter()
+                    req_ids_update_mapping = self.runner.input_batch.req_id_to_index
+                    req_ids_update = [req_id for req_id, _ in sorted(req_ids_update_mapping.items(), key=lambda item: item[1])]
+                    req_ids_record = getattr(omni_cache, 'req_ids_record', None)
+                    if req_ids_record is None:
+                        req_ids_record = req_ids_update.copy()
+
+                    if req_ids_record != req_ids_update:
+                        # update selection_kv_block_status
+                        original_shape = omni_cache.selection_kv_block_status.shape
+                        num_layers = omni_cache.selection_kv_block_status.shape[0]
+                        head_num = omni_cache.selection_kv_block_status.shape[-2]
+                        topk_plus_1 = omni_cache.selection_kv_block_status.shape[-1]
+
+                        reshaped_view = omni_cache.selection_kv_block_status.view(
+                            num_layers, -1, num_tokens_per_req, head_num, topk_plus_1
+                        )
+                        self._update_status_buffered(
+                            omni_cache, reshaped_view, req_ids_record, req_ids_update, fill_value=-1
+                        )
+
+                        # update selection_kv_block_table
+                        s_max_block_num = omni_cache.selection_kv_block_table.shape[-1]
+                        reshaped_table_view = omni_cache.selection_kv_block_table.view(
+                            -1, num_tokens_per_req, s_max_block_num
+                        )
+                        self._reorder_block_table_only(
+                            omni_cache, reshaped_table_view, req_ids_record, req_ids_update
+                        )
+
+                    omni_cache.req_ids_record = req_ids_update.copy()
+                    time1 = time.perf_counter()
+                    if req_ids_record != req_ids_update:
+                        logger.warning(f"======== Time cost for one-step block_status update is {(time1-time0)*1000}ms ========")
+                    else:
+                        logger.warning(f"++++++++ Time cost for one-step block_status update is {(time1-time0)*1000}ms ++++++++")
+
                 seq_lens = (input_positions + 1).to(self.runner.seq_lens.dtype)
                 block_table = block_table[:self._num_decodes, ...]
                 # has speculative tokens
@@ -667,13 +735,98 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             omni_cache=omni_cache,
         )
 
+    def _update_status_buffered(
+        self,
+        omni_cache,
+        reshaped_status: torch.Tensor,
+        old_req_ids: List[Optional[str]],
+        new_req_ids: List[Optional[str]],
+        *,
+        fill_value: Any = -1,
+    ) -> None:
+        if old_req_ids is None:
+            old_req_ids = []
+        if not new_req_ids:
+            return
+
+        L, B, T, H, K = reshaped_status.shape
+        work_buffer = omni_cache.selection_kv_block_status_buffer
+        if work_buffer.shape != reshaped_status.shape:
+            work_buffer = torch.empty_like(reshaped_status)
+
+        work_buffer.fill_(fill_value)
+
+        M = min(len(old_req_ids), B)
+        N = min(len(new_req_ids), B)
+
+        old_id2idx = {rid: i for i, rid in enumerate(old_req_ids[:M]) if rid is not None}
+
+        mapped_src = []
+        mapped_tgt = []
+        for tgt in range(N):
+            rid = new_req_ids[tgt]
+            src = old_id2idx.get(rid, None)
+            if src is not None and 0 <= src < M:
+                mapped_src.append(src)
+                mapped_tgt.append(tgt)
+
+        if mapped_src:
+            device = reshaped_status.device
+            src_idx = torch.tensor(mapped_src, dtype=torch.long, device=device)
+            tgt_idx = torch.tensor(mapped_tgt, dtype=torch.long, device=device)
+            selected = reshaped_status.index_select(1, src_idx)
+            work_buffer.index_copy_(1, tgt_idx, selected)
+
+        reshaped_status.copy_(work_buffer)
+
+    def _build_table_perm(self,
+        old_req_ids: List[str],
+        new_req_ids: List[str],
+        B: int) -> Tuple[List[int], int]:
+        M = min(len(old_req_ids), B)
+        old_eff = old_req_ids[:M]
+        old_id2idx = {rid: i for i, rid in enumerate(old_eff)}
+        kept = [old_id2idx[r] for r in new_req_ids if r in old_id2idx]
+        remaining = [i for i, r in enumerate(old_eff) if r not in set(new_req_ids)]
+        perm_eff = kept + remaining
+        assert len(perm_eff) == M
+        assert sorted(perm_eff) == list(range(M))
+        return perm_eff, M
+
+    def _reorder_block_table_only(
+        self,
+        omni_cache,
+        reshaped_table: torch.Tensor,
+        old_req_ids: List[str],
+        new_req_ids: List[str]
+    ) -> None:
+        B, T, S = reshaped_table.shape
+        if not old_req_ids or B == 0:
+            return
+
+        perm_eff, M = self._build_table_perm(old_req_ids, new_req_ids, B)
+
+        work_buffer = omni_cache.selection_kv_block_table_buffer
+        if work_buffer.shape != reshaped_table.shape:
+            work_buffer = torch.empty_like(reshaped_table)
+
+        device = reshaped_table.device
+
+        work_buffer.copy_(reshaped_table)
+
+        if M > 0:
+            perm_tensor = torch.tensor(perm_eff, dtype=torch.long, device=device)
+            new_order_first = reshaped_table[:M].index_select(0, perm_tensor)
+            work_buffer[:M].copy_(new_order_first)
+
+        reshaped_table.copy_(work_buffer)
+
     def build_omni_attn_metadata(
         self,
         num_reqs: int,
         num_actual_tokens: int,
         graph_pad_size: int,
     ) -> AscendMLAMetadata:
-
         decode_metadata = None
         ref: AscendMLAMetadata = self.runner.full_attn_metadata
         num_decodes, num_decode_tokens, num_prefills, prefill_metadata, ref_d = \
@@ -766,6 +919,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             attn_state=self.runner.attn_state,
             prefill=None,
             decode=decode_metadata,
+            omni_cache=self.runner.omni_cache
         )
 
     def mark_static_for_attn_metadata(self, attn_metadata):

@@ -22,7 +22,7 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 from .kv_cache_manager import get_manager_for_kv_cache_spec, OmniKVCacheManager, OmniKVCacheBlocks
 from .omni_cache import PrefillOmniCache, DecodeOmniCache
-
+from omni.models.config_loader.loader import model_extra_config
 
 logger = init_logger("vllm.v1.omni")
 
@@ -54,17 +54,24 @@ class HostDeviceKVCacheManager(OmniKVCacheManager):
         self.log_stats = log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
+        self.tp_nnodes = model_extra_config.operator_opt_config.tp_nnodes
+
         # calculate number of blocks for host cache
         num_layers = len(kv_cache_config.kv_cache_groups[0].layer_names)
         num_kv_heads = kv_cache_spec.num_kv_heads
         head_size = kv_cache_spec.head_size
         dtype = kv_cache_spec.dtype
 
+        if model_extra_config.operator_opt_config.enable_dsa:
+            head_size = sum([512, 64, 128, 1])
+            head_size -= 1
+
         if os.getenv("ROLE") == "prefill":
+            if head_size % self.tp_nnodes != 0:
+                raise ValueError(f"head_size {head_size} is not divisible by tp_nnodes {self.tp_nnodes}")
             num_host_blocks = PrefillOmniCache.calc_cache_shape_for_prefill(
                 num_layers=num_layers,
-                block_size=self.block_size,
-                num_kv_heads=num_kv_heads,
+                block_size=self.block_size // self.tp_nnodes,
                 head_size=head_size,
                 dtype=dtype
             )[1]
@@ -76,10 +83,14 @@ class HostDeviceKVCacheManager(OmniKVCacheManager):
             num_host_blocks = DecodeOmniCache.calc_cache_shape_for_decode(
                 num_layers=num_layers,
                 block_size=self.block_size,
-                num_kv_heads=num_kv_heads,
                 head_size=head_size,
                 dtype=dtype
             )[1]
+            # if model_extra_config.operator_opt_config.enable_dsa:
+            if num_host_blocks >= self.num_gpu_blocks:
+                num_host_blocks = self.num_gpu_blocks
+            else:
+                self.num_gpu_blocks = num_host_blocks
             self.block_pools: list[BlockPool] = [
                 BlockPool(self.num_gpu_blocks, enable_caching, enable_kv_cache_events),
                 BlockPool(num_host_blocks, enable_caching, enable_kv_cache_events),

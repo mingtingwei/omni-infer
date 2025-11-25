@@ -6,25 +6,77 @@ from typing import Tuple, Dict, Optional, List
 import threading
 import numpy as np
 import torch
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group
+import torch_npu
+from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_world_group
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig, AttentionSpec
 from vllm.v1.utils import bind_kv_cache
 from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
 from vllm.model_executor.models.utils import extract_layer_index
 from omni.layers.attention.backend.attention import AscendAttentionState
+from omni.models.config_loader.loader import model_extra_config
+import ctypes
+from ctypes import pythonapi, py_object
+from omni.accelerators.cache.kv_mem_pool import KVCacheMemoryPool
+from concurrent.futures import ThreadPoolExecutor, Future
 
 
 logger = init_logger("vllm.v1.omni")
 
-SIZE_BYTES_PER_LAYER = 16 * 1024 * 1024 * 1024  # 16 GB
+SIZE_BYTES_PER_LAYER = 8 * 1024 * 1024 * 1024  # 16 GB
 NUM_DIE_PER_MACH = 16                           # assume A3
 NZ_DIM = 16                                     # nz dim
 
+dump_data = False
+
+
+# Load ACL library and define structures (should be done at module level)
+try:
+    libascendcl = ctypes.CDLL('/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64/libascendcl.so')
+
+    # Define enums and structures
+    ACL_MEM_LOCATION_TYPE_HOST = 0
+    ACL_MEM_LOCATION_TYPE_DEVICE = 1
+
+    class aclrtMemLocation(ctypes.Structure):
+        _fields_ = [
+            ('id', ctypes.c_uint32),
+            ('type', ctypes.c_uint32)
+        ]
+
+    class aclrtMemcpyBatchAttr(ctypes.Structure):
+        _fields_ = [
+            ('dstLoc', aclrtMemLocation),
+            ('srcLoc', aclrtMemLocation),
+            ('rsv', ctypes.c_uint8 * 16)
+        ]
+
+    # Set function prototype
+    aclrtMemcpyBatch = libascendcl.aclrtMemcpyBatch
+    aclrtMemcpyBatch.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_size_t,
+        ctypes.POINTER(aclrtMemcpyBatchAttr),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t)
+    ]
+    aclrtMemcpyBatch.restype = ctypes.c_int
+
+    ACL_BATCH_COPY_AVAILABLE = True
+    logger.info("ACL batch copy library loaded successfully")
+except Exception as e:
+    logger.warning(f"ACL batch copy not available: {e}")
+    ACL_BATCH_COPY_AVAILABLE = False
 
 class BaseOmniCache(ABC):
-    MEMMAP_PATH = '/dev/shm/kv_cache.bin'
+    MEMMAP_PATH = '/dev/hugepages/omni_cache'
 
     def __init__(
         self,
@@ -36,25 +88,33 @@ class BaseOmniCache(ABC):
         self.tp_world_size = get_tp_group().world_size
         self.dp_local_rank = get_dp_group().local_rank
         self.dp_world_size = get_dp_group().world_size
+        self.dp_rank = get_dp_group().rank
+        self.dp_world_size_local = NUM_DIE_PER_MACH
         self.device = runner.device
 
         attn_spec: AttentionSpec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        self.num_layers = len(kv_cache_config.kv_cache_groups[0].layer_names)
+        self.num_layers = sum([len(kv_cache_group.layer_names) for kv_cache_group in kv_cache_config.kv_cache_groups])
         self.block_size = attn_spec.block_size
-        self.num_kv_heads = attn_spec.num_kv_heads
-        self.head_size = attn_spec.head_size
+        if model_extra_config.operator_opt_config.enable_dsa:
+            head_sizes = [512, 64, 128]
+        elif attn_spec.use_mla:
+            head_sizes = [512, 64]
+        else:
+            head_sizes = [attn_spec.head_size, attn_spec.head_size]
+        self.head_sizes = [D * attn_spec.num_kv_heads for D in head_sizes]  # handle GQA and MLA with the same logic, i.e., no heads
+        self.head_size = sum(self.head_sizes)
         self.dtype = attn_spec.dtype
-
-        if self.num_kv_heads != 1:
-            raise ValueError(f"Currently only support MLA models, where num_kv_heads must be 1, but got {self.num_kv_heads}.")
 
         # Calculate shape and number of blocks
         self.shape, self.num_blocks = self.calc_cache_shape()
 
         logger.warning(f"**BaseOmniCache**: {self.shape=}, {self.tp_world_size=}")
-        shared_pinned_kv_tensor = self.initialize_shared_memory()
-        self.host_cache = shared_pinned_kv_tensor
+        self.host_cache = self.initialize_shared_memory()
 
+        # pass the ascend_cl_stream from KVMemoryPool to host_cache in OmniCache, so that other processes can call it
+        self.ascend_cl_stream = self.host_cache.ascend_cl_stream
+
+        self.host_swap_tensor = self.host_cache.shared_tensor_npu
         # block_len_dtype: how many elements of `dtype` in one block
         # dp_offset: how many blocks to start from for current rank.
         self.block_len_dtype, self.dp_offset = self.calculate_kv_xsfer_params()
@@ -73,26 +133,14 @@ class BaseOmniCache(ABC):
         self,
         kv_cache_config: KVCacheConfig,
         runner: NPUModelRunner
-    ) -> Optional[Dict[str, Tuple[torch.Tensor]]]:
+    ):
         pass
 
-    def initialize_shared_memory(self) -> torch.Tensor:
+    def initialize_shared_memory(self) -> KVCacheMemoryPool:
         total_numel = math.prod(self.shape)
         itemsize = self.dtype.itemsize
-        try:
-            fd = os.open(BaseOmniCache.MEMMAP_PATH, os.O_CREAT | os.O_RDWR, 0o777)
-            os.ftruncate(fd, total_numel * itemsize)
-            # TODO: do not use BFloat16Storage here
-            storage = torch.BFloat16Storage.from_file(
-                BaseOmniCache.MEMMAP_PATH,
-                shared=True,
-                size=total_numel,
-            )
-        except OSError as e:
-            raise RuntimeError(f"Failed to open shared memory file {BaseOmniCache.MEMMAP_PATH}: {e}")
 
-        shared_pinned_kv_tensor = torch.tensor([], dtype=self.dtype, pin_memory=True).set_(storage, 0, self.shape)
-        return shared_pinned_kv_tensor
+        return KVCacheMemoryPool(BaseOmniCache.MEMMAP_PATH, total_numel * itemsize, self.shape, self.dp_local_rank, self.device)
 
     def __getitem__(self, index: int):
         return self.host_cache
@@ -119,34 +167,37 @@ class PrefillOmniCache(BaseOmniCache):
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.arange = torch.arange(max_model_len, device='cpu')
+        self.arange_cpu = torch.arange(max_model_len, device='cpu', dtype=torch.int64)
+        self.arange = self.arange_cpu.to(device=self.device)
 
-        # buffer for offloading current batch's KV
-        self.batch_buffer_cpu = torch.empty(
-            max_num_batched_tokens,
-            self.num_nz_heads,
-            NZ_DIM,
-            dtype=self.dtype,
-            device='cpu',
-            pin_memory=True,
-        )
-        logger.warning(f"**PrefillOmniCache**: CPU buffer shape is {self.batch_buffer_cpu.shape}")
+        self.batch_buffer_cpu = [
+            torch.empty(
+                max_num_batched_tokens * 2 // self.tp_world_size,
+                D,
+                dtype=self.dtype,
+                device='cpu',
+                pin_memory=True,
+            ) for D in self.head_sizes
+        ]
+        shape_msg = ", ".join(map(str, [tensor.shape for tensor in self.batch_buffer_cpu]))
+        logger.warning(f"**PrefillOmniCache**: CPU buffer shape is {shape_msg}.")
 
         self.batch_slots_cpu = torch.zeros(
-            max_num_batched_tokens,
+            max_num_batched_tokens * 2 // self.tp_world_size,
             dtype=torch.int64,
             device="cpu",
             pin_memory=True,
         )
+        self.batch_token_indices = None
         self.d2h_stream = torch.npu.Stream(device=self.device)
-        self.copy_thread = None
-        self.copy_lock = threading.Lock()
+        self.d2h_thrp = ThreadPoolExecutor(max_workers=1, thread_name_prefix="D2H_Worker")
+        self.copy_future: Future = None
 
         # buffer for prefix/chunk
         # layout: TND, where T is max possible total KV tokens for a batch
         self.prefix_buffer_npu = torch.empty(
             max_num_seqs * max_model_len,
-            self.num_kv_heads,
+            1, # num of heads is 1
             self.head_size,
             dtype=self.dtype,
             device=self.device,
@@ -154,36 +205,51 @@ class PrefillOmniCache(BaseOmniCache):
         self.h2d_stream = torch.npu.Stream(device=self.device)
         self.h2d_event = torch.npu.Event(blocking=False, enable_timing=False)
 
+    # def calc_cache_shape(self) -> Tuple[Tuple[int, ...], int]:
+    #     self.tp_node_id = self.tp_rank // NUM_DIE_PER_MACH
+    #     self.tp_nnodes = divide_or_raise(self.tp_world_size, NUM_DIE_PER_MACH)
+
+    #     # For prefill, each node only needs to store a segment of KV cache.
+    #     # For example, if head_size = 576, and TP is across 2 nodes, then
+    #     # node0 stores [0, 288) and node1 stores [288, 576).
+    #     self.local_head_size = divide_or_raise(self.head_size, self.tp_nnodes)
+    #     shape, num_blocks = PrefillOmniCache.calc_cache_shape_for_prefill(
+    #         num_layers=self.num_layers,
+    #         block_size=self.block_size,
+    #         num_kv_heads=self.num_kv_heads,
+    #         head_size=self.local_head_size,
+    #         dtype=self.dtype,
+    #     )
+    #     total_num_nz_heads = shape[-1]                              # e.g., 36
+    #     rank_num_nz_heads = total_num_nz_heads // NUM_DIE_PER_MACH  # 2
+    #     remainder = total_num_nz_heads % NUM_DIE_PER_MACH           # 4
+
+    #     # [3, 3, 3, 3, 2, 2, ...]
+    #     get_rank_heads = lambda rank: rank_num_nz_heads + 1 if rank < remainder else rank_num_nz_heads
+    #     starts = [0]
+    #     for i in range(NUM_DIE_PER_MACH):
+    #         starts.append(starts[-1] + get_rank_heads(i))
+    #     assert starts[-1] == total_num_nz_heads, f"{total_num_nz_heads=}, while {starts=}."
+
+    #     # how many nz heads the current rank is responsible to copy  // 512/64/128 --> // 32
+    #     self.nz_heads_slc = slice(starts[self.tp_local_rank], starts[self.tp_local_rank+1])
+    #     logger.warning(f"<<< {starts=}, {self.nz_heads_slc}")
+    #     self.num_nz_heads = self.nz_heads_slc.stop - self.nz_heads_slc.start
+
+    #     return shape, num_blocks
+
     def calc_cache_shape(self) -> Tuple[Tuple[int, ...], int]:
         self.tp_node_id = self.tp_rank // NUM_DIE_PER_MACH
         self.tp_nnodes = divide_or_raise(self.tp_world_size, NUM_DIE_PER_MACH)
+        self.node_block_size = divide_or_raise(self.block_size, self.tp_nnodes)
+        self.rank_block_size = divide_or_raise(self.block_size, self.tp_world_size)
 
-        # For prefill, each node only needs to store a segment of KV cache.
-        # For example, if head_size = 576, and TP is across 2 nodes, then
-        # node0 stores [0, 288) and node1 stores [288, 576).
-        self.local_head_size = divide_or_raise(self.head_size, self.tp_nnodes)
         shape, num_blocks = PrefillOmniCache.calc_cache_shape_for_prefill(
             num_layers=self.num_layers,
-            block_size=self.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=self.local_head_size,
+            block_size=self.node_block_size,
+            head_size=self.head_size,
             dtype=self.dtype,
         )
-
-        total_num_nz_heads = shape[2]                               # e.g., 36
-        rank_num_nz_heads = total_num_nz_heads // NUM_DIE_PER_MACH  # 2
-        remainder = total_num_nz_heads % NUM_DIE_PER_MACH           # 4
-
-        # [3, 3, 3, 3, 2, 2, ...]
-        get_rank_heads = lambda rank: rank_num_nz_heads + 1 if rank < remainder else rank_num_nz_heads
-        starts = [0]
-        for i in range(NUM_DIE_PER_MACH):
-            starts.append(starts[-1] + get_rank_heads(i))
-        assert starts[-1] == total_num_nz_heads, f"{total_num_nz_heads=}, while {starts=}."
-
-        # how many nz heads the current rank is responsible to copy
-        self.nz_heads_slc = slice(starts[self.tp_local_rank], starts[self.tp_local_rank+1])
-        self.num_nz_heads = self.nz_heads_slc.stop - self.nz_heads_slc.start
 
         return shape, num_blocks
 
@@ -191,27 +257,25 @@ class PrefillOmniCache(BaseOmniCache):
     def calc_cache_shape_for_prefill(
         num_layers: int,
         block_size: int,
-        num_kv_heads: int,
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[Tuple[int, ...], int]:
         itemize = dtype.itemsize
         numel_per_layer = divide_or_raise(SIZE_BYTES_PER_LAYER, itemize)
-        numel_per_block = block_size * num_kv_heads * head_size
+        numel_per_block = block_size * head_size
         num_blocks_prefill = numel_per_layer // numel_per_block  # floor division
 
         p_shape = (
-            num_blocks_prefill,
             num_layers,
-            num_kv_heads * divide_or_raise(head_size, NZ_DIM),  # 36 if TP16
+            num_blocks_prefill,
             block_size,
-            NZ_DIM,
+            head_size
         )
 
         return p_shape, num_blocks_prefill
 
     def calculate_kv_xsfer_params(self) -> Tuple[int, int]:
-        block_len_dtype = math.prod(self.shape[1:])
+        block_len_dtype = math.prod(self.shape[2:]) * self.shape[0]
         dp_offset = 0
         return block_len_dtype, dp_offset
 
@@ -219,8 +283,44 @@ class PrefillOmniCache(BaseOmniCache):
         self,
         kv_cache_config: KVCacheConfig,
         runner: NPUModelRunner
-    ) -> Optional[Dict[str, Tuple[torch.Tensor]]]:
-        return None
+    ) -> Optional[Tuple[torch.Tensor]]:
+
+        # For DSV3.2, create a volatile KV cache and block_table on device
+        max_num_blocks_per_req = cdiv(runner.max_model_len, self.block_size)
+        num_blocks = runner.max_num_reqs * max_num_blocks_per_req
+        volatile_table = torch.arange(
+            1, 1 + num_blocks,
+            dtype=torch.int32,
+            device=runner.device).view(runner.max_num_reqs, max_num_blocks_per_req)
+
+        kv_cache_spec: AttentionSpec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        kv_cache_shape = runner.attn_backends[0].get_kv_cache_shape(
+            num_blocks + 4,  # avoid overflowing
+            kv_cache_spec.block_size,
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size
+        )
+        volatile_cache = runner.attn_backends[0].init_kv_cache_each_layer(
+            kv_cache_shape,
+            runner.dtype,
+            runner.device,
+            runner.model_config,
+            runner.enable_torchair_graph_mode
+        )
+
+        if not isinstance(volatile_cache, tuple):
+            raise RuntimeError(f"The KV cache should be a tuple, but got {type(volatile_cache)}.")
+        if not all(isinstance(t, torch.Tensor) for t in volatile_cache):
+            raise RuntimeError("Error! All elements in volatile cache should be tensors.")
+        expected_len = 4 if model_extra_config.operator_opt_config.enable_dsa else 2
+        if len(volatile_cache) != expected_len:
+            raise RuntimeError(f"There should be {expected_len} tensors in KV cache, but got {len(volatile_cache)}.")
+
+        bytes_mb = sum([t.nbytes for t in volatile_cache]) / 1024**2
+        logger.warning(f"**PrefillOmniCache**: {num_blocks} blocks are allocated for volatile KV cache which consumes {bytes_mb:.2f} MB.")
+
+        self.volatile_table = volatile_table
+        return volatile_cache
 
     def get_prefill_prefix_copy_meta(
         self,
@@ -259,10 +359,8 @@ class PrefillOmniCache(BaseOmniCache):
                 segs = np.stack([start_blocks, end_blocks], axis=1).tolist()  # (N_seg, 2)
 
             all_segs.append(segs)
-            # q_slot_end += (kv_lens[i] + query_lens_list[i])
-            # q_slots.append(self.arange[q_slot_end-query_lens_list[i]:q_slot_end])
             q_slot_start += kv_lens[i]
-            q_slots.append(self.arange[:query_lens_list[i]] + q_slot_start)
+            q_slots.append(self.arange_cpu[:query_lens_list[i]] + q_slot_start)
             q_slot_start += query_lens_list[i]
 
         q_slots = torch.cat(q_slots).to(device=self.device, non_blocking=True)
@@ -271,12 +369,114 @@ class PrefillOmniCache(BaseOmniCache):
                                      query_slots=q_slots)
         return prefix_meta
 
+    def get_volatile_metadata(
+        self,
+        query_lens_list: list[int],
+        seq_lens_list: list[int],
+        graph_pad_size: int,
+        pad_slot_id: int,
+        orig_slot_mapping: torch.Tensor,
+    ):
+        orig_shape = orig_slot_mapping.shape
+        if model_extra_config.parall_config.attn_sp_size > 1:
+            orig_slot_mapping = pad_inputs(
+                orig_slot_mapping,
+                query_lens_list,
+                model_extra_config.parall_config.attn_sp_size * 2,
+                pad_slot_id
+            )
+        blocks, slots = orig_slot_mapping // self.block_size, orig_slot_mapping % self.block_size
+        ranks, rank_slots = slots // self.rank_block_size, slots % self.node_block_size
+        token_idx = torch.nonzero((ranks == self.tp_rank) & (orig_slot_mapping > 0), as_tuple=True)[0]
+        slot_mapping = blocks[token_idx] * self.node_block_size + rank_slots[token_idx]
+        num_tokens = token_idx.shape[0]
+
+        self.batch_slots_cpu[:num_tokens].copy_(slot_mapping, non_blocking=True)
+        self.batch_token_indices = token_idx
+
+        if not model_extra_config.operator_opt_config.enable_dsa:
+            return None, None
+
+        max_num_blocks_per_req = self.volatile_table.shape[1]
+        slot_mapping = []
+        for i, (q_len, seq_len) in enumerate(zip(query_lens_list, seq_lens_list)):
+            start = (i * max_num_blocks_per_req + 1) * self.block_size
+            slot_mapping.append(self.arange[seq_len-q_len:seq_len] + start)
+        if graph_pad_size > 0:
+            padding = torch.full((graph_pad_size,),
+                                 fill_value=pad_slot_id,
+                                 dtype=self.arange.dtype,
+                                 device=self.arange.device)
+            slot_mapping.append(padding)
+        slot_mapping = torch.cat(slot_mapping, dim=0)
+
+        if slot_mapping.shape != orig_shape:
+            raise RuntimeError(f"Slot mapping shape mismatch! {slot_mapping.shape=}, {orig_shape=}.")
+        return self.volatile_table, slot_mapping
+
+    def get_current_rank_host_data(self, layer_idx, prefix_meta):
+        # flatten
+        block_ids = []
+        for block_ranges in prefix_meta.consecutive_blocks:
+            for start_block_id, end_block_id in block_ranges:
+                block_ids.extend(range(start_block_id, end_block_id))
+
+        num_heads_per_node = len(block_ids) * self.node_block_size
+        num_heads_per_rank = num_heads_per_node // NUM_DIE_PER_MACH
+
+        # Get block_ids of current rank
+        current_rank_block_ids_start_idx = self.tp_local_rank * num_heads_per_rank // self.node_block_size
+        current_rank_block_ids_end_idx = (self.tp_local_rank + 1) * num_heads_per_rank // self.node_block_size
+        block_ids_of_this_rank = block_ids[current_rank_block_ids_start_idx:current_rank_block_ids_end_idx + 1]
+
+        offset_in_block = self.tp_local_rank * num_heads_per_rank % self.node_block_size
+        block_id = block_ids_of_this_rank[0]
+        head_offset = block_id * self.node_block_size + offset_in_block
+
+        ## Dram.contiguous()
+        remain_heads = num_heads_per_rank
+        num_copyed_heads = min(remain_heads, self.node_block_size - offset_in_block)
+        remain_heads -= num_copyed_heads
+
+        kvi_tensors = []
+        host_data = []
+        for i, tensor in enumerate(self.host_cache.kvi_tensors):
+            host_data.append([])
+            kvi_tensors.append(tensor.view(self.num_layers, -1, tensor.shape[-1]))
+
+        for index, block_id in enumerate(block_ids_of_this_rank[:-1]):
+            if block_ids_of_this_rank[index+1] == block_id + 1:
+                num_copying_heads = min(remain_heads, self.node_block_size)
+                num_copyed_heads += num_copying_heads
+                remain_heads -= num_copying_heads
+            else:
+                for idx, tensor in enumerate(kvi_tensors):
+                    host_data[idx].append(tensor[layer_idx, head_offset:head_offset+num_copyed_heads])
+
+                block_id = block_ids_of_this_rank[index+1]
+                head_offset = block_id * self.node_block_size
+                num_copyed_heads = min(remain_heads, self.node_block_size)
+                remain_heads -= num_copyed_heads
+
+        for idx, tensor in enumerate(kvi_tensors):
+            host_data[idx].append(tensor[layer_idx, head_offset:head_offset+num_copyed_heads])
+            host_data[idx] = torch.concat(host_data[idx])
+
+        host_data = torch.concat(host_data, dim=-1)
+
+        return host_data
+
+    def update_device_cache(self, prefix_meta, global_device_data):
+        src_start = 0
+        for req_id, block_ranges in enumerate(prefix_meta.consecutive_blocks):
+            dst_start = req_id * self.volatile_table.shape[1] + 1
+            num_blocks = sum([end_block_id - start_block_id for start_block_id, end_block_id in block_ranges])
+            for i, tensor in enumerate(self.host_cache.kvi_tensors):
+                self.device_cache[i][dst_start:dst_start+num_blocks] = global_device_data[i][src_start: src_start + num_blocks]
+            src_start += num_blocks
     def synchronize_h2d(
         self,
-        # key_states: torch.Tensor,
-        # value_states: torch.Tensor,
         prefix_meta: "PrefixCopyMeta",
-        # cum_query_lens: list[int],
         layer_idx: int,
     ) -> None:
         """When prefix is hit, load the relevant KV from CPU to device buffer.
@@ -285,70 +485,79 @@ class PrefillOmniCache(BaseOmniCache):
         """
         if prefix_meta is None or layer_idx >= self.num_layers:
             return
-        # device = self.prefix_buffer_npu.device
-        copy_start = 0
+
         with torch.npu.stream(self.h2d_stream):
-            # kv_states = torch.cat([key_states, value_states], dim=-1)
-            for i, (block_ranges, q_len) in enumerate(zip(prefix_meta.consecutive_blocks, prefix_meta.query_lens)):
-                for start_block, end_block in block_ranges:
-                    copy_len = (end_block - start_block) * self.block_size
-                    self.prefix_buffer_npu[copy_start:copy_start+copy_len].view(end_block-start_block, self.block_size, -1, NZ_DIM).copy_(
-                        self.host_cache[start_block:end_block, layer_idx].transpose(-2, -3),
-                        non_blocking=True,
-                            # .to(device=device, non_blocking=True)
-                            # .transpose(-2, -3)
-                    )
-                    copy_start += copy_len
-                # self.prefix_buffer_npu[copy_start:copy_start+q_len].copy_(kv_states[q_start:q_end])
-                copy_start += q_len
+            # Step0: get the contiguous host data
+            host_data = self.get_current_rank_host_data(layer_idx, prefix_meta)
+
+            # Step1: to_device -> [num_blocks*block_size//nn_nodes//NUM_DIE_PER_MACH * headsize]
+            device_data = host_data.to(device=self.device)
+
+            # Step2: All Gather -> [tp_world_size, num_blocks*block_size//nn_nodes//NUM_DIE_PER_MACH * headsize]
+            global_device_data = tensor_model_parallel_all_gather(device_data, dim=0)
+
+            # Step3: -> [nn_nodes, num_blocks, node_block_size, headsize]
+            global_device_data = global_device_data.view(self.tp_nnodes, -1, self.node_block_size, self.head_size)
+
+            # Step4: tranpose -> [num_blocks, nn_nodes, node_block_size, headsize]
+            global_device_data = global_device_data.permute(1, 0, 2, 3) # is_contiguous: False
+
+            # Step5: contiguous() --> [num_blocks*block_size, headsize]
+            device_kvi_tensor = []
+            start_index = 0
+            for i, tensor in enumerate(self.host_cache.kvi_tensors):
+                length = tensor.shape[-1]
+                device_kvi_tensor.append(global_device_data[..., start_index : start_index + length].contiguous().view(-1, self.block_size, 1, length))
+                start_index += length
+
+            #  Step6: Device To Device Copy
+            self.update_device_cache(prefix_meta, device_kvi_tensor)
+
             self.h2d_event.record(self.h2d_stream)
 
-            # return self.prefix_buffer_npu[:copy_start, :, :512], self.prefix_buffer_npu[:copy_start, :, 512:]
+    def _copy_tensor_to_buffer(self, src_tensor, buffer_idx):
+        for idx_block in range((src_tensor.shape[0] + self.block_size - 1) // self.block_size):
+            offset = self.block_size // self.tp_world_size
+            start = self.tp_rank * offset + idx_block * self.block_size
+            end = min((self.tp_rank + 1) * offset + idx_block * self.block_size, src_tensor.shape[0])
+            if start < src_tensor.shape[0]:
+                tensor_slice = src_tensor[start:end, ...] # [2, 1,]
+                logger.warning(f"<<<{self.batch_buffer_cpu[buffer_idx].shape=}, {self.batch_buffer_cpu[buffer_idx][0:offset, ...].shape=}, {src_tensor.shape=}, {tensor_slice.shape=}")
+                self.batch_buffer_cpu[buffer_idx][idx_block*offset : (idx_block+1) * offset, ...].copy_(tensor_slice.squeeze(1), non_blocking=True)  # self.batch_buffer_cpu.shape[1] = 32
 
+    # modified by gpt to improve efficiency
     def synchronize_d2h(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        kv_states: List[torch.Tensor],
         layer_idx: int,
         kv_event: torch.npu.Event,
     ) -> None:
-        if self.copy_thread and self.copy_thread.is_alive():
-            # wait for the buffer->host operation called last time (i.e., in the last layer)
-            self.copy_thread.join()
-
-        num_tokens = key_states.shape[0]
+        if self.copy_future is not None and not self.copy_future.done():
+            self.copy_future.result()
+        num_tokens = kv_states[0].shape[0]
         d2h_event = torch.npu.Event(blocking=False, enable_timing=False)
         with torch.npu.stream(self.d2h_stream):
-            self.d2h_stream.wait_event(kv_event)  # wait for main stream to compute key_states and value_states
-            kv = torch.cat([key_states, value_states], dim=-1)
-            kv = (
-                kv[..., self.tp_node_id*self.local_head_size : (self.tp_node_id+1)*self.local_head_size]
-                .view(num_tokens, -1, NZ_DIM)  # (T, 36, 16)
-            )
-            self.batch_buffer_cpu[:num_tokens].copy_(kv[:, self.nz_heads_slc], non_blocking=True)
-            self.batch_slots_cpu[:num_tokens].copy_(slot_mapping, non_blocking=True)
+            num_tokens = self.batch_token_indices.shape[0]
+            self.d2h_stream.wait_event(kv_event)
+            for i in range(len(kv_states)):
+                self.batch_buffer_cpu[i][:num_tokens].copy_(
+                    kv_states[i].squeeze(1)[self.batch_token_indices], non_blocking=True)
             d2h_event.record(self.d2h_stream)
-        key_states.record_stream(self.d2h_stream)
-        value_states.record_stream(self.d2h_stream)
 
-        self.copy_thread = threading.Thread(
-            target=self._update_host_cache_thread,
-            args=(num_tokens, layer_idx, d2h_event),
-            daemon=True,
+        for i in range(len(kv_states)):
+            kv_states[i].record_stream(self.d2h_stream)
+        self.copy_future = self.d2h_thrp.submit(
+            self._update_host_cache_thread,
+            num_tokens, layer_idx, d2h_event,
         )
-        self.copy_thread.start()
 
     def _update_host_cache_thread(self, num_tokens, layer_idx, event):
-        torch.npu.set_device(self.device)  # On Ascend, the device context is thread-local.
-        event.synchronize()  # block current thread until event finishes
-        with self.copy_lock:
-            cpu_slot_mapping = self.batch_slots_cpu[:num_tokens]
-            self.host_cache[cpu_slot_mapping // self.block_size,
-                            layer_idx,
-                            self.nz_heads_slc,
-                            cpu_slot_mapping % self.block_size] = \
-                self.batch_buffer_cpu[:num_tokens]
+        torch.npu.set_device(self.device)
+        event.synchronize()
+
+        slots = self.batch_slots_cpu[:num_tokens]
+        for i, tensor in enumerate(self.host_cache.kvi_tensors):
+            tensor.view(self.num_layers, -1, tensor.shape[-1])[layer_idx, slots] = self.batch_buffer_cpu[i][:num_tokens]
 
 
 class DecodeOmniCache(BaseOmniCache):
@@ -360,11 +569,37 @@ class DecodeOmniCache(BaseOmniCache):
         super().__init__(kv_cache_config, runner)
         self.decode_h2d_stream = torch.npu.Stream(device=self.device)
 
+        self.layer_indices = {
+            layer_name: extract_layer_index(layer_name)
+            for layer_name in self.device_cache.keys()
+        }
+        self.sorted_layer_names = list(sorted(
+            self.device_cache.keys(),
+            key=lambda k: self.layer_indices[k],
+        ))
+        if self.device_cache:
+            first_key_name = next(iter(self.device_cache))
+            self.device = self.device_cache[first_key_name][0].device
+
+        self.enable_dsa = model_extra_config.operator_opt_config.enable_dsa
+
+        dp_rank = self.dp_local_rank
+
+        blocks_per_rank = self.host_cache.num_blocks
+
+        self.block_table = torch.arange(blocks_per_rank, dtype=torch.long, device=self.device)
+        self._copy_stream = getattr(self, "_copy_stream", torch.npu.Stream())
+
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            from omni.accelerators.cache import kv_cache_interface as itfc
+            self.sink_blocks, self.recent_blocks = itfc.SINK, itfc.RECENT
+            self.omni_attn_pattern: List[int] = itfc.PATTERN.copy()
+            self.grouped_layer_indices = [[j for j in range(self.num_layers) if self.omni_attn_pattern[j] == i] for i in [0, 1]]
+
     def calc_cache_shape(self) -> Tuple[Tuple[int, ...], int]:
         return DecodeOmniCache.calc_cache_shape_for_decode(
             num_layers=self.num_layers,
             block_size=self.block_size,
-            num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.dtype,
         )
@@ -373,13 +608,12 @@ class DecodeOmniCache(BaseOmniCache):
     def calc_cache_shape_for_decode(
         num_layers: int,
         block_size: int,
-        num_kv_heads: int,
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[Tuple[int, ...], int]:
         itemize = dtype.itemsize
         numel_per_layer = divide_or_raise(SIZE_BYTES_PER_LAYER, itemize)
-        numel_per_block = block_size * num_kv_heads * head_size
+        numel_per_block = block_size * head_size
         # For decode, each DP rank has an independent KV cache manager for block allocation.
         # Thus, we should divide num_blocks by the number of managers on each node.
         num_blocks_decode = (numel_per_layer // numel_per_block) // NUM_DIE_PER_MACH
@@ -387,17 +621,18 @@ class DecodeOmniCache(BaseOmniCache):
         # Here we 'reshape' the cache to (num_dies, num_blocks_per_die, ...) for efficient addressing.
         d_shape = (
             NUM_DIE_PER_MACH,
-            num_blocks_decode,
             num_layers,
-            num_kv_heads * divide_or_raise(head_size, NZ_DIM),
+            num_blocks_decode,
             block_size,
-            NZ_DIM,
+            head_size
         )
 
         return d_shape, num_blocks_decode
 
     def calculate_kv_xsfer_params(self) -> Tuple[int, int]:
-        block_len_dtype = math.prod(self.shape[2:])
+        # block_len_dtype = math.prod(self.shape[2:]) # previous: (die_num, block_num, layer_num, ...), now (die_num, layer_num, block_num)
+        block_len_dtype = math.prod(self.shape[3:]) * self.shape[1]
+        logger.warning(f"<<<<<< {block_len_dtype=}, {self.shape=}")
         dp_offset = self.dp_local_rank * self.num_blocks
         return block_len_dtype, dp_offset
 
@@ -407,6 +642,72 @@ class DecodeOmniCache(BaseOmniCache):
         runner: NPUModelRunner
     ) -> Optional[Dict[str, Tuple[torch.Tensor]]]:
         kv_caches = {}
+        bsz_seq = runner.graph_block_tables.shape[0]  # batch_size * seq_len
+        batch_size = runner.max_num_reqs
+        num_tokens_per_reqs_decode = 1 if not runner.use_spec_decode else (1 + runner.speculative_config.num_speculative_tokens)
+        seq_len = num_tokens_per_reqs_decode
+        headnum = 1
+        s_block_size = 128
+        k_rope_sz = 64
+        kvcache_sz = 512
+        topk = 2048
+        self.selection_topk_block_size = 1
+        selection_max_seq_len = topk * self.selection_topk_block_size
+
+        if model_extra_config.operator_opt_config.enable_dsa:
+            s_max_block_num = (selection_max_seq_len + s_block_size - 1) // s_block_size
+
+            self.selection_k_rope = [
+                torch.zeros(
+                    [s_max_block_num * bsz_seq * headnum, s_block_size, k_rope_sz],
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                ).contiguous()
+                for _ in range(self.num_layers)
+            ]
+
+            self.selection_kv_cache = [
+                torch.zeros(
+                    [s_max_block_num * bsz_seq * headnum, s_block_size, kvcache_sz],
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                ).contiguous()
+                for _ in range(self.num_layers)
+            ]
+
+            # allocate full tensor for all layers to make it update faster
+            self.selection_kv_block_table = torch.arange(
+                bsz_seq * headnum * s_max_block_num,
+                dtype=torch.int32,
+                device=self.device,
+            ).view(bsz_seq * headnum, s_max_block_num).contiguous()
+
+            self.selection_kv_block_status = -torch.ones(
+                            [self.num_layers, bsz_seq, 1, headnum, (topk + 1)],
+                            dtype=torch.int32,
+                            device=self.device,
+                        ).contiguous()
+            self.selection_kv_block_status_list = list(torch.unbind(self.selection_kv_block_status, dim=0))
+
+            # work buffers initialization for reordering and updating in faster behavior
+            self.selection_kv_block_table_buffer = torch.empty(
+                            [batch_size, seq_len, s_max_block_num],
+                            dtype=torch.int32,
+                            device=self.device,
+                        ).contiguous()
+            self.selection_kv_block_status_buffer = torch.empty(
+                            [self.num_layers, batch_size, seq_len, headnum, (topk + 1)],
+                            dtype=torch.int32,
+                            device=self.device,
+                        ).contiguous()
+            self.index_buffer = torch.empty(batch_size, dtype=torch.long, device=self.device)
+
+            self.selection_topk_indices = torch.arange(
+                                    topk,
+                                    dtype=torch.int32,
+                                    device=self.device,
+                                ).expand(bsz_seq, headnum, topk).contiguous()
+
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
@@ -426,38 +727,105 @@ class DecodeOmniCache(BaseOmniCache):
                         runner.dtype,
                         runner.device,
                         runner.model_config,
-                        runner.enable_torchair_graph_mode
+                        runner.enable_torchair_graph_mode,
+                        is_prefill = False
                     )
                 else:
                     raise ValueError("Unknown KV cache spec type.")
         return kv_caches
 
-    def synchronize_h2d(self, local_block_ids: List[List[int]]) -> None:
-        layer_indices = {
-            layer_name: extract_layer_index(layer_name)
-            for layer_name in self.device_cache.keys()
-        }
+    def synchronize_h2d(self, local_block_ids: List[List[int]], tp_nnodes: int = 1) -> None:
+        if len(local_block_ids) > 1:
+            self.synchronize_h2d_omni_attn(local_block_ids)
+            return
 
-        dp_rank = self.dp_local_rank
-        first_key_name = next(iter(self.device_cache))
-        device = self.device_cache[first_key_name][0].device
+        layer_indices = self.device_cache.keys()
+        npu_blocks = []
+        device_id = None
+        for block_id in local_block_ids[0]:
+            layers = []
+            for layer_name in layer_indices:
+                if device_id is None:
+                    device_id = self.device_cache[layer_name][0][block_id].device.index
+                if model_extra_config.operator_opt_config.enable_dsa:
+                    layers.append(
+                        (
+                            # only keep k_indexer cache on device
+                            self.device_cache[layer_name][0][block_id],
+                        )
+                    )
+                else:
+                    layers.append(
+                        (
+                            self.device_cache[layer_name][0][block_id],
+                            self.device_cache[layer_name][1][block_id]
+                        )
+                    )
+            npu_blocks.append(layers)
+        # self.host_cache.batch_layer_copy_to_npu(local_block_ids[0], npu_blocks, device_id)
+        # change copy back to with max batch size to avoid out-of-range error in ACL
+        if model_extra_config.operator_opt_config.enable_dsa:
+            blc_num_batch = 50
+        else:
+            blc_num_batch = 20
+        for idx_blc in range((len(local_block_ids[0]) + blc_num_batch - 1) // blc_num_batch):
+            if (idx_blc + 1) * blc_num_batch > len(local_block_ids[0]):
+                end_idx = len(local_block_ids[0])
+            else:
+                end_idx = (idx_blc + 1) * blc_num_batch
+            self.host_cache.batch_layer_copy_to_npu(local_block_ids[0][idx_blc*blc_num_batch:end_idx],
+                                                    npu_blocks[idx_blc*blc_num_batch:end_idx], device_id)
 
-        block_table = torch.LongTensor(local_block_ids[0]).to(device)
+    def synchronize_h2d_omni_attn(self, local_block_ids: List[List[int]]) -> None:
+        if model_extra_config.operator_opt_config.enable_dsa:
+            raise RuntimeError("Omni attention does not support DSV3.2 model yet.")
+        if len(local_block_ids) != 2:
+            raise RuntimeError(f"Omni attention needs two block tables, but got {len(local_block_ids)}: {local_block_ids}.")
+        if len(local_block_ids[1]) != self.sink_blocks + self.recent_blocks:
+            raise RuntimeError(f"Omni layer block table should have length {self.sink_blocks + self.recent_blocks},"
+                               f" but got {len(local_block_ids[1])}. {local_block_ids=}.")
 
-        # with torch.npu.stream(self.decode_h2d_stream):
-        buffer = self.host_cache[dp_rank, local_block_ids[1]].to(device, non_blocking=True)
+        host_omni_blocks = local_block_ids[0].copy()
+        if len(host_omni_blocks) > self.sink_blocks + self.recent_blocks:
+            host_omni_blocks = host_omni_blocks[:self.sink_blocks] + host_omni_blocks[-self.recent_blocks:]
+        elif len(host_omni_blocks) < self.sink_blocks + self.recent_blocks:
+            local_block_ids[1] = local_block_ids[1][:len(host_omni_blocks)]
 
-        for layer_name, layer_idx in layer_indices.items():
-            layer_data = buffer[:, layer_idx]
-            key = layer_data[:, :32].view(-1, 128, 1, 512)
-            value = layer_data[:, 32:].view(-1, 128, 1, 64)
+        src_blocks = [local_block_ids[0], host_omni_blocks]
+        tgt_blocks = local_block_ids
+        device_id = None
 
-            self.device_cache[layer_name][0][block_table] = key
-            self.device_cache[layer_name][1][block_table] = value
-
-        # copy_done_event = torch.npu.Event()
-        # copy_done_event.record(self.decode_h2d_stream)
-        # return copy_done_event
+        for i, (src, tgt) in enumerate(zip(src_blocks, tgt_blocks)):
+            npu_blocks = []
+            for block_id in tgt:
+                layers = []
+                for layer_name in self.sorted_layer_names:
+                    if device_id is None:
+                        device_id = self.device_cache[layer_name][0].device.index
+                    layer_idx = self.layer_indices[layer_name]
+                    if self.omni_attn_pattern[layer_idx] != i:
+                        continue
+                    layers.append(
+                        (
+                            self.device_cache[layer_name][0][block_id],
+                            self.device_cache[layer_name][1][block_id]
+                        )
+                    )
+                npu_blocks.append(layers)
+            # self.host_cache.batch_layer_copy_to_npu(src, npu_blocks, device_id, layer_indices=self.grouped_layer_indices[i])
+            # change copy back to with max batch size to avoid out-of-range error in ACL
+            if model_extra_config.operator_opt_config.enable_dsa:
+                blc_num_batch = 50
+            else:
+                blc_num_batch = 20
+            for idx_blc in range((len(src) + blc_num_batch - 1) // blc_num_batch):
+                if (idx_blc + 1) * blc_num_batch > len(src):
+                    end_idx = len(src)
+                else:
+                    end_idx = (idx_blc + 1) * blc_num_batch
+                self.host_cache.batch_layer_copy_to_npu(src[idx_blc*blc_num_batch:end_idx],
+                                                        npu_blocks[idx_blc*blc_num_batch:end_idx],
+                                                        device_id, layer_indices=self.grouped_layer_indices[i])
 
     def synchronize_d2h(self, key_states: torch.Tensor, value_states: torch.Tensor, slot_mapping: torch.Tensor, layer_idx: int, kv_event: torch.npu.Event) -> None:
         raise NotImplementedError
@@ -502,6 +870,14 @@ def create_omni_cache(
             vllm_config.compilation_config.static_forward_context,
             runner.kv_caches,
         )
+        # replace kv_a and k_pe in self.kv_caches by host swap caches
+        num_layers = len(runner.kv_caches)
+        # if not is_prefill:
+        if model_extra_config.operator_opt_config.enable_dsa:
+            for i in range(num_layers):
+                rest = runner.kv_caches[i]
+                t0, t1 = omni_cache.host_swap_tensor[i][0], omni_cache.host_swap_tensor[i][1]
+                runner.kv_caches[i] = (t0, t1, *rest)
     return omni_cache
 
 
@@ -519,6 +895,9 @@ class PrefixCopyMeta:
     num_actual_tokens: int = None
     """Total number of tokens in current batch."""
 
+    num_copy_blocks: int = None
+    """Total number of blocks in KV cache to copy."""
+
     last_block_id: Optional[int] = None
     """The last block which might be partially filled. In APC, it must be None."""
 
@@ -529,5 +908,35 @@ class PrefixCopyMeta:
         if len(self.consecutive_blocks) != len(self.query_lens):
             raise RuntimeError(f"Lengths mismatch! {len(self.consecutive_blocks)=}, while {len(self.query_lens)=}.")
         self.num_actual_tokens = sum(self.query_lens)
-        total_copy_ops = sum([len(segs) for segs in self.consecutive_blocks])
-        logger.warning(f"!!! Totally {total_copy_ops} copy operations will be executed. ***")
+        flatten = [pair[1] - pair[0] for segs in self.consecutive_blocks for pair in segs]
+        total_copy_ops = len(flatten)
+        total_copy_blocks = sum(flatten)
+
+        if get_world_group() == 0:
+            logger.warning(f"!!! Totally {total_copy_ops} copy operations with {total_copy_blocks} blocks will be executed. ***")
+
+        self.num_copy_blocks = total_copy_blocks
+
+
+def pad_inputs(input: torch.Tensor, query_lens: list[int], sp_size: int, pad_value: int):
+    count = 0
+    res = []
+    for len in query_lens:
+        pad_size = (sp_size - len % sp_size) % sp_size
+        tmp_tensor = input[count:count + len]
+        padded_tensor = pad_tensor(tmp_tensor, pad_size, pad_value)
+        res.append(padded_tensor)
+        count += len
+    return torch.cat(res, dim=0)
+
+
+def pad_tensor(tensor, pad_size, pad_value=0):
+    """Pad tensor with specified value along first dimension."""
+    padded_shape = (pad_size, tensor.shape[-1]) if tensor.dim() > 1 else (pad_size,)
+    padding = torch.full(
+        padded_shape,
+        pad_value,
+        dtype=tensor.dtype,
+        device=tensor.device
+    )
+    return torch.cat([tensor, padding])

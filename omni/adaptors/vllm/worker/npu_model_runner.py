@@ -28,7 +28,9 @@ import numpy as np
 import torch
 import torch_npu
 import torch.distributed as dist
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
+from vllm.attention.layer import Attention
+from vllm.attention import AttentionType
 from vllm.distributed.parallel_state import get_pp_group, get_tensor_model_parallel_world_size, get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
@@ -36,7 +38,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (DeviceMemoryProfiler, is_pin_memory_available,
                         LayerBlockType, LazyLoader, cdiv)
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec)
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import bind_kv_cache
@@ -55,6 +58,7 @@ from omni.adaptors.vllm.platform import NPUPlatform
 from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
 from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.accelerators.pd.omni_cache_connector_v1 import decode_h2d_trigger
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -171,7 +175,7 @@ class NPUModelRunner(GPUModelRunner):
                                         device="cpu",
                                         pin_memory=is_pin_memory_available())
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-        
+
         self.chunk_next_tokens = torch.zeros(
             self.max_num_reqs * num_tokens_per_reqs_decode, dtype= torch.int64, device=self.device
         )
@@ -388,7 +392,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
         return metadata
-    
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -727,7 +731,7 @@ class NPUModelRunner(GPUModelRunner):
                 inputs_embeds = self.model.get_input_embeddings(input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
-                
+
             self.inputs_embeds[:num_input_tokens].copy_(inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
 
@@ -739,7 +743,7 @@ class NPUModelRunner(GPUModelRunner):
                     padding_embeds = torch.randint(1, vocab_size, (graph_pad_size, inputs_embeds.size(-1)), dtype=input_ids.dtype, device=input_ids.device)
 
                 inputs_embeds = torch.cat([inputs_embeds, padding_embeds])
-            
+
             input_ids = None
         else:
             if graph_pad_size >= 0:
@@ -770,6 +774,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.planner.place_experts()
                 _GLOBAL_STEP = _GLOBAL_STEP + 1 if not is_prompt else 0
 
+            decode_h2d_trigger()
             if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly or \
                 (self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill):
                 start_debug = time.time()
@@ -888,7 +893,7 @@ class NPUModelRunner(GPUModelRunner):
             }
             filename = os.path.join(self.training_data_save_path, f"token-ids-{time.time_ns()}.pt")
             torch.save(to_save, filename)
-            
+
 
     @torch.inference_mode()
     def execute_model(
@@ -945,6 +950,12 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 attn_metadata, positions = self._simple_prepare_inputs(attn_metadata, positions,
                         sampled_tokens, spec_tokens_tensor, accepted_num)
+            # put MemCpy's sync here to overlap compute and data transfer
+            if int(os.environ.get("BATCH_COPY_ASYNC", "0")) == 1:
+                if self.omni_cache is not None:
+                    self.omni_cache.ascend_cl_stream.sync()
+                else:
+                    logger.warning("==== omni_cache is None, cannot sync ascend_cl_stream ====")
             hidden_states, raw_hidden_states, input_ids, temp_finished_sending, temp_finished_recving = self._execute_model(scheduler_output,
                                                    attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
             if temp_finished_sending is not None:
@@ -969,7 +980,7 @@ class NPUModelRunner(GPUModelRunner):
             if tmp_loading_kv_failure is not None:
                 self.loading_kv_failure.update(tmp_loading_kv_failure)
             start_2 = time.time()
-            
+
             if isinstance(sample_indices, int):
                 logits = self.model.compute_logits(hidden_states[:sample_indices], None)
                 if self.use_spec_decode:
@@ -1162,6 +1173,8 @@ class NPUModelRunner(GPUModelRunner):
 
         positions = self.mrope_positions[:, :num_tokens] if self.uses_mrope else self.positions[:num_tokens]
         raw_hidden_states = None
+
+        decode_h2d_trigger()
 
         # No kv_caches: profile run
         if not self.kv_caches:
@@ -1411,8 +1424,8 @@ class NPUModelRunner(GPUModelRunner):
         from omni.accelerators.cache.omni_cache import create_omni_cache
         if self.vllm_config.kv_transfer_config is None:
             raise NotImplementedError("Currently only support PD disaggregation, but KV transfer config is None.")
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            raise RuntimeError(f"Only support single KV cache group, but got {len(kv_cache_config.kv_cache_groups)}.")
+        if len(kv_cache_config.kv_cache_groups) > 1 and self.vllm_config.kv_transfer_config.kv_role != "kv_consumer":
+            raise RuntimeError(f"Only support single KV cache group in Prefill nodes, but got {len(kv_cache_config.kv_cache_groups)}.")
 
         self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
@@ -1443,7 +1456,6 @@ class NPUModelRunner(GPUModelRunner):
             omni_cache.MEMMAP_PATH,
             omni_cache.dtype,
             block_len_dtype=omni_cache.block_len_dtype,
-            start_offset=omni_cache.dp_offset,
             omni_cache=omni_cache
         )
 
@@ -1478,7 +1490,7 @@ class NPUModelRunner(GPUModelRunner):
             logger.warning(
                 "Skipping NPU graph capture. Please add "
                 "-O %s to use NPU graphs.", CompilationLevel.PIECEWISE)
-        
+
         if model_extra_config.task_config.enable_omni_placement:
             self.planner.start_dynamic_optimize_expert_load_balance()
 
@@ -1489,6 +1501,10 @@ class NPUModelRunner(GPUModelRunner):
         raise ValueError(f"decode input batch size {max_num_token} exceeds maximum gear {max(self.decode_gear_list)}.")
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        from omni.accelerators.cache import get_omni_hybrid_kv_cache_spec, check_omni_attn_cmd_arg
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        is_kv_consumer = kv_transfer_config is None or kv_transfer_config.kv_role == "kv_consumer"
+        enable_omni_attn = check_omni_attn_cmd_arg(self.vllm_config.additional_config)
         if int(os.getenv("NO_NPU_MOCK", "0")):
             kv_cache_spec: dict[str, KVCacheSpec] = {}
             block_size = self.vllm_config.cache_config.block_size
@@ -1501,7 +1517,57 @@ class NPUModelRunner(GPUModelRunner):
                 use_mla=use_mla
             )
             return kv_cache_spec
-        return super().get_kv_cache_spec()
+        elif enable_omni_attn and is_kv_consumer:
+            return get_omni_hybrid_kv_cache_spec(self)
+        return self._get_kv_cache_spec_dsa()
+
+    def _get_kv_cache_spec_dsa(self):
+        from omni.accelerators.cache.omni_cache import DecodeOmniCache
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
+        for layer_name, attn_module in layers.items():
+            # if use omni_cache, set head_size being k_indexer size, to get more blocks
+            if (model_extra_config.operator_opt_config.enable_dsa and
+                    model_extra_config.operator_opt_config.use_omni_cache and
+                    self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"):
+                head_size = sum([512, 64, 128])
+                self.vllm_config.cache_config.num_gpu_blocks_override = \
+                    DecodeOmniCache.calc_cache_shape_for_decode(
+                        num_layers=len(layers),
+                        block_size=block_size,
+                        head_size=head_size,
+                        dtype=self.kv_cache_dtype)[1]
+                attn_module.head_size = 128 + 2 # indexer and scale
+            # TODO: Support other attention modules, e.g., cross-attention
+            if attn_module.attn_type == AttentionType.DECODER:
+                if attn_module.sliding_window is not None:
+                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                else:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla)
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                raise NotImplementedError
+            else:
+                raise ValueError(
+                    f"Unknown attention type: {attn_module.attn_type}")
+
+        return kv_cache_spec
 
     def _get_max_token_num(self, is_enable_dp, num_tokens):
         if is_enable_dp:

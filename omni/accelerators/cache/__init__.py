@@ -6,10 +6,6 @@ from vllm.v1.worker import gpu_input_batch
 from vllm.v1.core import kv_cache_manager as orig_manager
 from vllm.v1.core.sched import scheduler
 
-
-ENABLED = False
-
-
 from . import kv_cache_interface as itfc
 from .kv_cache_interface import (
     get_kv_cache_config_omni_type,
@@ -32,12 +28,9 @@ def check_omni_attn_cmd_arg(additional_config: dict) -> bool:
     return to_bool_or_raise(additional_config["enable_omni_attn"])
 
 
-def apply_omni_attn_patch(enable=False, is_kv_consumer=True, config=None):
-    if not enable:
+def apply_omni_attn_patch(enable_attn=False, enable_cache=False, is_kv_consumer=True, config=None):
+    if not (enable_attn or enable_cache):
         return
-
-    global ENABLED
-    ENABLED = True
 
     if config is not None:
         # update hyperparameters from command line args
@@ -62,30 +55,16 @@ def apply_omni_attn_patch(enable=False, is_kv_consumer=True, config=None):
                 raise ValueError(f"pattern should be a list of 0s and 1s, but is given {pattern}")
             itfc.PATTERN = pattern
 
-    if is_kv_consumer:
-        # use Omni-related classes and methods only for KV consumers
+    if enable_attn and is_kv_consumer:
         kv_cache_utils.get_kv_cache_config = get_kv_cache_config_omni_type
         engine_core.get_kv_cache_config = get_kv_cache_config_omni_type
-        GPUModelRunner.get_kv_cache_spec = get_omni_hybrid_kv_cache_spec
         block_table.MultiGroupBlockTable = OmniMultiGroupBlockTable
         gpu_input_batch.MultiGroupBlockTable = OmniMultiGroupBlockTable
 
-        orig_manager.KVCacheBlocks = OmniKVCacheBlocks
-        orig_manager.KVCacheManager = OmniKVCacheManager
-        scheduler.KVCacheBlocks = OmniKVCacheBlocks
-        scheduler.KVCacheManager = OmniKVCacheManager
-
-
-def apply_omni_cache_patch(enable=False, is_kv_consumer=True):
-    if not enable:
-        return
-    if is_kv_consumer:
-        block_table.MultiGroupBlockTable = OmniMultiGroupBlockTable
-        gpu_input_batch.MultiGroupBlockTable = OmniMultiGroupBlockTable
     orig_manager.KVCacheBlocks = OmniKVCacheBlocks
+    orig_manager.KVCacheManager = OmniKVCacheManager
     scheduler.KVCacheBlocks = OmniKVCacheBlocks
-    orig_manager.KVCacheManager = HostDeviceKVCacheManager
-    scheduler.KVCacheManager = HostDeviceKVCacheManager
+    scheduler.KVCacheManager = OmniKVCacheManager
 
 
 __all__ = [

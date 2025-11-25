@@ -3,6 +3,7 @@
 
 import json
 import os
+import sys
 import pickle
 import queue
 import socket
@@ -13,12 +14,14 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, List, Dict
+from dataclasses import dataclass, field
 
 import torch
 import zmq
+import uuid
+import msgpack
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-
-from omni.accelerators.cache.omni_cache import BaseOmniCache
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -43,36 +46,37 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.model_executor.models.utils import extract_layer_index
 
+from omni.models.config_loader.loader import model_extra_config
+
 GET_META_MSG = b"get_meta_msg"
 logger = init_logger(__name__)
 
 # seconds, used to free blocks after a delay once the request is finished
 BLOCK_RELEASE_DELAY = 3000
+PER_REQUEST_CONNECTION = 8
 
 BASE_DIR = os.path.dirname(__file__)
-P_NODE_BIN = os.environ.get("P_NODE_BIN", os.path.join(BASE_DIR, "bin/p_node_server"))
-D_AGENT_BIN = os.environ.get("D_AGENT_BIN", os.path.join(BASE_DIR, "bin/d_kv_agent"))
+OX_PATH = os.environ.get("OX_PATH", os.path.join(BASE_DIR, "ox/ox"))
+OX_LOG_PATH = os.environ.get("OX_LOG_PATH", os.path.join("/data/ox_log"))
 
 # Cluster/P-node configuration
-P_NODES_ENV = os.environ.get("P_NODE_LIST", "7.150.13.67,7.150.14.143")
-NUM_P_NODES = len(P_NODES_ENV.split(","))
-CLUSTER_SIZE = int(os.environ.get("CLUSTER_SIZE", "1"))
+P_NODE_LIST = os.environ.get("P_NODE_LIST", "7.150.13.67,7.150.14.143")
+
+CLUSTER_LIST = [part.strip() for part in P_NODE_LIST.split(';') if part.strip()]
+CLUSTER_SIZE = [len(part.split(',')) for part in CLUSTER_LIST][0]
+
+NODE_IP_SPECS = [ip.strip()
+              for segment in P_NODE_LIST.split(';')
+              for ip in segment.split(',')
+              if ip.strip()]
 
 BASE_PORT = int(os.environ.get("BASE_PORT", "15077"))
-DIRECT_ID_BASE = int(os.environ.get("DIRECT_ID_BASE", "0"))
 ZMQ_BASE_PORT = int(os.environ.get("ZMQ_BASE_PORT", "17555"))
-VERBOSE = int(os.environ.get("VERBOSE", "1"))
 
-# Normalize node list and specs
-_P_NODE_LIST_RAW = [h.strip() for h in P_NODES_ENV.split(",") if h.strip()]
-if not _P_NODE_LIST_RAW:
-    _P_NODE_LIST_RAW = ["127.0.0.1"]
-# If NUM_P_NODES is larger than the list length, cap it to avoid IndexError
-NUM_P_NODES = min(NUM_P_NODES, len(_P_NODE_LIST_RAW))
-P_NODE_LIST = _P_NODE_LIST_RAW[:NUM_P_NODES]
-NODE_SPECS = ";".join([f"{P_NODE_LIST[i]}:{BASE_PORT}:{i}" for i in range(NUM_P_NODES)])
-
-_print_lock = threading.Lock()
+P_NODE_PORT_LIST = ';'.join(
+    ','.join(f"{h.strip()}:{BASE_PORT}" for h in grp.split(',') if h.strip())
+    for grp in P_NODE_LIST.split(';') if grp.strip()
+)
 
 @dataclass
 class ReqMeta:
@@ -82,7 +86,6 @@ class ReqMeta:
     remote_cluster_id: str
     spec_token_ids: Optional[List[int]]
     remote_dp_rank: Optional[int]
-    remote_tp_size: Optional[int]
     remote_request_id: Optional[str]
 
 
@@ -110,7 +113,6 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
             remote_cluster_id=kv_transfer_params["remote_cluster_id"],
             spec_token_ids=kv_transfer_params["spec_token_ids"],
             remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
-            remote_tp_size=kv_transfer_params.get("remote_tp_size", 16),
             remote_request_id=kv_transfer_params.get("remote_request_id"),
         )
 
@@ -129,6 +131,144 @@ class DatadistConnectorMetadataPrefill(KVConnectorMetadata):
         self.requests[request_id] = ReqMetaPrefill(finish_time=finish_time)
 
 
+class DTypeUtils:
+    """
+    Static helper for converting common dtype strings
+    to their corresponding byte sizes.
+    """
+
+    # Central registry: dtype alias -> byte size
+    _MAP: Dict[str, int] = {
+        # 1 byte
+        "int8": 1,
+        "uint8": 1,
+        "byte": 1,
+        # 2 bytes
+        "int16": 2,
+        "uint16": 2,
+        "fp16": 2,
+        "bf16": 2,
+        # 4 bytes
+        "int32": 4,
+        "uint32": 4,
+        "fp32": 4,
+        "float32": 4,
+        # 8 bytes
+        "int64": 8,
+        "uint64": 8,
+        "fp64": 8,
+        "float64": 8,
+    }
+
+    @staticmethod
+    def size(dtype: str) -> int:
+        """
+        Return the number of bytes for a given dtype string.
+
+        Args:
+            dtype: Case-insensitive dtype alias, e.g. 'bf16', 'FP32'.
+
+        Returns:
+            Byte size (positive int).
+
+        Raises:
+            ValueError: If the dtype is not recognised.
+        """
+        key = dtype.lower()
+        if key not in DTypeUtils._MAP:
+            raise ValueError(
+                f"Unsupported data type: {dtype}. "
+                f"Supported types: {list(DTypeUtils._MAP.keys())}"
+            )
+        return DTypeUtils._MAP[key]
+
+    @staticmethod
+    def supported() -> list[str]:
+        """Return a list of all supported dtype aliases."""
+        return list(DTypeUtils._MAP.keys())
+
+
+class RouterDealerClient:
+    def __init__(self, server_address="tcp://localhost:5555"):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.DEALER)
+
+        client_id = f"client_{uuid.uuid4().hex[:8]}".encode('utf-8')
+        self.socket.setsockopt(zmq.IDENTITY, client_id)
+
+        self.socket.connect(server_address)
+        print(f"Connected to server at {server_address} with ID: {client_id.decode()}")
+
+    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int) -> bool:
+        try:
+            request_data = {
+                'request_id': request_id,
+                'table_id': rank_id,
+                'src_block_ids': src_id_list,
+                'dst_block_ids': dst_id_list,
+                'cluster_id': cluster_id
+            }
+            packed_data = msgpack.packb(request_data)
+            self.socket.send(packed_data)
+            return True
+        except Exception as e:
+            print(f"Error sending request {request_id}: {e}")
+            return False
+
+    def receive_response(self, timeout: int = 1000) -> Optional[Dict]:
+        try:
+            if self.socket.poll(timeout, zmq.POLLIN):
+                response_data = self.socket.recv()
+                response = msgpack.unpackb(response_data)
+                return response
+        except Exception as e:
+            print(f"Error receiving response: {e}")
+        return None
+
+    def close(self):
+        self.socket.close()
+        self.context.term()
+        print("Client closed")
+
+
+@dataclass
+class _SendItem:
+    request_id: str
+    cluster_id: int
+    src_ids: List[int]
+    dst_ids: List[int]
+    rank_id: int
+
+
+@dataclass
+class PendingReq:
+    request_id: str
+    local_block_ids: List[List[int]]
+    remote_block_ids: List[int]
+    dst_cluster_id: str
+    remote_request_id: Optional[str]
+    remote_host_ip: str
+    dp_rank: int
+    t_submit: float = field(default_factory=time.time)
+    t_sent: float = 0.0
+    t_resp: float = 0.0
+
+
+class _ZMQSendProxy:
+    def __init__(self, send_q: "queue.Queue[_SendItem]"):
+        self._q = send_q
+
+    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int) -> bool:
+        self._q.put(_SendItem(
+            request_id=request_id,
+            cluster_id=int(cluster_id),
+            src_ids=list(src_id_list),
+            dst_ids=list(dst_id_list),
+            rank_id=int(rank_id),
+        ))
+        return True
+
+
 class LLMDataDistConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         if vllm_config.kv_transfer_config is None:
@@ -141,10 +281,12 @@ class LLMDataDistConnector(KVConnectorBase_V1):
         # self.datadist_config = LLMDataDistConfig(vllm_config, ignore_load_rank=True)
         self.is_prefill = vllm_config.kv_transfer_config.kv_role == "kv_producer"
         if self.is_prefill:
-            target_ip = self.get_local_ip()
-            node_idx = self.get_ip_index(NODE_SPECS, target_ip)
+            target_ip = self._get_local_ip()
+            if target_ip not in NODE_IP_SPECS:
+                raise ValueError(f"Local IP {target_ip} not found in P_NODE_LIST {P_NODE_LIST}")
+            node_idx = NODE_IP_SPECS.index(target_ip)
             self.cluster_id_start = node_idx // CLUSTER_SIZE
-            self.host_ip = _P_NODE_LIST_RAW[self.cluster_id_start * CLUSTER_SIZE]
+            self.host_ip = NODE_IP_SPECS[self.cluster_id_start * CLUSTER_SIZE]
             # Resolve ZMQ port conflicts in multi-P deployments on the same machine.
             self.host_port = get_config_from_dict_or_env(
                 vllm_config.kv_transfer_config, "kv_port",
@@ -172,14 +314,7 @@ class LLMDataDistConnector(KVConnectorBase_V1):
                     vllm_config, str(self.host_ip), self.cluster_id_start)
             self.connector_scheduler = None
 
-    def get_ip_index(self, node_specs: str, target_ip: str) -> int:
-        for spec in node_specs.split(";"):
-            ip, *_, idx = spec.split(":")
-            if ip == target_ip:
-                return int(idx)
-        raise ValueError(f"{target_ip} not found in node specs")
-
-    def get_local_ip(self):
+    def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(('8.8.8.8', 80))
@@ -227,11 +362,11 @@ class LLMDataDistConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, start_offset=0, omni_cache=None):
+    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, omni_cache=None):
         data_type = 'bf16'
         if self.connector_worker is None:
             raise RuntimeError("self.connector_worker cannot be None")
-        return self.connector_worker.register_kv_caches(kv_pool_mmap_path, data_type, block_len_dtype, start_offset, omni_cache)
+        return self.connector_worker.register_kv_caches(kv_pool_mmap_path, data_type, block_len_dtype, omni_cache)
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> Tuple[set[str], set[str]]:
@@ -321,7 +456,6 @@ class PrefillConnectorScheduler:
             remote_host_ip=f"tcp://{self.host_ip}:{self.host_port}",
             spec_token_ids=spec_token_ids,
             remote_dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
-            remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_request_id=request.request_id
         )
 
@@ -360,19 +494,43 @@ class PrefillConnectorWorker:
         # initialize the dict to save requests finish time
         self.requests_finish_time: Dict[str, float] = {}
 
-    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, start_offset, omni_cache=None):
-        self.start_p_server_kv_transfer(kv_pool_mmap_path, data_type, block_len_dtype, start_offset)
+    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, omni_cache=None):
+        logger.warning(f" ======= OX parameters for P server: {kv_pool_mmap_path=}, {data_type=}, {block_len_dtype=}")
+        self._start_p_server_kv_transfer(kv_pool_mmap_path, data_type, block_len_dtype, omni_cache)
 
-    def start_p_server_kv_transfer(self, kv_pool_mmap_path, data_type, block_len_dtype, start_offset):
+    def _start_p_server_kv_transfer(self, kv_pool_mmap_path, data_type, block_len_dtype, omni_cache):
         self.tp_rank_local = self.rank % (self.vllm_config.parallel_config.tensor_parallel_size // CLUSTER_SIZE)
+        data_type_size = DTypeUtils.size(data_type)
         if self.tp_rank_local == 0:
-            # Pass a list for mmap paths; start one P server
-            p_procs = start_p_node_servers(BASE_PORT, 1, [kv_pool_mmap_path], data_type, block_len_dtype, start_offset)
-            ok, not_ready = _wait_ports([("127.0.0.1", BASE_PORT)])
+            cmd = [
+                str(OX_PATH),
+                "--addr", f"0.0.0.0:{BASE_PORT}",
+                "--block-table-shm", str(kv_pool_mmap_path),
+                "--num-blocks", str(omni_cache.num_blocks),
+                "--num-layers", str(omni_cache.num_layers),
+                "--tokens-per-block", str(omni_cache.node_block_size),
+                "--dims",  ",".join(map(str, omni_cache.head_sizes)),
+                # "--block-size", str(block_len_dtype * data_type_size), # no block size parameter now
+            ]
+            logger.warning(f"<<<Executing {cmd}")
+
+            proc = subprocess.Popen(cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    text=True,
+                                    bufsize=1)
+            q = queue.Queue()
+
+            t_read = threading.Thread(target=stdout_reader, args=(proc.stdout, q))
+            t_print = threading.Thread(target=stdout_printer, args=(q, ))
+            t_read.daemon = True
+            t_print.daemon = True
+            t_read.start()
+            t_print.start()
+
+            ok, not_ready = _wait_ports(host_ports=[("127.0.0.1", BASE_PORT)], timeout_sec=60)
             if not ok:
-                log_line("[ERROR]", f"P not ready: {sorted(list(not_ready))}")
-                for p, th in p_procs:
-                    stop_logged_process(p, th)
+                stop_logged_process(proc)
                 raise RuntimeError(f"[ERROR] P not ready: {sorted(list(not_ready))}")
             logger.info("[READY] P node is ready")
 
@@ -489,7 +647,7 @@ class DecodeConnectorScheduler:
                         request, blocks.get_unhashed_block_ids())
                 else:
                     logger.warning("Got invalid KVTransferParams: %s.", params)
-                    
+
         self.processed_request.add(request.request_id)
 
     def build_connector_metadata(
@@ -531,6 +689,8 @@ class DecodeConnectorScheduler:
 class DecodeConnectorWorker:
     """Worker implementation for datadist (decode)."""
 
+    _h2d_wait = threading.Event()
+
     def __init__(self, vllm_config: "VllmConfig", host_ip: str, cluster_id_start: int):
         self.vllm_config = vllm_config
         self.cluster_id_start = cluster_id_start
@@ -564,7 +724,7 @@ class DecodeConnectorWorker:
         max_concurrents = 1
         self.executor = ThreadPoolExecutor(max_workers=max_concurrents)
 
-        self.omni_cache: BaseOmniCache = None
+        self.omni_cache = None
 
         if self.async_pull_kv:
             thread_name = f"async_pull_kv_{self.dp_rank}"
@@ -572,6 +732,24 @@ class DecodeConnectorWorker:
                 target=self.on_fast_path_req, daemon=True, name=thread_name)
             self.thread_on_fast_path_req.start()
             logger.warning("DecodeConnectorWorker initialized with self.async_pull_kv enabled.")
+
+        self._transfer_lock = getattr(self, "_transfer_lock", threading.Lock())
+        self._recving_transfers = getattr(self, "_recving_transfers", [])
+        self._endpoint = f"tcp://127.0.0.1:{ZMQ_BASE_PORT}"
+        self.zmq_client = None
+        self._send_q: "queue.Queue[_SendItem]" = queue.Queue()
+        self._resp_thread: Optional[threading.Thread] = None
+        self._resp_stop = threading.Event()
+
+        import queue as _q
+        self._h2d_q: "_q.Queue[PendingReq]" = _q.Queue(maxsize=1024)
+        self._h2d_stop = threading.Event()
+        self._h2d_thread: Optional[threading.Thread] = None
+
+        self._pending: Dict[str, PendingReq] = {}
+        self._pending_lock = threading.Lock()
+
+        # self.h2d_stream = torch.npu.Stream()
 
     def on_fast_path_req(self):
         context = zmq.Context()
@@ -593,34 +771,49 @@ class DecodeConnectorWorker:
                         len(meta.remote_block_ids)
                     )
 
-    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, start_offset, omni_cache):
-        self.start_offset = start_offset
-        self.block_len_dtype  = block_len_dtype
-        self.agents: List[Tuple[subprocess.Popen, List[threading.Thread], str, int]] = []
-        endpoint = f"tcp://127.0.0.1:{ZMQ_BASE_PORT + self.dp_rank}"
-        args = [
-            D_AGENT_BIN,
-            "--nodes", NODE_SPECS,
-            "--d_mmap", kv_pool_mmap_path,
-            "--dtype", data_type,
-            "--offset_dtype", str(block_len_dtype),
-            "--start_offset", str(start_offset),
-            "--direct_id_base", str(0),
-            "--zmq_bind", endpoint,
-            "--conns_per_node", "16"
-        ]
-        log_line(f"[D{self.dp_rank}]", " ".join(args))
-        p, threads = spawn_logged_process(args, f"D{self.dp_rank}")
-        self.agents.append((p, threads, endpoint, start_offset))
+    def register_kv_caches(self, kv_pool_mmap_path, data_type, block_len_dtype, omni_cache):
+        logger.warning(f" ======= OX parameters for D client: {omni_cache.num_blocks=};{kv_pool_mmap_path=}, {data_type=}, {block_len_dtype=}")
+        # kv_dims_scale = [kv_dim_tmp * omni_cache.head_size for kv_dim_tmp in omni_cache.head_size_ratio]
+        # kv_dims_int = [kv_dim_tmp // sum(omni_cache.head_size_ratio) for kv_dim_tmp in kv_dims_scale]
+        # kv_dims = ", ".join(map(str, kv_dims_int))
+        if omni_cache.dp_local_rank == 0:
+            self.block_len_dtype = block_len_dtype
+            end_port = f"{ZMQ_BASE_PORT + omni_cache.dp_local_rank}"
+            data_type_size = DTypeUtils.size(data_type)
+            cmd = [
+                str(OX_PATH),
+                "--shard-list", str(P_NODE_PORT_LIST),
+                "--zmq-port", end_port,
+                "--block-table-shm", str(kv_pool_mmap_path),
+                "--num-block-tables", str(omni_cache.dp_world_size_local),
+                "--num-blocks", str(omni_cache.num_blocks),
+                "--num-layers", str(omni_cache.num_layers),
+                "--tokens-per-block", str(omni_cache.block_size),
+                "--num-layers", str(omni_cache.num_layers),
+                "--num-connections-per-req", str(PER_REQUEST_CONNECTION),
+                "--dims",  ",".join(map(str, omni_cache.head_sizes)),
+                # "--block-size", str(block_len_dtype * data_type_size),
+                # "--kv-layers", str(omni_cache.num_layers),
+                # "--kv-tokens", str(omni_cache.block_size),
+                # "--kv-dims", kv_dims
+            ]
 
-        # Build REQ sockets for agents
-        self.sockets: List[zmq.Socket] = []
-        for _, (_, _, agent_endpoint, _start_offset) in enumerate(self.agents):
-            s = zmq.Context.instance().socket(zmq.REQ)
-            s.connect(agent_endpoint)
-            self.sockets.append(s)
+            proc = subprocess.Popen(cmd,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        text=True,
+                                        bufsize=1)
+            q = queue.Queue()
 
+            t_read = threading.Thread(target=stdout_reader, args=(proc.stdout, q))
+            t_print = threading.Thread(target=stdout_printer, args=(q, OX_LOG_PATH))
+            t_read.daemon = True
+            t_print.daemon = True
+            t_read.start()
+            t_print.start()
+        self.zmq_client = None
         self.omni_cache = omni_cache
+
 
     # Now go asynchronous pull_kv
     def start_load_kv(self, metadata: DatadistConnectorMetadata):
@@ -688,7 +881,6 @@ class DecodeConnectorWorker:
                 dst_cluster_id=meta.remote_cluster_id,
                 request_id=req_id,
                 remote_request_id=meta.remote_request_id,
-                remote_tp_size=meta.remote_tp_size,
                 remote_host_ip=meta.remote_host,
             )
             futures.append(future)
@@ -703,134 +895,221 @@ class DecodeConnectorWorker:
         dst_cluster_id: str,
         request_id: str,
         remote_request_id: Optional[str],
-        remote_host_ip: str,
-        remote_tp_size: int,
+        remote_host_ip: str
     ):
-        dst_cluster_id = int(dst_cluster_id) // remote_tp_size
-        cluster_id = int(dst_cluster_id)
         start = time.time()
 
-        # Create a temporary REQ socket per request to avoid concurrent reuse of the same REQ socket.
-        tmp_sockets: list[zmq.Socket] = []
+        self._ensure_resp_thread_started()
+
+        with self._pending_lock:
+            self._pending[request_id] = PendingReq(
+                request_id=request_id,
+                local_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
+                dst_cluster_id=dst_cluster_id,
+                remote_request_id=remote_request_id,
+                remote_host_ip=remote_host_ip,
+                dp_rank=self.omni_cache.dp_local_rank,
+                t_submit=start,
+            )
+
+        self.zmq_client.send_request(
+            request_id=request_id,
+            cluster_id=dst_cluster_id,
+            src_id_list=remote_block_ids,
+            dst_id_list=local_block_ids[0],
+            rank_id=self.omni_cache.dp_local_rank,
+        )
+
+        enqueue_cost = time.time() - start
+        logger.warning(" ***** read block-send request (enqueued): req_id:%s, cost:%.6f",
+                       request_id, enqueue_cost)
+
+    def _ensure_resp_thread_started(self):
+        if not (self._resp_thread and self._resp_thread.is_alive()):
+            self._resp_stop.clear()
+            self._resp_thread = threading.Thread(
+                target=self._get_zmq_response, name="ZMQ-Recv-Thread", daemon=True
+            )
+            self._resp_thread.start()
+            self.zmq_client = _ZMQSendProxy(self._send_q)
+            logger.info("ZMQ receive thread started at %s", self._endpoint)
+
+        if not (self._h2d_thread and self._h2d_thread.is_alive()):
+            self._h2d_stop.clear()
+            self._h2d_thread = threading.Thread(
+                target=self._h2d_worker, name="H2D-Worker", daemon=True
+            )
+            self._h2d_thread.start()
+            logger.info("H2D worker thread started")
+
+    def _get_zmq_response(self):
+        client = RouterDealerClient(self._endpoint)
         try:
-            for inst, (_proc, _threads, endpoint, _start_offset) in enumerate(self.agents):
-                s = zmq.Context.instance().socket(zmq.REQ)
-                s.setsockopt(zmq.RCVTIMEO, 5000)
-                s.setsockopt(zmq.LINGER, 0)
-                s.connect(endpoint)
-                tmp_sockets.append(s)
+            while not self._resp_stop.is_set():
+                while True:
+                    try:
+                        item: _SendItem = self._send_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    t0 = time.time()
+                    ok = client.send_request(
+                        request_id=item.request_id,
+                        cluster_id=item.cluster_id,
+                        src_id_list=item.src_ids,
+                        dst_id_list=item.dst_ids,
+                        rank_id=item.rank_id,
+                    )
+                    with self._pending_lock:
+                        if item.request_id in self._pending:
+                            ctx = self._pending[item.request_id]
+                            ctx.t_sent = time.time()
+                            try:
+                                if ok:
+                                    ids0 = ctx.local_block_ids[0] if ctx.local_block_ids else []
+                                    if ids0:
+                                        if not hasattr(self, "_prebuilt_block_tables"):
+                                            self._prebuilt_block_tables = {}
+                                        if item.request_id not in self._prebuilt_block_tables:
+                                            self._prebuilt_block_tables[item.request_id] = torch.tensor(
+                                                ids0, dtype=torch.long, device=self.omni_cache.device
+                                            )
+                            except Exception as e:
+                                logger.debug("Prebuild block_table_ts failed for req_id=%s: %s", item.request_id, e)
+                    if not ok:
+                        logger.error("Send failed for req_id=%s", item.request_id)
+                        with self._pending_lock:
+                            self._pending.pop(item.request_id, None)
+                        if hasattr(self, "_prebuilt_block_tables"):
+                            self._prebuilt_block_tables.pop(item.request_id, None)
+                    else:
+                        logger.debug("Sent req_id=%s in %.6f s", item.request_id, time.time() - t0)
+                    self._send_q.task_done()
 
-            for inst, s in enumerate(tmp_sockets):
-                cluster_id = int(dst_cluster_id)
-                frames = [
-                    b"pull_kv",
-                    request_id.encode(),
-                    str(cluster_id).encode(),
-                    str(CLUSTER_SIZE).encode(),
-                    pack_u64_le(remote_block_ids),
-                    pack_u64_le(local_block_ids[1]),
-                ]
-                s.send_multipart(frames)
+                resp = client.receive_response(timeout=50)
+                if resp is None:
+                    continue
 
-            # receove and verfy the request_id
-            for inst, s in enumerate(tmp_sockets):
-                self._recv_agent_reply(
-                    s, inst,
-                    expected_request_id=request_id,
-                    timeout_ms=5000,
-                    max_retries=0  # REQ-per-request normally no need to retry
-                )
-        finally:
-            for s in tmp_sockets:
+                req_id = resp.get("request_id")
+                success = bool(resp.get("success"))
+                if not req_id:
+                    logger.error("Received response without request_id: %s", resp)
+                    continue
+
+                with self._pending_lock:
+                    ctx = self._pending.get(req_id)
+                    if ctx:
+                        ctx.t_resp = time.time()
+
+                if not ctx:
+                    logger.warning("Orphan response for unknown req_id=%s", req_id)
+                    if hasattr(self, "_prebuilt_block_tables"):
+                        self._prebuilt_block_tables.pop(req_id, None)
+                    continue
+
+                self._log_network_timing(ctx)
+
+                if not success:
+                    logger.error("Failed to pull kv for request %s", req_id)
+                    with self._pending_lock:
+                        self._pending.pop(req_id, None)
+                    if hasattr(self, "_prebuilt_block_tables"):
+                        self._prebuilt_block_tables.pop(req_id, None)
+                    continue
+
                 try:
-                    s.close()
-                except:
-                    pass
+                    self._h2d_q.put(ctx, timeout=1.0)
+                except queue.Full:
+                    logger.warning("H2D queue full, running _post_success inline (may block IO)")
+                    self._post_success(ctx)
+                    with self._pending_lock:
+                        self._pending.pop(req_id, None)
+        finally:
+            client.close()
 
-        # notify prefill side after success
-        if self.vllm_config.parallel_config.tensor_parallel_size == 1:
-            # tp=1, send to prefill tp rank0 directly.
-            if remote_request_id is not None:
-                self._send_pulled_kv_req_list(remote_host_ip, [remote_request_id])
-            with self._transfer_lock:
-                self._recving_transfers.append(request_id)
-        else:
-            torch.distributed.barrier(group=get_tp_group().cpu_group)
-            if get_tensor_model_parallel_rank() == 0 and remote_request_id is not None:
-                self._send_pulled_kv_req_list(remote_host_ip, [remote_request_id])
-            with self._transfer_lock:
-                self._recving_transfers.append(request_id)
+    def _h2d_worker(self):
+        while not self._h2d_stop.is_set():
+            try:
+                ctx: PendingReq = self._h2d_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                self._post_success(ctx)
+            except Exception as e:
+                logger.exception("H2D worker error on req_id=%s: %s", ctx.request_id, e)
+            finally:
+                with self._pending_lock:
+                    self._pending.pop(ctx.request_id, None)
+                if hasattr(self, "_prebuilt_block_tables"):
+                    self._prebuilt_block_tables.pop(ctx.request_id, None)
+                self._h2d_q.task_done()
+
+    def _log_network_timing(self, ctx: PendingReq):
+        t_submit = ctx.t_submit
+        t_sent = ctx.t_sent if ctx.t_sent > 0 else t_submit
+        t_resp = ctx.t_resp if ctx.t_resp > 0 else time.time()
+
+        cost_submit_to_send = (t_sent - t_submit) * 1000.0
+        cost_send_to_resp = (t_resp - t_sent) * 1000.0
+        cost_submit_to_resp = (t_resp - t_submit) * 1000.0
+
+        num_blocks = len(ctx.local_block_ids[0]) if ctx.local_block_ids else 0
+        logger.warning(
+            " ***** Pull kv timing (network only): req_id:%s, num_blocks:%d, "
+            "submit->send: %.3f ms, send->resp: %.3f ms, submit->resp: %.3f ms",
+            ctx.request_id, num_blocks, cost_submit_to_send, cost_send_to_resp, cost_submit_to_resp
+        )
+
+    def _post_success(self, ctx: PendingReq):
+        t_submit = ctx.t_submit
+        t_resp = ctx.t_resp if ctx.t_resp > 0 else time.time()
 
         if self.omni_cache is None or self.omni_cache.device_cache is None:
-            raise RuntimeError(f"Error! omni_cache is None or device_cache is None.")
+            raise RuntimeError("Error! omni_cache is None or device_cache is None.")
+
+        DecodeConnectorWorker._h2d_wait.wait()
+        t_h2d_start = time.time()
+        block_table_ts = None
+        if hasattr(self, "_prebuilt_block_tables"):
+            block_table_ts = self._prebuilt_block_tables.pop(ctx.request_id, None)
+        # if self.h2d_stream:
+        #     with torch.npu.stream(self.h2d_stream):
+        #         self.omni_cache.synchronize_h2d(ctx.local_block_ids, CLUSTER_SIZE, block_table_ts)
+        #     compute_stream = torch.npu.current_stream()
+        #     compute_stream.wait_stream(self.h2d_stream)
+        # else:
+        self.omni_cache.synchronize_h2d(ctx.local_block_ids, CLUSTER_SIZE)
+        t_h2d_end = time.time()
+        logger.warning(" ***** Time cost of decode synchronize_h2d is %.3f ms (req_id:%s)",
+                       (t_h2d_end - t_h2d_start) * 1000.0, ctx.request_id)
         
-        st = time.time()
-        self.omni_cache.synchronize_h2d(local_block_ids)
-        duration = time.time() - st
-        logger.warning(f"<<< Time cost of decode synchronize_h2d is {duration*1000} ms")
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if tp_size == 1:
+            if ctx.remote_request_id is not None:
+                self._send_pulled_kv_req_list(ctx.remote_host_ip, [ctx.remote_request_id])
+            with self._transfer_lock:
+                self._recving_transfers.append(ctx.request_id)
+        else:
+            torch.distributed.barrier(group=get_tp_group().cpu_group)
+            if get_tensor_model_parallel_rank() == 0 and ctx.remote_request_id is not None:
+                self._send_pulled_kv_req_list(ctx.remote_host_ip, [ctx.remote_request_id])
+            with self._transfer_lock:
+                self._recving_transfers.append(ctx.request_id)
 
-        logger.debug(" ***** read block, req_id:%s, local_block_ids:%s, remote_block_ids:%s",
-                     request_id, local_block_ids[1], remote_block_ids)
-        cost = time.time() - start
-        logger.warning(" ***** read block, req_id:%s, cost:%.6f", request_id, cost)
+        
+        total_cost = (time.time() - t_submit)
+        logger.warning(" ***** read block total: req_id:%s, cost:%.6f s", ctx.request_id, total_cost)
 
-    def _recv_agent_reply(self,
-                          sock: zmq.Socket,
-                          inst: int,
-                          expected_request_id: str | None = None,
-                          timeout_ms: int = 5000,
-                          max_retries: int = 0) -> bytes:
-
-        sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        attempts = 0
-        while True:
-            attempts += 1
-            try:
-                parts = sock.recv_multipart()
-            except zmq.Again:
-                raise RuntimeError(f"[ERROR] agent#{inst} timeout waiting for reply")
-                # logger.warning(f"[WARN] agent#{inst} timeout, retrying...")
-                # continue
-            except Exception as e:
-                raise RuntimeError(f"[ERROR] agent#{inst} recv failed: {e}") from e
-
-            if not parts:
-                if attempts > max_retries:
-                    raise RuntimeError(f"[ERROR] agent#{inst} empty reply")
-                continue
-
-            status = parts[0]
-            req_id_part: bytes | None = None
-            msg = b""
-
-            if len(parts) == 2:
-                # 兼容旧格式
-                msg = parts[1]
-            elif len(parts) >= 3:
-                # 新格式 [status, request_id, message]
-                req_id_part = parts[1]
-                msg = parts[2]
-            else:
-                if attempts > max_retries:
-                    raise RuntimeError(f"[ERROR] agent#{inst} invalid reply format ({len(parts)} frames)")
-                continue
-
-            if status != b"OK":
-                text = msg.decode("utf-8", "ignore")
-                rid = req_id_part.decode("utf-8", "ignore") if req_id_part else "?"
-                raise RuntimeError(f"[ERROR] agent#{inst} error (req_id={rid}): {text}")
-
-            # if has request_id，verify it
-            if expected_request_id is not None and req_id_part is not None:
-                got = req_id_part.decode("utf-8", "ignore")
-                if got != expected_request_id:
-                    if attempts <= max_retries:
-                        continue
-                    raise RuntimeError(
-                        f"[ERROR] agent#{inst} reply request_id mismatch: expect={expected_request_id}, got={got}"
-                    )
-
-            return msg
+    def stop_zmq_thread(self, wait: bool = True):
+        self._resp_stop.set()
+        self._h2d_stop.set()
+        DecodeConnectorWorker._h2d_wait.set()
+        if self._resp_thread and wait:
+            self._resp_thread.join(timeout=2.0)
+        if self._h2d_thread and wait:
+            self._h2d_thread.join(timeout=2.0)
+        self._resp_thread = None
+        self._h2d_thread = None
 
     def _send_pulled_kv_req_list(self, path: str, data: List[str]):
         if path in self.zmq_socket_map:
@@ -865,40 +1144,13 @@ class DecodeConnectorWorker:
         transfers.clear()
         return done_req_ids
 
-
 def handle_exception(future):
     if future.exception():
         logger.error("Exception occurred in future: %s", future.exception())
         # Re-raise on the caller thread if someone waits on the future elsewhere
         raise future.exception()
 
-
-def log_line(prefix, line):
-    if not VERBOSE:
-        return
-    with _print_lock:
-        print(f"{prefix} {line.rstrip()}", flush=True)
-
-
-def pump(pipe, prefix):
-    try:
-        for line in iter(pipe.readline, ''):
-            if not line:
-                break
-            log_line(prefix, line)
-    except Exception as e:
-        log_line(prefix, f"[logger error] {e}")
-
-
-def spawn_logged_process(args, tag):
-    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-    th_out = threading.Thread(target=pump, args=(p.stdout, f"[{tag}] OUT"))
-    th_err = threading.Thread(target=pump, args=(p.stderr, f"[{tag}] ERR"))
-    th_out.start()
-    th_err.start()
-    return p, [th_out, th_err]
-
-def stop_logged_process(proc, threads, timeout=5.0):
+def stop_logged_process(proc, timeout=5.0):
     try:
         if proc.poll() is None:
             proc.terminate()
@@ -918,14 +1170,8 @@ def stop_logged_process(proc, threads, timeout=5.0):
                 proc.stderr.close()
         except Exception:
             pass
-        for t in threads:
-            try:
-                t.join(timeout=timeout)
-            except Exception:
-                pass
 
-
-def _wait_ports(host_ports, timeout_sec=10, interval=0.1):
+def _wait_ports(host_ports, timeout_sec=1000, interval=0.1):
     remaining = set(host_ports)
     deadline = time.time() + timeout_sec
 
@@ -951,20 +1197,44 @@ def _wait_ports(host_ports, timeout_sec=10, interval=0.1):
             time.sleep(interval)
     return len(remaining) == 0, remaining
 
+def stdout_reader(pipe, q):
+    for line in iter(pipe.readline, ''):
+        q.put(line)
+    q.put(None)
+    pipe.close()
 
-def start_p_node_servers(base_port: int, servers: int, mmap_paths: List[str], dtype: str, offset_dtype: int, start_offset: int):
-    procs = []
-    for nid in range(servers):
-        port = base_port + nid
-        args = [P_NODE_BIN, "--node_id", str(nid), "--port", str(port),
-                "--mmap", mmap_paths[nid], "--dtype", dtype,
-                "--offset_dtype", str(offset_dtype), "--start_offset", str(start_offset)]
-        log_line(f"[P{nid}]", " ".join(args))
-        p, threads = spawn_logged_process(args, f"P{nid}")
-        procs.append((p, threads))
-        time.sleep(0.05)
-    return procs
+def stdout_printer(q: queue.Queue,
+                   file_path: Optional[str] = None) -> None:
+    file_obj = None
+    try:
+        if file_path is not None:
+            os.makedirs(file_path, exist_ok=True)
+            log_file = os.path.join(
+                file_path,
+                f'ox_log_d_client.log'
+                # f'ox_log_{datetime.now():%Y%m%d_%H%M%S}.log'
+            )
 
+            file_obj = open(log_file, 'w', buffering=1)
 
-def pack_u64_le(arr: List[int]) -> bytes:
-    return b''.join(struct.pack('<Q', int(x)) for x in arr)
+        while True:
+            try:
+                line = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+
+            if file_obj:
+                file_obj.write(line)
+                file_obj.flush()
+            else:
+                sys.__stdout__.write(line)
+                sys.__stdout__.flush()
+    finally:
+        if file_obj is not None:
+            file_obj.close()
+
+def decode_h2d_trigger():
+    DecodeConnectorWorker._h2d_wait.set()
+    DecodeConnectorWorker._h2d_wait.clear()

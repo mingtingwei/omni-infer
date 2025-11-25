@@ -2,6 +2,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -18,6 +19,8 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, FullAttentionSpec
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
+from omni.models.config_loader.loader import model_extra_config
+from .omni_cache import PrefillOmniCache, DecodeOmniCache
 from .kv_cache_interface import OmniKVCacheConfig, OmniAttentionSpec
 
 logger = init_logger("vllm.v1.omni")
@@ -72,17 +75,16 @@ class OmniKVCacheManager(KVCacheManager):
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
     ) -> None:
-        if len(kv_cache_config.kv_cache_groups) != 2:
+        if len(kv_cache_config.kv_cache_groups) > 2:
             raise ValueError(
                 "OmniKVCacheManager does not support hybrid models with more than 2 "
                 "kv cache groups"
             )
-        if enable_caching:
+        if enable_caching and len(kv_cache_config.kv_cache_groups) > 1:
             enable_caching = False
-            logger.warning("OmniKVCacheManager does not support prefix caching yet, enable_caching is set to False")
+            logger.warning("OmniKVCacheManager does not support prefix caching with "
+                           "hybrid managers yet, enable_caching is set to False")
 
-        if enable_kv_cache_events:
-            raise ValueError("OmniKVCacheManager does not support cache events yet")
         # `block_size` of all groups are assumed to be the same
         self.block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
@@ -93,6 +95,38 @@ class OmniKVCacheManager(KVCacheManager):
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+
+        # determine total number of blocks
+        if model_extra_config.operator_opt_config.use_omni_cache:
+            # calculate number of blocks for host cache
+            num_layers = len(kv_cache_config.kv_cache_groups[0].layer_names)
+            kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+            head_size = kv_cache_spec.head_size
+            dtype = kv_cache_spec.dtype
+            if os.getenv("ROLE") == "prefill":
+                tp_nnodes = model_extra_config.operator_opt_config.tp_nnodes
+                if self.block_size % tp_nnodes != 0:
+                    raise ValueError(f"Block size {self.block_size} is not divisible by tp_nnodes {tp_nnodes}")
+                num_full_attn_blocks = PrefillOmniCache.calc_cache_shape_for_prefill(
+                    num_layers=num_layers,
+                    block_size=self.block_size // tp_nnodes,
+                    head_size=head_size,
+                    dtype=dtype,
+                )[1]
+                logger.warning(f"**OmniKVCacheManager**: For prefill, {num_full_attn_blocks} blocks"
+                               " are available for host cache.")
+            else:
+                num_full_attn_blocks = DecodeOmniCache.calc_cache_shape_for_decode(
+                    num_layers=num_layers,
+                    block_size=self.block_size,
+                    head_size=head_size,
+                    dtype=dtype,
+                )[1]
+                num_full_attn_blocks = min(num_full_attn_blocks, self.num_gpu_blocks)
+                logger.warning(f"**OmniKVCacheManager**: For decode, {num_full_attn_blocks} blocks"
+                               " are available for both host cache and device cache.")
+        else:
+            num_full_attn_blocks = self.num_gpu_blocks
 
         full_attn_pool, full_attn_mgr = None, None
         self.block_pools: list[BlockPool] = []
@@ -106,7 +140,7 @@ class OmniKVCacheManager(KVCacheManager):
             )
             if isinstance(group.kv_cache_spec, FullAttentionSpec):
                 full_attn_pool = BlockPool(
-                    self.num_gpu_blocks, enable_caching, enable_kv_cache_events
+                    num_full_attn_blocks, enable_caching, enable_kv_cache_events
                 )
                 full_attn_mgr = get_manager_for_kv_cache_spec(
                     block_pool=full_attn_pool,
@@ -125,8 +159,6 @@ class OmniKVCacheManager(KVCacheManager):
         # put full attention at the first position
         if full_attn_pool is None:
             raise RuntimeError("No FullAttentionSpec is found.")
-        if len(self.block_pools) == 0:
-            raise RuntimeError("No other AttentionSpec is found.")
         self.block_pools = [full_attn_pool] + self.block_pools
         self.hybrid_managers = [full_attn_mgr] + self.hybrid_managers
 

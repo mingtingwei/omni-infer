@@ -33,6 +33,7 @@ from vllm.distributed import get_tp_group
 from omni.adaptors.vllm.forward_context import set_forward_context
 from omni.layers.sampler import random_choice
 from omni.layers.attention.backend.attention import AscendAttentionState
+from omni.models.config_loader.loader import model_extra_config
 
 def mark_static_for_graph_default(
         input_ids,
@@ -160,7 +161,12 @@ class PostDrafter(EagleProposer):
             if previous_hidden_states.shape[0] < input_ids.shape[0]:
                 previous_hidden_states = get_tp_group().all_gather(previous_hidden_states, dim=0)
 
-        if kv_caches is None:
+        if model_extra_config.operator_opt_config.use_omni_cache:
+            kv_cache_flag = attn_metadata
+        else:
+            kv_cache_flag = kv_caches
+            
+        if kv_cache_flag is None:
             with set_forward_context(None, self.vllm_config):
                 for i in range(self.speculative_config.num_speculative_tokens):
                     self.model(
