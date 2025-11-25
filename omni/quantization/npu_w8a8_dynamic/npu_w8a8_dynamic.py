@@ -32,12 +32,14 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped
 )
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import (
     ModelWeightParameter,
     ChannelQuantScaleParameter
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.distributed import get_tp_group, get_dp_group, get_ep_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 
 from omni.layers.fused_mlp import FusedMLP, FusedMLPMethodBase, W8A8DynamicFusedMLPMethod
 from omni.layers.linear import (
@@ -54,6 +56,7 @@ from omni.adaptors.vllm.distributed.parallel_state import(
 
 from omni.models.config_loader.loader import model_extra_config
 
+SUPPORTED_KV_QUANT_STRATEGY = ["channel"]
 logger = init_logger(__name__)
 
 
@@ -64,10 +67,12 @@ class NpuW8A8DynamicConfig(QuantizationConfig):
     def __init__(
         self,
         ignored_layers: Optional[List[str]] = None,
-        ignore: Optional[List[str]] = None
+        ignore: Optional[List[str]] = None,
+        kv_cache_scheme: Optional[Dict[str, Any]] = None
     ) -> None:
         self.ignored_layers = ignored_layers or []
         self.ignore = ignore
+        self.kv_cache_scheme = kv_cache_scheme
 
     @classmethod
     def get_name(cls) -> str:
@@ -98,7 +103,8 @@ class NpuW8A8DynamicConfig(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ['quant_method'])
         ignored_layers = cls.get_from_keys_or(config, ['ignored_layers'], None)
         ignore = cls.get_from_keys_or(config, ['ignore'], [])
-        return cls(ignored_layers=ignored_layers, ignore=ignore)
+        kv_cache_scheme = cls.get_from_keys_or(config, ['kv_cache_scheme'], None)
+        return cls(ignored_layers=ignored_layers, ignore=ignore, kv_cache_scheme=kv_cache_scheme)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -121,12 +127,17 @@ class NpuW8A8DynamicConfig(QuantizationConfig):
     def get_cache_scale(self, name: str) -> Optional[str]:
         """
         Check whether the param name matches the format for k/v cache scales
-        in NPU W8A8 Dynamic. If this is the case, return its equivalent
+        in npu_w8a8_dynamic. If this is the case, return its equivalent
         param name expected by vLLM
-
+ 
         :param name: param name
         :return: matching param name for KV cache scale in vLLM
         """
+        if name.endswith(".k_scale"):
+            return name.replace(".k_scale", ".attn.k_scale")
+        if name.endswith(".v_scale"):
+            return name.replace(".v_scale", ".attn.v_scale")
+        
         if name.endswith(".kv_cache_scale") and ".k_proj" in name:
             return name.replace(".k_proj.kv_cache_scale", ".attn.k_scale")
         if name.endswith(".kv_cache_scale") and ".v_proj" in name:
@@ -775,62 +786,92 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
         return y
 
 class NpuW8A8DynamicKVCacheMethod(BaseKVCacheMethod):
+    """Supports loading kv-cache scaling factors from npu_w8a8_dynamic checkpoints.
+        KVCache method for NPU W8A8 Dynamic.
+ 
+    Args:
+        quant_config: The quantization config.
     """
-    KV cache method for NPU W8A8 Dynamic.
-    Creates k_scale and v_scale for attention layers when enable_c8 is True.
-    """
-
-    def __init__(self, quant_config: NpuW8A8DynamicConfig):
-        super().__init__(quant_config)
-
-    def create_weights(self, layer: torch.nn.Module, total_num_kv_heads: int, head_size: int):
-        """
-        Create k_scale and v_scale for attention layer.
-        For npu_w8a8_dynamic, we use per_channel quantization strategy.
-        """
-        self.total_num_kv_heads = total_num_kv_heads
-        scale_num = total_num_kv_heads * head_size
-        layer.k_scale = torch.nn.Parameter(
-            torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
-            requires_grad=False
-        )
-        layer.v_scale = torch.nn.Parameter(
-            torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
-            requires_grad=False
-        )
     
+    def __init__(self, quant_config: NpuW8A8DynamicConfig):
+        self.quant_config = quant_config
+        self.validate_kv_cache_scheme(quant_config.kv_cache_scheme)
+        super().__init__(quant_config)
+ 
+    @staticmethod
+    def validate_kv_cache_scheme(kv_cache_scheme: Optional[dict[str, Any]]):
+        """
+        Validator for the kv cache scheme. Useful for controlling the
+        kv cache quantization schemes, that are being supported in vLLM
+        :param kv_cache_scheme: the npu_w8a8_dynamic kv cache scheme
+        """
+ 
+        if kv_cache_scheme is None:
+            raise ValueError("When enable kv cache quantization, " 
+                "kv_cache_scheme must not be null in config.json")
+ 
+        type_ = kv_cache_scheme.get("type")
+        num_bits = kv_cache_scheme.get("num_bits")
+ 
+        if type_ != "int" and num_bits != 8:
+            raise NotImplementedError(
+                "Currently supported kv cache quantization is "
+                "num_bits=8, type=int, however "
+                f"received num_bits={num_bits}, type={type_}")
+ 
+        strategy = kv_cache_scheme.get("strategy")
+        if strategy not in SUPPORTED_KV_QUANT_STRATEGY:
+            raise NotImplementedError(
+                f"Only support {SUPPORTED_KV_QUANT_STRATEGY} scaling factor "
+                f"for npu_w8a8_dynamic KV cache, found strategy: {strategy}")
+ 
+        is_symmetric = kv_cache_scheme.get("symmetric")
+        if not is_symmetric:
+            raise NotImplementedError(
+                "Only support symmetric scaling factor "
+                "for npu_w8a8_dynamic KV cache. "
+                f"However found symmetric: {is_symmetric}")
+ 
+    def create_weights(self, 
+                        layer: torch.nn.Module, 
+                        total_num_kv_heads: int, 
+                        head_size: int
+                    ):
+        """
+        Create "k_scale" and "v_scale"
+        for an attention layer.
+        """
+        if self.quant_config.kv_cache_scheme is not None:
+            strategy = self.quant_config.kv_cache_scheme.get("strategy")
+            if strategy in SUPPORTED_KV_QUANT_STRATEGY:
+                self.total_num_kv_heads = total_num_kv_heads
+                scale_num = total_num_kv_heads * head_size
+                layer.k_scale = torch.nn.Parameter(torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(torch.ones(scale_num, dtype=torch.get_default_dtype(), device='npu'),
+                                                requires_grad=False)
+ 
+ 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """
-        Process weights after loading from checkpoint.
-        Handles tensor model parallel slicing of k_scale and v_scale.
-        """
-        from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
-        scale_num = layer.k_scale.shape[0]
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
-        slice_size = scale_num // min(self.total_num_kv_heads, tp_size)
-        num_kv_head_replicas = tp_size // self.total_num_kv_heads if tp_size >= self.total_num_kv_heads else 1
-        local_index = tp_rank // num_kv_head_replicas
-        slice_start = local_index * slice_size
-        slice_end = slice_start + slice_size
-
-        # Per-channel quantization: slice and reshape to (1, -1)
-        layer.k_scale = torch.nn.Parameter(
-            layer.k_scale[slice_start:slice_end].view(1, -1), 
-            requires_grad=False
-        )
-        layer.v_scale = torch.nn.Parameter(
-            layer.v_scale[slice_start:slice_end].view(1, -1),
-            requires_grad=False
-        )
-
-        # Create reciprocal scales for optimization
-        layer.k_scale_reciprocal = torch.nn.Parameter(
-            1 / layer.k_scale.to(torch.float32),
-            requires_grad=False
-        )
-        layer.v_scale_reciprocal = torch.nn.Parameter(
-            1 / layer.v_scale.to(torch.float32),
-            requires_grad=False
-        )
+        if self.quant_config.kv_cache_scheme is not None:
+            scale_num = layer.k_scale.shape[0]
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+ 
+            slice_size = scale_num // min(self.total_num_kv_heads, tp_size)
+            num_kv_head_replicas = tp_size // self.total_num_kv_heads if tp_size >= self.total_num_kv_heads else 1
+            local_index = tp_rank // num_kv_head_replicas
+            slice_start = local_index * slice_size
+            slice_end = slice_start + slice_size
+ 
+            strategy = self.quant_config.kv_cache_scheme.get("strategy")
+            if strategy in SUPPORTED_KV_QUANT_STRATEGY:
+                layer.k_scale = torch.nn.Parameter(layer.k_scale[slice_start:slice_end].view(1, -1),
+                                            requires_grad=False)
+                layer.v_scale = torch.nn.Parameter(layer.v_scale[slice_start:slice_end].view(1, -1),
+                                            requires_grad=False)
+ 
+            layer.k_scale_reciprocal = torch.nn.Parameter(1/layer.k_scale.to(torch.float32),
+                                                        requires_grad=False)
+            layer.v_scale_reciprocal = torch.nn.Parameter(1/layer.v_scale.to(torch.float32),
+                                                        requires_grad=False)

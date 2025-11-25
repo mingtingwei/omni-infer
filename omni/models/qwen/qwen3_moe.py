@@ -23,6 +23,7 @@
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union, List, Tuple
+import os
 
 import torch
 import torch_npu
@@ -64,6 +65,7 @@ from omni.layers.linear import (RowParallelFlashCommLinear,
                                               QKVParallelFlashCommLinear)
 from omni.layers.rotary_embedding import get_rope
 from omni.layers.attention.backend.attention import AscendAttentionState
+from omni.layers.attention.layer import attention_init_c8
 
 from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
@@ -113,7 +115,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                            is_prefill=is_prefill)
         final_hidden_states = final_hidden_states
 
-        return final_hidden_states.view(orig_shape)
+        if is_prefill or \
+            model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            return final_hidden_states.view(orig_shape)
+        return final_hidden_states
 
 
 class Qwen3MoeAttention(nn.Module):
@@ -215,7 +221,7 @@ class Qwen3MoeAttention(nn.Module):
                 num_kv_heads=self.num_kv_heads,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.attn",
+                prefix=f"{prefix}.attn"
             )
         
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -228,8 +234,13 @@ class Qwen3MoeAttention(nn.Module):
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: AttentionMetadata
     ) -> torch.Tensor:
-        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
-        qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
+        is_prefill = os.environ.get("ROLE", "") == "prefill"
+        if is_prefill or \
+            model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states, is_prefill = is_prefill)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
@@ -272,7 +283,12 @@ class Qwen3MoeAttention(nn.Module):
             ).transpose(0, 1).contiguous().view(local_s, -1)
             output,_ = self.o_proj.forward(attn_output)
         else:
-            output, _ = self.o_proj(attn_output, reduce_type="RS")
+            if is_prefill or \
+                model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+                model_extra_config.operator_opt_config.decode_flash_comm_1:
+                output, _ = self.o_proj(attn_output, reduce_type="RS")
+            else:
+                output, _ = self.o_proj(attn_output, reduce_type="AR")
         return output
 
 
@@ -392,8 +408,8 @@ class Qwen3MoeModel(nn.Module):
 
         config = config
         cache_config = cache_config
-        quant_config = quant_config
 
+        self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
@@ -455,10 +471,13 @@ class Qwen3MoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        # 采用FlashComm1.0, 通过slice使用hidden_states转为DP
         aux_hidden_states = []
-        hidden_states = self.get_tp_slice(hidden_states)
-
+        is_prefill = os.environ.get("ROLE", "") == "prefill"
+        if is_prefill or \
+            model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            # 采用FlashComm1.0, 通过slice使用hidden_states转为DP
+            hidden_states = self.get_tp_slice(hidden_states)
         for i in range(self.start_layer, self.end_layer):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
@@ -475,7 +494,12 @@ class Qwen3MoeModel(nn.Module):
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states, _ = self.norm(hidden_states, residual, y_transform='AG')
+        if is_prefill or \
+            model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            hidden_states, _ = self.norm(hidden_states, residual, y_transform='AG')
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
             return aux_hidden_states, hidden_states
         return hidden_states
@@ -495,6 +519,12 @@ class Qwen3MoeModel(nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts)
+
+        kv_scale_mapping = {
+            "k_scale",
+            "v_scale",
+            "kv_cache_scale",
+        }
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -522,6 +552,7 @@ class Qwen3MoeModel(nn.Module):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
+                loaded_weight = loaded_weight.view(-1)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -562,7 +593,9 @@ class Qwen3MoeModel(nn.Module):
                                 expert_id=expert_id)
                     break
                 else:
-
+                    if any(key in name for key in kv_scale_mapping):
+                        name = self.quant_config.get_cache_scale(name)
+                        loaded_weight = loaded_weight.view(-1)
                     if is_pp_missing_parameter(name, self):
                         continue
                     if name not in params_dict:

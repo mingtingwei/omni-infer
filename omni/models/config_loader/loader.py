@@ -83,6 +83,7 @@ class ModelOperatorOptConfig:
     gmm_nz: bool = False
     unquant_bmm_nz: bool = False
     decode_moe_dispatch_combine: bool = True
+    decode_flash_comm_1: bool = True # decode节点开启FlashComm1优化
     use_super_kernel: bool = False
     enable_prefill_micro_batch: bool = False
     use_mlaprolog: bool = False

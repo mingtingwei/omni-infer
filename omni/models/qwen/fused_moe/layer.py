@@ -492,7 +492,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                indices_type=None
+                indices_type=None,
+                finished=~layer.mc2_mask if layer.mc2_mask is not None else None
             )
             topk_ids = topk_ids.int()
             topk_ids = layer.apply_expert_load_balance(
@@ -581,6 +582,104 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
         return output_combine
 
+    def apply_allreduce_decode(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool = False,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            global_num_experts: int = -1,
+            expert_range: List[int] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = 'softmax',
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=None,
+            finished=~layer.mc2_mask if layer.mc2_mask is not None else None
+        )
+        topk_ids = layer.apply_expert_load_balance(
+            topk_ids=topk_ids,
+            best_topk_ids=None
+        )
+        sorted_tokens, expanded_x_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
+            x,
+            topk_ids,
+            scale=None,
+            offset=None,
+            active_num=topk_ids.numel(),
+            expert_num=global_num_experts,
+            expert_capacity=-1,
+            drop_pad_mode=0,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=expert_range,
+            quant_mode=-1,
+            row_idx_type=0
+        )
+
+        gate_up_proj = torch_npu.npu_grouped_matmul(
+            [sorted_tokens],
+            [layer.w13_weight],
+            bias=None,
+            group_list=expert_tokens,
+            split_item=3,
+            output_dtype=sorted_tokens.dtype,
+            group_type=0,
+            group_list_type=1
+        )[0]
+        x = torch_npu.npu_swiglu(gate_up_proj)
+        y = torch_npu.npu_grouped_matmul(
+            [x],
+            [layer.w2_weight],
+            bias=None,
+            group_list=expert_tokens,
+            split_item=3,
+            output_dtype=x.dtype,
+            group_type=0,
+            group_list_type=1
+        )[0]
+
+        # 将不在本rank的专家的topk_weights置为0
+        valid_mask = (topk_ids >= expert_range[0]) & (topk_ids < expert_range[1])
+        topk_weights = topk_weights * valid_mask.to(topk_weights.dtype)
+
+        # 旧版cann中expanded_x_idx包含负数会有精度问题，需要消除负数
+        expanded_x_idx = (expanded_x_idx + expanded_x_idx.shape[0]) % expanded_x_idx.shape[0]
+
+        y = torch_npu.npu_moe_finalize_routing(
+            y, None, None, None,
+            topk_weights, # 数据类型要求与y一致
+            expanded_x_idx,
+            topk_ids,
+            drop_pad_mode=2
+        )
+        
+        y = get_tp_group().all_reduce(y)
+
+        if model_extra_config.task_config.enable_omni_placement:
+            layer.planner.record_activation(
+                layer.moe_layer_idx,
+                expert_tokens,
+                support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune
+            )
+
+        return y
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -641,6 +740,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                     topk_group,
                     num_expert_group,
                     global_num_experts,
+                    custom_routing_function,
+                    scoring_func,
+                    e_score_correction_bias
+                )
+            elif not model_extra_config.operator_opt_config.decode_flash_comm_1:
+                return self.apply_allreduce_decode(
+                    layer,
+                    x,
+                    router_logits,
+                    top_k,
+                    renormalize,
+                    use_grouped_topk,
+                    topk_group,
+                    num_expert_group,
+                    global_num_experts,
+                    expert_range,
                     custom_routing_function,
                     scoring_func,
                     e_score_correction_bias
@@ -816,6 +931,7 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
     ):
         super().__init__()
+        self.is_prefill = os.environ.get("ROLE", "") == "prefill"
         self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         self.prefix = prefix
 
@@ -867,10 +983,18 @@ class FusedMoE(torch.nn.Module):
 
         # Determine expert maps
         if self.use_ep:
-            self.local_num_experts, self.expert_range = determine_expert_range(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+            if self.is_prefill or \
+                model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+                model_extra_config.operator_opt_config.decode_flash_comm_1:
+                self.local_num_experts, self.expert_range = determine_expert_range(
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    global_num_experts=self.global_num_experts)
+            else:
+                self.local_num_experts, self.expert_range = determine_expert_range(
+                    ep_size=get_tp_group().world_size,
+                    ep_rank=get_tp_group().rank_in_group,
+                    global_num_experts=self.global_num_experts)
         else:
             self.local_num_experts, self.expert_range = (self.global_num_experts,
                                                        None)
@@ -1136,7 +1260,7 @@ class FusedMoE(torch.nn.Module):
 
         # Forced load balance
         if model_extra_config.operator_opt_config.best_ep:
-            if self.is_prefill_instance:
+            if self.is_prefill:
                 t = (topk_ids.shape[0] * 8) // 256
                 topk_ids = torch.arange(256, device=current_platform.device_type, dtype=torch.int32).unsqueeze(
                     0).repeat(t + 1, 1).view(-1, 8)[:topk_ids.shape[0]]
@@ -1160,7 +1284,8 @@ class FusedMoE(torch.nn.Module):
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
                        routed_scaling_factor: Optional[torch.Tensor] = None,
-                       indices_type: Optional[torch.dtype] = None):
+                       indices_type: Optional[torch.dtype] = None,
+                       finished: Optional[torch.dtype] = None):
         # DeepSeekV2 uses grouped_top_k
         if e_score_correction_bias is None:
             e_score_correction_bias = FusedMoE.ZERO_CORRECTION_BIAS
@@ -1191,7 +1316,8 @@ class FusedMoE(torch.nn.Module):
 
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
                 router_logits.float(),
-                k=top_k
+                k=top_k,
+                finished=finished
             )
             if renormalize:
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
@@ -1220,9 +1346,14 @@ class FusedMoE(torch.nn.Module):
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[next(iter(attn_metadata))]
         if attn_metadata is not None and attn_metadata.mc2_mask is not None:
-            mc2_mask_slice_size = hidden_states.shape[0]
-            mc2_mask_slice_id = get_tp_group().rank_in_group
-            self.mc2_mask = attn_metadata.mc2_mask[mc2_mask_slice_id * mc2_mask_slice_size : (mc2_mask_slice_id + 1) * mc2_mask_slice_size]
+            if self.is_prefill or \
+                model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+                model_extra_config.operator_opt_config.decode_flash_comm_1:
+                mc2_mask_slice_size = hidden_states.shape[0]
+                mc2_mask_slice_id = get_tp_group().rank_in_group
+                self.mc2_mask = attn_metadata.mc2_mask[mc2_mask_slice_id * mc2_mask_slice_size : (mc2_mask_slice_id + 1) * mc2_mask_slice_size]
+            else:
+                self.mc2_mask = attn_metadata.mc2_mask
 
         final_hidden_states = self.quant_method.apply(
             layer=self,
