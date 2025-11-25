@@ -128,7 +128,8 @@ class ModelOperatorOptConfig:
     decode_experts_pruning: bool = False
     new_w4_op: bool = False # w4a8新算子
     enable_c8: bool = False # GQA使能C8
-
+    
+    enable_scmoe_multi_stream: bool = False # 龙猫ScMoe架构多流开启
     def __post_init__(self):
 
         # Check the dependencies of use_prefetch and prefetch_Mb
