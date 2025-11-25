@@ -80,8 +80,8 @@ all:
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_BUFFSIZE: 400
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.2
@@ -179,8 +179,8 @@ all:
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_BUFFSIZE: 400
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.2
@@ -278,8 +278,8 @@ all:
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_BUFFSIZE: 400
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.2
@@ -377,8 +377,8 @@ all:
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_BUFFSIZE: 400
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.2
@@ -474,8 +474,8 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.1
@@ -573,8 +573,8 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_CONNECT_TIMEOUT: 180
-            HCCL_EXEC_TIMEOUT: 120
+            HCCL_CONNECT_TIMEOUT: 1800
+            HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
             HOST_IP: 127.0.0.6
