@@ -119,9 +119,6 @@ class EagleQwen2Model(Qwen2Model):
             prefix=f"{prefix}.fc"
         )
 
-        self.full_cos = None # get from main model
-        self.full_sin = None # get from main model
-
         self.aux_hidden_state_layers = tuple()
 
     def forward(
@@ -138,9 +135,13 @@ class EagleQwen2Model(Qwen2Model):
         hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=1)
         residual = None
 
-        cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-        sin = torch.index_select(self.full_sin, dim=0, index=positions)
-
+        if attn_metadata is None:
+            cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+        else:
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[next(iter(attn_metadata))]
+            cos = attn_metadata.cos
+            sin = attn_metadata.sin
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache and self.tp_size > 1:
             n_tokens = hidden_states.shape[0]
@@ -191,8 +192,6 @@ class EagleQwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
         return self.model(input_ids, positions, previous_hidden_states, kv_caches, attn_metadata)
 
     def set_share_weight(self, target_model):
-        self.model.full_cos = target_model.model.full_cos
-        self.model.full_sin = target_model.model.full_sin
         self.model.embed_tokens = target_model.model.embed_tokens
         self.lm_head = target_model.lm_head
 
@@ -230,5 +229,4 @@ class EagleQwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly
 
     def mark_static_for_graph(self, *args, **kwargs):
-        torch._dynamo.mark_static(self.model.full_cos)
-        torch._dynamo.mark_static(self.model.full_sin)
+        pass
