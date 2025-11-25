@@ -43,3 +43,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/patch_reasoning_thinking_bug.patch
 git apply --whitespace=nowarn $PATCH_ROOT/tracing.patch
 git apply --whitespace=nowarn $PATCH_ROOT/support_v1_priority_schedule_for_xiaoyi.patch
 git apply --whitespace=nowarn $PATCH_ROOT/gpt_oss_model_init.patch
+git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_parser.patch

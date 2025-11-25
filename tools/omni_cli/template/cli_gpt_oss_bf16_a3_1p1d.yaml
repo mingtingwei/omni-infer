@@ -96,7 +96,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 4096
+            MODEL_LEN_MAX_DECODE: 40960
             MODEL_PATH: /data/models/gpt-oss-120b-BF16
             OMNI_REUSE_PREFILLED_TOKENS: 1
             OMNI_SKIP_DECODE_TOKENIZE: 1
@@ -191,7 +191,7 @@ all:
             LCCL_PARALLEL: 0
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_PREFILL: 4096
+            MODEL_LEN_MAX_PREFILL: 40960
             MODEL_PATH: /data/models/gpt-oss-120b-BF16
             OMNI_REUSE_PREFILLED_TOKENS: 1
             OMNI_SKIP_DECODE_TOKENIZE: 1
