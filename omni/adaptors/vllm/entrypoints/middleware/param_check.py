@@ -8,7 +8,9 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from http import HTTPStatus
 from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.logger import init_logger
 
+logger = init_logger("vllm.entrypoints.middleware")
 
 TYPE_MAPPING = {
     "int": int,
@@ -19,6 +21,7 @@ TYPE_MAPPING = {
     "dict": dict
 }
 DEFAULT_MAX_MODEL_LEN = 8192
+ACTION = os.environ.get("ROLE", "")
 
 class BaseValidator(ABC):
     def __init__(self,
@@ -297,11 +300,6 @@ class ValidateSamplingParams(BaseHTTPMiddleware):
             except json.JSONDecodeError:
                 return await call_next(request)
 
-            # Only True and False are allowed for "thinking" in chat_template_kwargs.thinking.
-            chat_template_kwargs = json_load.get("chat_template_kwargs")
-            if chat_template_kwargs is not None and isinstance(chat_template_kwargs, dict) and "thinking" in chat_template_kwargs \
-                    and chat_template_kwargs["thinking"] not in {True, False}:
-                chat_template_kwargs.pop("thinking")
             # Ignore guided decoding if parameter json_schema is missing.
             response_format = json_load.get("response_format")
             if response_format is not None and isinstance(response_format, dict) and "type" in response_format \
@@ -315,7 +313,7 @@ class ValidateSamplingParams(BaseHTTPMiddleware):
 
             if json_load.get("kv_transfer_params"):
                 max_tokens = json_load.get("max_tokens", None)
-                if not max_tokens:
+                if max_tokens is None:
                     json_load["max_tokens"] = int(os.getenv("DEFAULT_MAX_TOKENS", DEFAULT_MAX_MODEL_LEN))
                     request._body = json.dumps(json_load).encode("utf-8")
 
@@ -336,9 +334,22 @@ class ValidateSamplingParams(BaseHTTPMiddleware):
                         if error := validator.validate_json(json_load):
                             return self.create_error_response(status_code, error)
             
-            if os.environ.get("ROLE", "") == "prefill":
+            if ACTION == "prefill":
                 json_load["max_tokens"] = 1
             request._body = json.dumps(json_load).encode("utf-8")
+
+            headers = dict(request.headers)
+            if "x-request-id" in headers:
+                request_id = headers["x-request-id"]
+                if "chat" in request.url.path:
+                    request_id = f"chatcmpl-{request_id}"
+                else:
+                    request_id = f"cmpl-{request_id}"
+                
+                logger.info(f"[Begin {ACTION}] request_id: {request_id}")
+                response = await call_next(request)
+                logger.info(f"[End {ACTION}] request_id: {request_id}")
+                return response
 
         if request.method == "GET" and request.url.path == "/v1/models":
             response = await call_next(request)
