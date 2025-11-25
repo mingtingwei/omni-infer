@@ -33,3 +33,9 @@ def register():
         "omni.accelerators.pd.ems_connector",
         "EmsConnector"
     )
+
+    KVConnectorFactory.register_connector(
+        "SwapKVConnector",
+        "omni.accelerators.pd.swap_kv_connector",
+        "SwapKVConnector"
+    )

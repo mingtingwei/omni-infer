@@ -617,6 +617,112 @@ class NPUModelRunner(GPUModelRunner):
         block_offsets = input_positions % block_size
         slot_mapping.copy_(block_numbers * block_size + block_offsets)
 
+    def deal_metadata(
+        self,
+        attn_metadata,
+        input_ids,
+        positions,
+        is_dummy = False,
+    ):
+        def deal_slots(slot_mapping, batch_lens, seq_lens):
+            start_idx = 0
+            dealed_slot_mapping = []
+            for idx in range(seq_lens.shape[0]):
+                dealed_slot_mapping.append(slot_mapping[start_idx : start_idx + batch_lens[idx]])
+                if idx < seq_lens.shape[0] - 1:
+                    start_idx = seq_lens[idx + 1]
+
+            return torch.cat(dealed_slot_mapping, dim=0)
+
+        if attn_metadata is not None:
+            logger.info("Start to deal_metadata")
+            first_metadata = next(iter(attn_metadata.values()))
+            is_prefill = input_ids[-1] == -1 if not is_dummy else False
+            uid = input_ids[0]
+            input_ids_list = []
+            query_start_loc = torch.zeros(first_metadata.query_lens.shape[0] + 1, dtype=torch.int64, device=first_metadata.query_lens.device)
+            torch.cumsum(first_metadata.query_lens, dim=0, out=query_start_loc[1:])
+            query_start_loc = query_start_loc.npu()
+
+            if not is_dummy:
+                for idx in range(query_start_loc.shape[0] - 1):
+                    start_idx = query_start_loc[idx]
+                    end_idx = query_start_loc[idx + 1]
+                    batch_input_ids = input_ids[start_idx + 1 : end_idx]
+                    batch_input_ids = batch_input_ids[batch_input_ids != -1]
+                    input_ids_list.append(batch_input_ids)
+                input_ids = torch.cat(input_ids_list, dim=0)
+
+            positions = positions[:input_ids.shape[0]]
+            batch_lens = (first_metadata.query_lens - 2).npu() if not is_dummy else first_metadata.query_lens.npu()
+            max_query_len = batch_lens.max().item()
+            sum_tokens = batch_lens.sum().item()
+            batch_lens_list = batch_lens.tolist()
+            
+            first_metadata = next(iter(attn_metadata.values()))
+            seq_lens = first_metadata.seq_lens.npu()        # 如果是decode的话，seq_lens应当是batch_lens + prec_his_len
+            batch_size = seq_lens.shape[0]
+            query_start = torch.zeros(batch_size + 1, dtype=torch.int64, device=seq_lens.device)
+            torch.cumsum(batch_lens, dim=0, out=query_start[1:])
+            
+            if not is_prefill:
+                block_table = first_metadata.block_tables
+                deal_seq_lens = seq_lens - batch_lens
+                num_blocks_per_seq = torch.ceil(deal_seq_lens / self.block_size).to(torch.int64) # 向上取整
+
+                # page_offsets 就是 num_blocks_per_seq 的前缀和
+                page_offsets = torch.zeros(batch_size + 1, dtype=torch.int64, device=block_table.device)
+                torch.cumsum(num_blocks_per_seq, dim=0, out=page_offsets[1:])
+
+                last_page_len_tensor = deal_seq_lens % self.block_size
+                last_page_len_tensor[last_page_len_tensor == 0] = self.block_size # 这里是如果最后一个 block 的长度等于 0，我就给他设置成 block_size
+                last_page_len = last_page_len_tensor.to(torch.int64)
+
+                seq_offset_k = torch.zeros(seq_lens.shape[0] + 1, dtype=torch.int64, device=block_table.device)
+                torch.cumsum(seq_lens, dim=0, out=seq_offset_k[1:]) # 计算出每个请求的前缀和
+
+                seq_offset_t = torch.zeros(batch_lens.shape[0] + 1, dtype=torch.int64, device=block_table.device)
+                torch.cumsum(batch_lens, dim=0, out=seq_offset_t[1:]) # 这里是根据测试的脚本得到：seq_offset_t 是 num_candidates 的前缀和
+
+                max_seq_len_k = torch.max(seq_lens).item()
+
+                current_block_tables = block_table[:batch_size]
+
+                page_ids_list = []
+                for i in range(batch_size):
+                    num_blocks_for_req = page_offsets[i + 1] - page_offsets[i]
+                    valid_blocks = current_block_tables[i, :num_blocks_for_req]
+                    page_ids_list.append(valid_blocks)
+
+                page_ids = torch.cat(page_ids_list).to(torch.int64)
+            else:
+                num_candidates = torch.zeros_like(batch_lens)
+            # breakpoint()
+            for metadata in attn_metadata.values():
+                metadata.query_lens = batch_lens
+                metadata.query_lens_list = batch_lens_list
+                metadata.seq_lens = batch_lens
+                metadata.seq_lens_list = batch_lens_list
+                metadata.max_query_len = max_query_len
+                metadata.num_actual_tokens = sum_tokens
+                metadata.additional_metadata = {}
+                metadata.additional_metadata["uid"] = uid
+                metadata.additional_metadata["query_start"] = query_start
+                if not is_prefill:
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
+                    metadata.slot_indices = deal_slots(metadata.slot_indices, batch_lens, metadata.seq_lens)
+                    metadata.additional_metadata["max_seq_len_k"] = max_seq_len_k
+                    metadata.additional_metadata["seq_offset_k"] = seq_offset_k
+                    metadata.additional_metadata["seq_offset_t"] = seq_offset_t
+                    metadata.additional_metadata["page_offsets"] = page_offsets
+                    metadata.additional_metadata["page_ids"] = page_ids
+                    metadata.additional_metadata["last_page_len"] = last_page_len
+                else:
+                    metadata.slot_mapping = deal_slots(metadata.slot_mapping, batch_lens, metadata.seq_lens)
+                    metadata.additional_metadata["num_candidates"] = num_candidates
+                
+        return attn_metadata, input_ids, positions
+
     def _simple_prepare_inputs(
         self,
         attn_metadata,
@@ -713,6 +819,10 @@ class NPUModelRunner(GPUModelRunner):
         start_before_f = time.time()
         num_input_tokens = scheduler_output.total_num_scheduled_tokens
         input_ids = self.input_ids[:num_input_tokens]
+
+        if self.model_config.hf_config.model_type == "hstu_inference_ranking":
+            attn_metadata, input_ids, positions = self.deal_metadata(attn_metadata, input_ids, positions)
+
         model_kwargs = {}
         raw_hidden_states = None
         attn_state = next(iter(attn_metadata.values())).attn_state
@@ -1129,6 +1239,17 @@ class NPUModelRunner(GPUModelRunner):
         self.finished_sending = set()
         self.finished_recving = set()
         self.loading_kv_failure = set()
+        
+        prompt_logprobs_dict = {}
+        if scheduler_output.scheduled_new_reqs[0].sampling_params.prompt_logprobs:
+            from vllm.v1.outputs import LogprobsTensors
+            num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+            for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
+                prompt_logprobs_dict[req_id] = LogprobsTensors(
+                    logprob_token_ids=hidden_states.cpu(),
+                    logprobs=hidden_states.cpu(),
+                    selected_token_ranks=positions[:hidden_states.shape[0]].cpu()
+                )
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1136,7 +1257,7 @@ class NPUModelRunner(GPUModelRunner):
             sampled_token_ids=cached_sampled_token_ids,
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
-            prompt_logprobs_dict={},
+            prompt_logprobs_dict=prompt_logprobs_dict,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             loading_kv_failure=loading_kv_failure,
@@ -1246,6 +1367,10 @@ class NPUModelRunner(GPUModelRunner):
             "attn_metadata": attn_metadata,
             "selected_indices": None
         }
+
+        if self.model_config.hf_config.model_type == "hstu_inference_ranking":
+            attn_metadata, input_ids, positions = self.deal_metadata(attn_metadata, input_ids, positions, True)
+
         with set_forward_context(attn_metadata, self.vllm_config):
             use_compile = self.enable_torchair_graph_mode
             for _ in range(self.total_step):

@@ -147,6 +147,14 @@ def register_model():
         "GptOssForCausalLM",
         "omni.models.openai.gpt_oss:GptOssForCausalLM")
 
+    ModelRegistry.register_model(
+        "HSTUInferenceForCausalLM",
+        "omni.models.hstu.hstu:HSTUInferenceForCausalLM")
+
+    from vllm.transformers_utils.config import _CONFIG_REGISTRY
+    from omni.models.hstu.hstu_config import HSTUInferenceRankingConfig
+    _CONFIG_REGISTRY["hstu_inference_ranking"] = HSTUInferenceRankingConfig
+
     if (
         int(os.getenv("RANDOM_MODE", default='0')) or
         int(os.getenv("CAPTURE_MODE", default='0')) or

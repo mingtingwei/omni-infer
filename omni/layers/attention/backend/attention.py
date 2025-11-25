@@ -148,6 +148,7 @@ class AscendMetadata:
     mc2_mask: Optional[torch.Tensor] = None
     prefix_meta: Optional[PrefixCopyMeta] = None
     omni_cache: Optional[BaseOmniCache] = None
+    additional_metadata: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def advance_step(metadata, positions, block_size, pad_mask, model_layer):
@@ -1159,19 +1160,35 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     raise RuntimeError("attn_metadata must not be None")
 
                 if len(attn_metadata.query_lens_list) == 1:
-                    attn_output = torch_npu.npu_fused_infer_attention_score(
-                        query.unsqueeze(0),
-                        key.unsqueeze(0),
-                        value.unsqueeze(0),
-                        num_heads=self.num_heads,
-                        num_key_value_heads=self.num_kv_heads,
-                        input_layout="BSND",
-                        scale=self.scale,
-                        sparse_mode=3,
-                        actual_seq_lengths=attn_metadata.query_lens_list,
-                        actual_seq_lengths_kv=attn_metadata.seq_lens_list,
-                        atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
-                    )[0].view(-1, self.num_heads, self.head_size)
+                    if attn_metadata.additional_metadata != None and attn_metadata.additional_metadata["model_type"] == "hstu_inference_ranking":
+                        attn_output = torch.ops.mxrec.hstu_jagged(
+                            q=query,
+                            k=key,
+                            v=value,
+                            mask=None,
+                            attn_bias=None,
+                            mask_type=0,
+                            max_seq_len=attn_metadata.max_query_len,
+                            silu_scale=1.0 / (self.head_size ** 0.5),
+                            seq_offset=attn_metadata.additional_metadata["query_start"],
+                            num_context=None,
+                            num_target=attn_metadata.additional_metadata["num_candidates"],
+                            target_group_size=1,
+                        ).view(-1, self.num_heads, self.head_size)
+                    else:
+                        attn_output = torch_npu.npu_fused_infer_attention_score(
+                            query.unsqueeze(0),
+                            key.unsqueeze(0),
+                            value.unsqueeze(0),
+                            num_heads=self.num_heads,
+                            num_key_value_heads=self.num_kv_heads,
+                            input_layout="BSND",
+                            scale=self.scale,
+                            sparse_mode=3,
+                            actual_seq_lengths=attn_metadata.query_lens_list,
+                            actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+                            atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
+                        )[0].view(-1, self.num_heads, self.head_size)
 
                     output = output.view_as(attn_output)
                     output.copy_(attn_output)
@@ -1215,57 +1232,79 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if stream_for_reshape_and_cache != torch.npu.current_stream():
                 torch.npu.current_stream().wait_stream(stream_for_reshape_and_cache)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            if model_extra_config.operator_opt_config.use_omni_cache and omni_cache is not None and attn_metadata.prefix_meta is not None:
-                try:
-                    layer_idx = extract_layer_index(layer.layer_name)
-                except Exception:
-                    layer_idx = 0
-                omni_cache.synchronize_h2d(
-                    prefix_meta=attn_metadata.prefix_meta,
-                    layer_idx=layer_idx,
-                )
-
-            block_num, block_size = self.key_cache.shape[0], self.key_cache.shape[1]
-
-            num_batch = attn_metadata.seq_lens.shape[0]
-            query = query.view(num_batch, -1, self.num_heads * self.head_size)
-            block_tables = attn_metadata.block_tables
-            attn_output = None
-            if self.enable_graph_mode:
-                attn_output, _ = tng.ops.npu_fused_infer_attention_score(
-                    torch.transpose(query.view(num_batch, -1, self.num_heads, self.head_size), 1, 2),
-                    self.key_cache,
-                    self.value_cache,
-                    num_heads=self.num_heads,
-                    num_key_value_heads=self.num_kv_heads,
-                    input_layout="BNSD",
-                    scale=self.scale,
-                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
-                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
-                    key_antiquant_mode=0,
-                    value_antiquant_mode=0,
-                    actual_seq_lengths_kv=attn_metadata.seq_lens,
-                    block_table=block_tables,
-                    block_size=block_size,
-                    inner_precise=1
+            if attn_metadata.additional_metadata != None and attn_metadata.additional_metadata["model_type"] == "hstu_inference_ranking":
+                attn_output = torch.ops.mxrec.hstu_paged(
+                    q=query,
+                    k=key,
+                    v=value,
+                    k_cache=self.key_cache,
+                    v_cache=self.value_cache,
+                    mask=None,
+                    attn_bias=None,
+                    mask_type=2,
+                    max_seq_len=attn_metadata.max_query_len,
+                    max_seq_len_k=attn_metadata.additional_metadata["max_seq_len_k"],
+                    silu_scale=1.0 / attn_metadata.max_query_len,
+                    seq_offset=attn_metadata.additional_metadata["query_start"],   
+                    seq_offset_k=attn_metadata.additional_metadata["seq_offset_k"],
+                    seq_offset_t=attn_metadata.additional_metadata["seq_offset_t"],
+                    page_offsets=attn_metadata.additional_metadata["page_offsets"], 
+                    page_ids=attn_metadata.additional_metadata["page_ids"], 
+                    last_page_len=attn_metadata.additional_metadata["last_page_len"],
+                    num_target=attn_metadata.query_lens
                 )
             else:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                    query,
-                    self.key_cache,
-                    self.value_cache,
-                    num_heads=self.num_heads,
-                    num_key_value_heads=self.num_kv_heads,
-                    input_layout="BSH",
-                    scale=self.scale,
-                    key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
-                    value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
-                    key_antiquant_mode=0,
-                    value_antiquant_mode=0,
-                    actual_seq_lengths_kv=attn_metadata.seq_lens,
-                    block_table=block_tables,
-                    block_size=block_size,
-                )
+                if model_extra_config.operator_opt_config.use_omni_cache and omni_cache is not None and attn_metadata.prefix_meta is not None:
+                    try:
+                        layer_idx = extract_layer_index(layer.layer_name)
+                    except Exception:
+                        layer_idx = 0
+                    omni_cache.synchronize_h2d(
+                        prefix_meta=attn_metadata.prefix_meta,
+                        layer_idx=layer_idx,
+                    )
+
+                block_num, block_size = self.key_cache.shape[0], self.key_cache.shape[1]
+
+                num_batch = attn_metadata.seq_lens.shape[0]
+                query = query.view(num_batch, -1, self.num_heads * self.head_size)
+                block_tables = attn_metadata.block_tables
+                attn_output = None
+                if self.enable_graph_mode:
+                    attn_output, _ = tng.ops.npu_fused_infer_attention_score(
+                        torch.transpose(query.view(num_batch, -1, self.num_heads, self.head_size), 1, 2),
+                        self.key_cache,
+                        self.value_cache,
+                        num_heads=self.num_heads,
+                        num_key_value_heads=self.num_kv_heads,
+                        input_layout="BNSD",
+                        scale=self.scale,
+                        key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                        value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                        key_antiquant_mode=0,
+                        value_antiquant_mode=0,
+                        actual_seq_lengths_kv=attn_metadata.seq_lens,
+                        block_table=block_tables,
+                        block_size=block_size,
+                        inner_precise=1
+                    )
+                else:
+                    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                        query,
+                        self.key_cache,
+                        self.value_cache,
+                        num_heads=self.num_heads,
+                        num_key_value_heads=self.num_kv_heads,
+                        input_layout="BSH",
+                        scale=self.scale,
+                        key_antiquant_scale = k_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                        value_antiquant_scale = v_scale.view(1, -1) if model_extra_config.operator_opt_config.enable_c8 else None,
+                        key_antiquant_mode=0,
+                        value_antiquant_mode=0,
+                        actual_seq_lengths_kv=attn_metadata.seq_lens,
+                        block_table=block_tables,
+                        block_size=block_size,
+                    )
 
             output = output.view_as(attn_output)
             output.copy_(attn_output)
