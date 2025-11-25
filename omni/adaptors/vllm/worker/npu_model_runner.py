@@ -1241,7 +1241,7 @@ class NPUModelRunner(GPUModelRunner):
         self.loading_kv_failure = set()
         
         prompt_logprobs_dict = {}
-        if scheduler_output.scheduled_new_reqs[0].sampling_params.prompt_logprobs:
+        if len(scheduler_output.scheduled_new_reqs) > 0 and scheduler_output.scheduled_new_reqs[0].sampling_params.prompt_logprobs:
             from vllm.v1.outputs import LogprobsTensors
             num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
             for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
