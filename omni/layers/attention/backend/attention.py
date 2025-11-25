@@ -26,7 +26,7 @@ import torchair as tng
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type
-
+import torch.nn.functional as F
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -72,6 +72,10 @@ def unified_ascend_attention_with_output(
         value: torch.Tensor,
         output: torch.Tensor,
         layer_name: str,
+        sink_query: Optional[torch.Tensor] = None,
+        sink_key: Optional[torch.Tensor] = None,
+        sink_value: Optional[torch.Tensor] = None,
+        v_head_size: Optional[int] = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -87,7 +91,11 @@ def unified_ascend_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output,
-                      trace_flag=False)
+                      trace_flag=False,
+                      sink_query=sink_query,
+                      sink_key=sink_key,
+                      sink_value=sink_value,
+                      v_head_size=v_head_size)
     return
 
 
@@ -570,15 +578,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.kv_stream = kv_stream
 
     def forward(self, *args, **kwargs):
+        # adapted for Gpt-oss
         if self.attn_sinks is not None:
             if self.use_tnd_pa:
                 return self.forward_sink_pa(*args, **kwargs)
             else:
                 return self.forward_sink(*args, **kwargs)
-        if self.use_tnd_pa:
-            return self.forward_pa(*args, **kwargs)
+        # adapted for Pangu 72Bv2 TODO: Refactor the function
+        elif "sink_key" in kwargs:
+            return self.forward_sink_attention(*args, **kwargs)
+        # other
         else:
-            return self.forward_vanilla(*args, **kwargs)
+            if self.use_tnd_pa:
+                return self.forward_pa(*args, **kwargs)
+            else:
+                return self.forward_vanilla(*args, **kwargs)
 
     def forward_sink(
             self,
@@ -864,7 +878,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  device=query.device)
 
         if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size)
+            return output.view(num_tokens, -1)
 
         if not (layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0):
             raise RuntimeError("layer._k_scale_float and layer._v_scale_float must both be 1.0")
@@ -1052,7 +1066,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  device=query.device)
 
         if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size)
+            return output.view(num_tokens, -1)
 
         if not (layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0):
             raise RuntimeError("layer._k_scale_float and layer._v_scale_float must both be 1.0")
@@ -1282,8 +1296,139 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output.copy_(attn_output)
             
         return output.view(num_tokens, self.hidden_size)
+    
+    def forward_sink_attention(
+            self,
+            layer: AttentionLayer,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: Tuple,
+            attn_metadata: AscendMetadata,
+            output: Optional[torch.Tensor] = None,
+            trace_flag: bool = True,
+            sink_query: Optional[torch.Tensor] = None,
+            sink_key: Optional[torch.Tensor] = None,
+            sink_value: Optional[torch.Tensor] = None,
+            v_head_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        assert sink_key is not None, "sink_key must be provided"
+        NZ_DIM = get_nz_dim()
+        num_tokens = query.shape[0]
+        if v_head_size == None:
+            v_head_size = self.head_size
+        if output is None:
+            output = torch.empty(num_tokens,
+                                 self.num_heads,
+                                 v_head_size,
+                                 dtype=query.dtype,
+                                 device=query.device)
 
+        if attn_metadata is None:
+            return output.view(num_tokens, -1)
 
+        if not (layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0):
+            raise RuntimeError("layer._k_scale_float and layer._v_scale_float must both be 1.0")
+        
+        if self.attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                        "encoder/decoder cross-attention "
+                                        "are not implemented for "
+                                        "PallasAttentionBackendImpl")
+        
+        # View q k v to TND.
+        query = query.view(-1, self.num_heads, self.head_size).contiguous()
+        key = key.view(-1, self.num_kv_heads, self.head_size).contiguous()
+        value = value.view(-1, self.num_kv_heads, v_head_size).contiguous()
+
+        # Update kv cache
+        if kv_cache[0].numel() > 0 or kv_cache[1].numel() > 0:
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            block_size = kv_cache[0].shape[-2]
+            assert block_size == 128, f"Expected block_size=128, got {block_size}"
+            torch_npu.npu_scatter_pa_kv_cache(
+                key,
+                value,
+                kv_cache[0],
+                kv_cache[1],
+                attn_metadata.slot_mapping
+            )         
+
+        # Store sink kv in block 0 (kv cache starts from block 1 and slots 128)
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            slots = torch.arange(0, 128, device=sink_key.device, dtype=torch.int32)
+            torch_npu.npu_scatter_pa_kv_cache(
+                sink_key,
+                sink_value,
+                kv_cache[0],
+                kv_cache[1],
+                slots
+            )        
+
+        block_size = self.value_cache.shape[-2]
+        num_batch = attn_metadata.query_lens.shape[0]
+        
+        # Sink stored in block 0, so pad block_tables with 0 at the beginning
+        block_tables = F.pad(attn_metadata.block_tables, (1, 0, 0, 0), value=0)
+        actual_seq_lengths_kv = attn_metadata.seq_lens + 128
+
+        if self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            attn_output = tng.ops.npu_fused_infer_attention_score_v2(
+                torch.transpose(query.view(num_batch, -1, self.num_heads, self.head_size), 1, 2),
+                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[1].view(-1, self.num_kv_heads, v_head_size // NZ_DIM, block_size, NZ_DIM),
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BNSD",
+                softmax_scale=self.scale,
+                block_table=block_tables,
+                block_size=block_size,
+                sparse_mode=3,
+                atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                inner_precise=1
+            )[0]
+            attn_output = attn_output[:, :, :, :v_head_size]
+        # TODO: ChunkedPrefill
+        elif self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            attn_output =tng.ops.npu_fused_infer_attention_score_v2(
+                query,
+                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[1].view(-1, self.num_kv_heads, v_head_size // NZ_DIM, block_size, NZ_DIM),
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                softmax_scale=self.scale,
+                block_table=block_tables,
+                block_size=block_size,
+                sparse_mode=3,
+                atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
+                actual_seq_qlen=attn_metadata.query_lens.cumsum(dim=0),
+                actual_seq_kvlen=actual_seq_lengths_kv,
+            )[0]
+        else:
+            atten_mask = ~torch.tril(torch.ones((2048, 2048), device='npu', dtype=torch.bool))
+            attn_output = torch_npu.npu_fused_infer_attention_score_v2(
+                query,
+                kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
+                kv_cache[1].view(-1, self.num_kv_heads, v_head_size // NZ_DIM, block_size, NZ_DIM),
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                softmax_scale=self.scale,
+                block_table=block_tables,
+                block_size=block_size,
+                sparse_mode=3,
+                atten_mask=atten_mask,
+                actual_seq_qlen=attn_metadata.query_lens.cumsum(dim=0),
+                actual_seq_kvlen=actual_seq_lengths_kv,
+            )[0]
+
+        output = output.view_as(attn_output)
+        output.copy_(attn_output)
+    
+        return output.view(num_tokens, -1)
+        
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -1313,12 +1458,25 @@ class AscendAttentionBackend(AttentionBackend):
             block_size: int,
             num_kv_heads: int,
             head_size: int,
+            v_head_size: int = None
     ) -> Tuple[int, ...]:
-        if model_extra_config.operator_opt_config.use_tnd_pa:
-            NZ_DIM = get_nz_dim()
-            return (2, num_blocks, num_kv_heads * head_size // NZ_DIM, block_size, NZ_DIM)
+        if v_head_size is None:
+            if model_extra_config.operator_opt_config.use_tnd_pa:
+                NZ_DIM = get_nz_dim()
+                return (2, num_blocks, num_kv_heads * head_size // NZ_DIM, block_size, NZ_DIM)
+            else:
+                return (2, num_blocks, block_size, num_kv_heads * head_size)
+        # adapted for Pangu 72Bv2, for different K and V head sizes
         else:
-            return (2, num_blocks, block_size, num_kv_heads * head_size)
+            if model_extra_config.operator_opt_config.use_tnd_pa:
+                NZ_DIM = get_nz_dim()
+                k_cache_shape = (num_blocks, num_kv_heads * head_size // NZ_DIM, block_size, NZ_DIM)
+                v_cache_shape = (num_blocks, num_kv_heads * v_head_size // NZ_DIM, block_size, NZ_DIM)
+                return (k_cache_shape, v_cache_shape)
+            else:
+                k_cache_shape = (num_blocks, block_size, num_kv_heads * head_size)
+                v_cache_shape = (num_blocks, block_size, num_kv_heads * v_head_size)
+                return (k_cache_shape, v_cache_shape)
 
     @staticmethod
     def swap_blocks(
@@ -1355,12 +1513,28 @@ class AscendAttentionBackend(AttentionBackend):
     tuple[torch.Tensor, ...]:
         # KVCache needs to store the shape of the reduced dimension [num_blocks, block_size, 1, kv_lora_rank] [num_blocks, block_size, 1, rope_dim]
         # The shape of the augmented dimension is [num_blocks, block_size, head_num, head_dim]
-        layer_kv_caches = torch.zeros(
-            kv_cache_shape,
-            dtype=dtype if not getattr(model_extra_config.operator_opt_config, "enable_c8", False) else torch.int8,
-            device=device,
-        )
-
-        if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
-            torch_npu.npu_format_cast(layer_kv_caches, 2)
-        return (layer_kv_caches[0], layer_kv_caches[1])
+        
+        # adapted for Pangu 72Bv2,  for different K and V head sizes
+        if isinstance(kv_cache_shape, tuple) and len(kv_cache_shape) == 2 and isinstance(kv_cache_shape[0], tuple):
+            k_cache_shape, v_cache_shape = kv_cache_shape
+            layer_k_cache = torch.zeros(k_cache_shape,
+                                        dtype=dtype,
+                                        device=device)
+            layer_v_cache = torch.zeros(v_cache_shape,
+                                        dtype=dtype,
+                                        device=device)
+            if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
+                layer_k_cache = torch_npu.npu_format_cast(layer_k_cache, 2)
+                layer_v_cache = torch_npu.npu_format_cast(layer_v_cache, 2)
+            
+            return (layer_k_cache, layer_v_cache)
+        else:
+            # Original implementation for same K and V head sizes
+            layer_kv_caches = torch.zeros(
+                kv_cache_shape,
+                dtype=dtype if not getattr(model_extra_config.operator_opt_config, "enable_c8", False) else torch.int8,
+                device=device,
+            )
+            if not int(os.getenv("NO_NPU_MOCK", "0")) and device != "cpu":
+                torch_npu.npu_format_cast(layer_kv_caches, 2)
+            return (layer_kv_caches[0], layer_kv_caches[1])

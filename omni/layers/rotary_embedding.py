@@ -622,7 +622,98 @@ class QwenMRotaryEmbedding(GPUMRotaryEmbedding):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+class PanguProMoERotaryEmbedding(RotaryEmbeddingTorchNpu):
+    _compute_inv_freq = GPURotaryEmbedding._compute_inv_freq
 
+    def __init__(self, *args, **kwargs):
+        
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def compute_inv_freq(base: Union[int, float], rotary_dim: int) -> torch.Tensor:
+        """Compute the inverse frequency."""
+        inv_freq = 1.0 / (base ** (torch.arange(
+            0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        return inv_freq
+    
+    @staticmethod
+    def compute_full_cos_sin_alt(base: Union[int, float], rotary_dim: int, max_len: int) -> Tuple[
+        torch.Tensor, torch.Tensor]:
+        """Compute the cos and sin cache."""
+        inv_freq = RotaryEmbeddingTorchNpu.compute_inv_freq(base, rotary_dim).npu()
+        t = torch.arange(max_len, device=inv_freq.device, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        return cos, sin
+    
+    def get_cos_sin(self, positions: torch.Tensor, offsets: Optional[torch.Tensor] = None):
+        positions = torch.add(positions, offsets) if offsets is not None else positions
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        return cos, sin
+
+    def apply_rotary_emb_torch(
+            self,
+            x: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+            is_neox_style: bool,
+    ) -> torch.Tensor:
+        cos = cos.unsqueeze(-2).to(x.dtype)
+        sin = sin.unsqueeze(-2).to(x.dtype)
+        if is_neox_style:
+            x1, x2 = torch.chunk(x, 2, dim=-1)
+        else:
+            # x1 = x[..., ::2]
+            # x2 = x[..., 1::2]
+            x = x.view(*x.shape[:-1], x.shape[-1] // 2, 2)
+            x1, x2 = x.split([1, 1], dim=-1)
+            x1 = x1.squeeze(-1)
+            x2 = x2.squeeze(-1)
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        if is_neox_style:
+            return torch.cat((o1, o2), dim=-1)
+        else:
+            return torch.stack((o1, o2), dim=-1).flatten(-2)
+
+    def _forward_native(self, position_ids, query, key, cos=None, sin=None):
+        position = position_ids.flatten()
+        num_tokens = position_ids.shape[0]
+
+        if cos is None or sin is None:
+            cos_sin = self.cos_sin_cache.index_select(0, position_ids)
+            cos, sin = cos_sin.chunk(2, dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size) # TND
+        # query_rot = query[..., :self.rotary_dim]
+        # query_pass = query[..., self.rotary_dim:]
+        query_rot, query_pass = query.split([self.rotary_dim, query.shape[-1] - self.rotary_dim], dim=-1)
+        query_rot = self.apply_rotary_emb_torch(query_rot, cos, sin, self.is_neox_style)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(num_tokens, -1, self.head_size)
+            # key_rot = key[..., :self.rotary_dim]
+            # key_pass = key[..., self.rotary_dim:]
+            key_rot, key_pass = key.split([self.rotary_dim, key.shape[-1] - self.rotary_dim], dim=-1)
+            key_rot = self.apply_rotary_emb_torch(key_rot, cos, sin, self.is_neox_style)
+            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+
+    def forward(self, position_ids, query, key, cos=None, sin=None):
+        # adapt chatglm : dim = head_size / 2
+        if self.rotary_dim < self.head_size:
+            q_embed, k_embed = self._forward_native(position_ids, query, key, cos, sin)
+        elif self.rotary_dim != 128:
+            # use ascend_ops to deal with torch_npu.npu_apply_rotary_pos_emb last dim is not 128 bug
+            q_embed, k_embed = self._forward_ascend_ops_and_small_ops(position_ids, query, key)
+        else:
+            q_embed, k_embed = self._forward_fused_ops(position_ids, query, key, cos, sin)
+        return q_embed, k_embed
 
 _ROPE_DICT: Dict[Tuple, nn.Module] = {}
 
@@ -748,6 +839,11 @@ def get_rope(
                     is_neox_style,
                     dtype,
                 )
+
+        elif scaling_type == "pangu_pro_moe":
+            rotary_emb = PanguProMoERotaryEmbedding(head_size, rotary_dim, max_position, base,
+                                                is_neox_style)
+                                                
         else:
             scaling_type = rope_scaling["type"]
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}, only support linear and dynamic now")

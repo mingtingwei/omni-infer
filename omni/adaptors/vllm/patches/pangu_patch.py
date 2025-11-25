@@ -13,7 +13,7 @@ def patch_pangu():
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp', 'pangu_ultra_moe', 'longcat_flash', 'kimi_k2'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp', 'pangu_ultra_moe', 'longcat_flash', 'kimi_k2', 'pangu_moe_v2_mtp'):
             return kv_lora_dim is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -79,6 +79,14 @@ def patch_pangu():
                 "n_predict": n_predict,
                 "architectures": ["PanguUltraMoEMTPModel"]
             })
+        if hf_config.model_type == "PanguProMoE":
+            hf_config.model_type = "pangu_moe_v2_mtp"
+        if hf_config.model_type == "pangu_moe_v2_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["PanguProMoEMTPModel"]
+            })
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
@@ -112,6 +120,8 @@ def patch_pangu():
                         == "mimo" or
                     self.target_model_config.hf_text_config.model_type \
                         == "pangu_ultra_moe" or
+                    self.target_model_config.hf_text_config.model_type \
+                        == "PanguProMoE" or
                     self.target_model_config.hf_text_config.model_type \
                         == "qwen3_moe"):
                 # use the draft model from the same model:
@@ -226,6 +236,15 @@ def patch_pangu():
                                 "to support multiple layers."
                             )
                 elif (self.draft_model_config.hf_config.model_type ==
+                        "pangu_moe_v2_mtp"):
+                    self.method = "pangu_moe_v2_mtp"
+                    if self.num_speculative_tokens > 1:
+                        print(
+                                "All Pangu MTP models only have "
+                                "one layer. Might need some code changes "
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
                       "pangu_ultra_moe_mtp"):
                     self.method = "pangu_ultra_moe_mtp"
                     if self.num_speculative_tokens > 1:
@@ -302,7 +321,7 @@ def patch_pangu():
         self._verify_args()
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp","pangu_ultra_moe_mtp","qwen3_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp","pangu_ultra_moe_mtp","qwen3_mtp","pangu_moe_v2_mtp")
 
     ModelConfig.is_deepseek_mla = is_deepseek_mla
     ModelConfig._verify_with_expert_parallelism = _verify_with_expert_parallelism

@@ -1358,13 +1358,30 @@ class NPUModelRunner(GPUModelRunner):
                     raise RuntimeError("tensor_config.size must be divisible by kv_cache_spec.page_size_bytes")
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    kv_caches[layer_name] = self.attn_backends[i].init_kv_cache_each_layer(kv_cache_shape, self.dtype,
-                                                                                           self.device,
-                                                                                           self.model_config,
-                                                                                           self.enable_torchair_graph_mode)
+                    # adapted for Pangu 72Bv2
+                    hf_config = self.vllm_config.model_config.hf_config
+                    v_channels = getattr(hf_config, "v_channels", None)
+                    if v_channels is None:
+                        kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                            num_blocks, 
+                            kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads, 
+                            kv_cache_spec.head_size)
+                    else:
+                        kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                            num_blocks, 
+                            kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads, 
+                            kv_cache_spec.head_size,
+                            v_channels)
+                
+                    kv_caches[layer_name] = self.attn_backends[i].init_kv_cache_each_layer(
+                        kv_cache_shape, 
+                        self.dtype,
+                        self.device,
+                        self.model_config,
+                        self.enable_torchair_graph_mode)
+                        
                     if preemption_mode and preemption_mode == "swap":
                         cpu_num_blocks = int(self.vllm_config.cache_config.swap_space_bytes //
                                           kv_cache_spec.page_size_bytes // len(kv_cache_config.tensors))

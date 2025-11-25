@@ -883,6 +883,9 @@ class DecodeConnectorWorker:
         trace_headers: Optional[Mapping[str, str]] = None
     ):
         start = time.time()
+        if hasattr(self.vllm_config.model_config.hf_config, 'param_sink_with_value'):
+            local_block_ids.insert(0, 0)
+            remote_block_ids.insert(0, 0)
         self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id)
 
         if self.vllm_config.parallel_config.tensor_parallel_size == 1:

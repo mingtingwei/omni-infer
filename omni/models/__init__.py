@@ -101,6 +101,14 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "omni.models.pangu.pangu_pro_moe.pangu_moe:PanguProMoEForCausalLM")
+    
+    ModelRegistry.register_model(
+        "PanguProMoEV2ForCausalLM",
+        "omni.models.pangu.pangu_pro_moe_v2.pangu_moe_v2:PanguProMoEV2ForCausalLM")
+
+    ModelRegistry.register_model(
+        "PanguProMoEMTPModel",
+        "omni.models.pangu.pangu_pro_moe_v2.pangu_moe_v2_mtp:PanguProMoEMTP")
 
     ModelRegistry.register_model(
         "PanguEmbeddedForCausalLM",

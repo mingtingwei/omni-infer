@@ -292,7 +292,8 @@ class DeepseekMoE(nn.Module):
             if self.n_shared_experts is not None and \
                 (self.redundancy_shared_expert_num == 0 or self.global_rank < self.redundancy_shared_expert_num) and \
                 (not model_extra_config.task_config.enable_attn_ffn_disaggregation or self.redundancy_shared_expert_num > 0):
-                intermediate_size = config.moe_intermediate_size * self.n_shared_experts
+                # adapted for Pangu 72Bv2, use shared_expert_intermediate_size
+                intermediate_size = getattr(config, 'shared_expert_intermediate_size', config.moe_intermediate_size) * self.n_shared_experts
                 # omni placement for redundancy shared experts
                 if self.redundancy_shared_expert_num > 0 and model_extra_config.task_config.enable_omni_placement:
                     # The order that first initializing OmniPlanner, then ReplicatedDeepseekMLP, should correspond to the router expert rank initialization order in the layer.py file.
@@ -733,14 +734,17 @@ class DeepseekMoE(nn.Module):
             shared_output, _ = self.shared_experts.down_proj.forward(intermediate_hiddenstates_share)
 
         # prefetch weights for attention next layer
-        if model_extra_config.operator_opt_config.attn_prefetch > 0 and next_attention_weights is not None and next_attention_weights['q_a_proj_weight'] is not None:
-                attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
-                attn_prefetch_flag = shared_output
-                torch_npu.npu_prefetch(next_attention_weights['q_a_proj_weight'], attn_prefetch_flag, attn_prefetch_size)
-                if self.quant_symbol:
-                    torch_npu.npu_prefetch(next_attention_weights['kv_a_proj_with_mqa_weight'], attn_prefetch_flag, attn_prefetch_size)
-                torch_npu.npu_prefetch(next_attention_weights['q_b_proj_weight'], attn_prefetch_flag, attn_prefetch_size)
-                torch_npu.npu_prefetch(next_attention_weights['W_UK'], attn_prefetch_flag, attn_prefetch_size)
+        if model_extra_config.operator_opt_config.use_prefetch and next_attention_weights is not None:
+            attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
+            attn_prefetch_flag = shared_output
+            for name, weight in next_attention_weights.items():
+                if weight is None:
+                    break
+                if name == 'kv_a_proj_with_mqa_weight':
+                    if self.quant_symbol:
+                        torch_npu.npu_prefetch(weight, attn_prefetch_flag, attn_prefetch_size)
+                else:
+                    torch_npu.npu_prefetch(weight, attn_prefetch_flag, attn_prefetch_size)
 
         if shared_output is not None:
             final_hidden_states = (hidden_states_route, shared_output)
