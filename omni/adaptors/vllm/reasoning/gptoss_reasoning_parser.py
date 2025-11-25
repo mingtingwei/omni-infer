@@ -93,6 +93,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest = None,
     ) -> Union[DeltaMessage, None]:
         prev_reasoning, prev_content, _ = parse_chat_output(
             list(previous_token_ids))

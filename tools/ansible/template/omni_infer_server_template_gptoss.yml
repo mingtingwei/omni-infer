@@ -23,8 +23,8 @@
     # Global Configuration
     LOG_PATH: "/tmp/log_path/"
     MODEL_PATH: "/data/models/gpt-oss-120b-BF16"
-    MODEL_LEN_MAX_PREFILL: "4096"
-    MODEL_LEN_MAX_DECODE: "4096"
+    MODEL_LEN_MAX_PREFILL: "40960"
+    MODEL_LEN_MAX_DECODE: "40960"
     CODE_PATH: "/data/local_code_path/"
     HTTP_PROXY: ""  # Set to your HTTP proxy if needed to download nginx, like "http://your.proxy:port"
 

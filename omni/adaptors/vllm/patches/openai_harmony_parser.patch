@@ -397,10 +397,10 @@ index 7743ae47f..fab1b1005 100644
      parallel_tool_calls: Optional[bool] = False
      user: Optional[str] = None
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
-index 96e274f06..11da9e576 100755
+index 03ec17201..6110e743a 100755
 --- a/vllm/entrypoints/openai/serving_chat.py
 +++ b/vllm/entrypoints/openai/serving_chat.py
-@@ -5,7 +5,7 @@ import json
+@@ -5,13 +5,14 @@ import json
  import time
  from collections.abc import AsyncGenerator, AsyncIterator
  from collections.abc import Sequence as GenericSequence
@@ -409,7 +409,14 @@ index 96e274f06..11da9e576 100755
  from http import HTTPStatus
  
  import jinja2
-@@ -19,6 +19,10 @@ from vllm.engine.protocol import EngineClient
+ import partial_json_parser
+ import regex as re
+ from fastapi import Request
++from openai_harmony import Message as OpenAIMessage
+ from pydantic import TypeAdapter
+ 
+ from vllm.config import ModelConfig
+@@ -19,6 +20,10 @@ from vllm.engine.protocol import EngineClient
  from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                           ConversationMessage,
                                           random_tool_call_id)
@@ -420,7 +427,7 @@ index 96e274f06..11da9e576 100755
  from vllm.entrypoints.logger import RequestLogger
  from vllm.entrypoints.openai.protocol import (
      ChatCompletionLogProb, ChatCompletionLogProbs,
-@@ -34,6 +38,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+@@ -34,6 +39,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
  from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
  from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
      MistralToolCall)
@@ -428,17 +435,16 @@ index 96e274f06..11da9e576 100755
  from vllm.logger import init_logger
  from vllm.outputs import CompletionOutput, RequestOutput
  from vllm.reasoning import ReasoningParser, ReasoningParserManager
-@@ -43,8 +48,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
- from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+@@ -44,7 +50,7 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                  truncate_tool_call_ids,
                                                  validate_request_params)
--
+ 
 -from vllm.utils import random_uuid
 +from vllm.utils import random_uuid, as_list
+ from omni.tools.profiler.trace.tracing import parent_ctx_var, span_start_time
+ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
  
- logger = init_logger(__name__)
- 
-@@ -125,7 +129,22 @@ class OpenAIServingChat(OpenAIServing):
+@@ -135,7 +141,22 @@ class OpenAIServingChat(OpenAIServing):
              source = "model" if source == "auto" else source
              logger.info("Using default chat sampling params from %s: %s",
                          source, self.default_sampling_params)
@@ -460,9 +466,9 @@ index 96e274f06..11da9e576 100755
 +        self.supports_code_interpreter = False
 +        self.python_tool = None
  
-     async def is_guided_decoding_request(self, request: ChatCompletionRequest):
+     def is_guided_decoding_request(self, request: ChatCompletionRequest):
          return request.guided_json is not None or request.guided_regex is not None \
-@@ -179,7 +198,8 @@ class OpenAIServingChat(OpenAIServing):
+@@ -189,7 +210,8 @@ class OpenAIServingChat(OpenAIServing):
  
              if (request.tool_choice == "auto" and
                      not (self.enable_auto_tools and tool_parser is not None)
@@ -472,7 +478,7 @@ index 96e274f06..11da9e576 100755
                  # for hf tokenizers, "auto" tools requires
                  # --enable-auto-tool-choice and --tool-call-parser
                  return self.create_error_response(
-@@ -191,25 +211,35 @@ class OpenAIServingChat(OpenAIServing):
+@@ -201,25 +223,35 @@ class OpenAIServingChat(OpenAIServing):
                  tool.model_dump() for tool in request.tools
              ]
  
@@ -527,7 +533,7 @@ index 96e274f06..11da9e576 100755
          except (ValueError, TypeError, RuntimeError,
                  jinja2.TemplateError) as e:
              logger.exception("Error in preprocessing prompt inputs")
-@@ -469,6 +499,14 @@ class OpenAIServingChat(OpenAIServing):
+@@ -489,6 +521,14 @@ class OpenAIServingChat(OpenAIServing):
          num_prompt_tokens = 0
          num_cached_tokens = None
  
@@ -542,7 +548,7 @@ index 96e274f06..11da9e576 100755
          # turn id for kimi
          turn_id = 0
          if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-@@ -639,7 +677,25 @@ class OpenAIServingChat(OpenAIServing):
+@@ -660,7 +700,25 @@ class OpenAIServingChat(OpenAIServing):
                      else:
                          logprobs = None
  
@@ -569,7 +575,7 @@ index 96e274f06..11da9e576 100755
  
                      if not delta_text and not output.token_ids and \
                          not previous_num_tokens[i]:
-@@ -658,8 +714,78 @@ class OpenAIServingChat(OpenAIServing):
+@@ -679,8 +737,78 @@ class OpenAIServingChat(OpenAIServing):
                          current_token_ids = previous_token_ids + list(
                              output.token_ids)
  
@@ -649,7 +655,7 @@ index 96e274f06..11da9e576 100755
                          if (enable_thinking
                                  and not reasoning_parser.is_reasoning_end(
                                      previous_token_ids)):
-@@ -720,7 +846,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -741,7 +869,7 @@ class OpenAIServingChat(OpenAIServing):
                              delta_message = DeltaMessage(tool_calls=[
                                  delta_tool_call,
                              ])
@@ -658,7 +664,7 @@ index 96e274f06..11da9e576 100755
                      elif request.tool_choice == "required":
                          assert previous_texts is not None
                          previous_text = previous_texts[i]
-@@ -795,6 +921,8 @@ class OpenAIServingChat(OpenAIServing):
+@@ -816,6 +944,8 @@ class OpenAIServingChat(OpenAIServing):
                                      current_token_ids=current_token_ids,
                                      delta_token_ids=delta_token_ids,
                                      request=request))
@@ -667,7 +673,7 @@ index 96e274f06..11da9e576 100755
                      # when only tool calls
                      elif tool_choice_auto:
                          assert tool_parser is not None
-@@ -807,6 +935,8 @@ class OpenAIServingChat(OpenAIServing):
+@@ -828,6 +958,8 @@ class OpenAIServingChat(OpenAIServing):
                                  current_token_ids=current_token_ids,
                                  delta_token_ids=output.token_ids,
                                  request=request))
@@ -676,7 +682,7 @@ index 96e274f06..11da9e576 100755
                      # when only reasoning
                      elif enable_thinking:
                          delta_message = (reasoning_parser.
-@@ -851,6 +981,8 @@ class OpenAIServingChat(OpenAIServing):
+@@ -872,6 +1004,8 @@ class OpenAIServingChat(OpenAIServing):
                                          current_token_ids=[],
                                          delta_token_ids=[],
                                          request=request))
@@ -685,7 +691,7 @@ index 96e274f06..11da9e576 100755
  
                              if tool_parser:
                                  auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
-@@ -898,12 +1030,18 @@ class OpenAIServingChat(OpenAIServing):
+@@ -919,12 +1053,18 @@ class OpenAIServingChat(OpenAIServing):
                              delta_message = DeltaMessage(content="")
  
                          # Send the finish response for each request.n only once
@@ -706,7 +712,7 @@ index 96e274f06..11da9e576 100755
                              stop_reason=output.stop_reason)
  
                          finish_reason_sent[i] = True
-@@ -1030,6 +1168,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1053,6 +1193,7 @@ class OpenAIServingChat(OpenAIServing):
                      status_code=HTTPStatus.TOO_MANY_REQUESTS)
              token_ids = output.token_ids
              out_logprobs = output.logprobs
@@ -714,7 +720,7 @@ index 96e274f06..11da9e576 100755
  
              if request.logprobs and request.top_logprobs is not None:
                  assert out_logprobs is not None, "Did not output logprobs"
-@@ -1042,7 +1181,46 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1065,7 +1206,46 @@ class OpenAIServingChat(OpenAIServing):
                  )
              else:
                  logprobs = None
@@ -762,7 +768,7 @@ index 96e274f06..11da9e576 100755
  
              enable_thinking = self.should_enable_thinking(request)
              if enable_thinking:
-@@ -1056,10 +1234,13 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1079,10 +1259,13 @@ class OpenAIServingChat(OpenAIServing):
                  reasoning_content, content = (
                      reasoning_parser.extract_reasoning_content(
                          output.text, request=request))
@@ -776,7 +782,7 @@ index 96e274f06..11da9e576 100755
              # if auto tools are not enabled, and a named tool choice using
              #   outlines is not being used
              if (not self.enable_auto_tools or not self.tool_parser) and \
-@@ -1137,7 +1318,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1160,7 +1343,7 @@ class OpenAIServingChat(OpenAIServing):
                      return self.create_error_response(str(e))
  
                  tool_call_info = tool_parser.extract_tool_calls(
@@ -785,7 +791,7 @@ index 96e274f06..11da9e576 100755
                  # In the OpenAI API the finish_reason is "tools_called"
                  # if the tool choice is auto and the model produced a tool
                  # call. The same is not true for named function calls
-@@ -1405,6 +1586,36 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1431,6 +1614,36 @@ class OpenAIServingChat(OpenAIServing):
  
          return enable_thinking
  
