@@ -7,6 +7,8 @@
 #include <omni_shared_state.h>
 #include <omni_proxy.h>
 
+#define TIMEVAL_TO_MSEC(tv) ((tv).tv_sec * 1000 + (tv).tv_usec / 1000)
+
 #define BIT(n) (1U << (n))
 
 static inline void omni_req_enter_phase(omni_req_t *req, omni_proxy_request_phase_t phase)
@@ -165,4 +167,21 @@ static inline void omni_local_phase_change_to(omni_req_t *req, omni_proxy_reques
 {
     // printf("[Phase-%d]: Local from: %d To: %d.\n", req->slot_index, from, to);
     omni_phase_change_to(req, omni_get_local_state()->groups, from, to);
+}
+
+
+static inline void omni_get_current_time(struct timeval *tv)
+{
+#if (NGX_HAVE_CLOCK_MONOTONIC)
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC_FAST)
+    clock_gettime(CLOCK_MONOTONIC_FAST, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    tv->tv_sec = ts.tv_sec;
+    tv->tv_usec = ts.tv_nsec / 1000;
+#else
+    gettimeofday(&tv, NULL);
+#endif
 }

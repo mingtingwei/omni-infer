@@ -308,11 +308,11 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
 
     /* Finally perform phase transition and timestamp updates */
     omni_phase_transition_all(req, 0, PHASE_PREFILL_WAITING_SCHEDULE);
-    req->metrics.time_enter_wait_prefill = ngx_current_msec;
+    struct timeval tv;
+    omni_get_current_time(&tv);
+    req->metrics.time_enter_wait_prefill = tv;
 
     ngx_http_request_t *r = omni_get_http_request(req);
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Enter state P waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 }
@@ -321,13 +321,11 @@ static void omni_proxy_req_body_handler(ngx_http_request_t *r)
 {
     omni_req_t *req = omni_get_req(r);
     omni_req_context_t *ctx = omni_get_req_ctx(r);
-    req->metrics.time_contents_received = ngx_current_msec;
+    omni_get_current_time(&req->metrics.time_contents_received);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[Prefill-%d]: request body received", req->slot_index);
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "<<<Action: Enter state tokenization; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                    "<<<Action: Enter state tokenization; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_contents_received.tv_sec, req->metrics.time_contents_received.tv_usec, req->request_id);
 
     omni_proxy_save_origin_body(r, ctx);
 
@@ -361,6 +359,7 @@ static void omni_proxy_req_body_handler(ngx_http_request_t *r)
                   req->tokenizer_req.block_hashes);
     omni_tokenizer_worker_submit(&local_state.tokenize_worker, req->slot_index);
 }
+
 static inline void omni_proxy_cleanup_req(omni_req_t *req)
 {
     omni_proxy_request_phase_t phases[PHASE_MAX];
@@ -454,7 +453,7 @@ static void omni_proxy_main_req_cleanup(void *data)
 
     ngx_http_request_t *r = omni_get_http_request(req);
     struct timeval tv;
-    gettimeofday(&tv, NULL);
+    omni_get_current_time(&tv);
     if (req->metrics.http_status >= 200 && req->metrics.http_status < 300)
     {
         ngx_atomic_fetch_add(&omni_get_global_state()->success_count, 1);
@@ -463,14 +462,16 @@ static void omni_proxy_main_req_cleanup(void *data)
     {
         ngx_atomic_fetch_add(&omni_get_global_state()->failure_count, 1);
     }
-    if (req->metrics.decoded_tokens > 0 && req->metrics.tpot > 0)
+    if (req->metrics.decoded_tokens > 0 && (req->metrics.tpot.tv_sec > 0 || req->metrics.tpot.tv_usec > 0))
     {
-        omni_metrics_record_tpot(g_state, req->metrics.tpot);
+        omni_metrics_record_tpot(g_state, TIMEVAL_TO_MSEC(req->metrics.tpot));
     }
-    if (req->metrics.time_last_reponse > 0 && req->metrics.time_received > 0 &&
-        req->metrics.time_last_reponse >= req->metrics.time_received)
+    if ((req->metrics.time_last_reponse.tv_sec > 0 || req->metrics.time_last_reponse.tv_usec > 0) && (req->metrics.time_received.tv_sec > 0 || req->metrics.time_received.tv_usec > 0) &&
+        TIMEVAL_TO_MSEC(req->metrics.time_last_reponse) >= TIMEVAL_TO_MSEC(req->metrics.time_received))
     {
-        ngx_msec_t e2e_ms = req->metrics.time_last_reponse - req->metrics.time_received;
+        struct timeval time_diff;
+        timersub(&req->metrics.time_last_reponse, &req->metrics.time_received, &time_diff);
+        ngx_msec_t e2e_ms = TIMEVAL_TO_MSEC(time_diff);
         omni_metrics_record_e2e(omni_get_global_state(), e2e_ms);
     }
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -511,15 +512,13 @@ static ngx_int_t omni_proxy_handler(ngx_http_request_t *r)
                   "[Prefill-%d]: enter main request handler, policy:%d",
                   req->slot_index, g_state->pd_policy);
 
-    req->metrics.time_received = ngx_current_msec;
+    omni_get_current_time(&req->metrics.time_received);
 
     g_state->decode_pod_size = olcf->decode_pod_size;
     g_state->prefill_pod_size = olcf->prefill_pod_size;
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "<<<Action: Time received; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                    "<<<Action: Time received; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_received.tv_sec, req->metrics.time_received.tv_usec, req->request_id);
 
     ngx_http_cleanup_t *cleanup = ngx_http_cleanup_add(r, 0);
     cleanup->handler = omni_proxy_main_req_cleanup;
@@ -546,12 +545,10 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
     u_char *p;
     ngx_http_request_t *r = omni_get_http_request(req);
     omni_req_context_t *ctx = omni_get_req_ctx(subr);
-    req->metrics.time_prefilled = ngx_current_msec;
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
+    omni_get_current_time(&req->metrics.time_prefilled);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "<<<Action: Finish P running; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                    "<<<Action: Finish P running; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_prefilled.tv_sec, req->metrics.time_prefilled.tv_usec, req->request_id);
 
     ngx_connection_t *c = r->connection;
 
@@ -692,7 +689,7 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
     omni_batch_metrics_t *current_batch = &us->his.his[us->his.head];
     omni_batch_metrics_t *request_batch = current_batch;
     ngx_msec_t response_time = ngx_current_msec;
-    ngx_msec_t schedule_time = req->metrics.time_to_prefill;
+    ngx_msec_t schedule_time = TIMEVAL_TO_MSEC(req->metrics.time_to_prefill);
     ngx_msec_t delta = (current_batch->last_response_receive_time > 0) ?
                          (response_time - current_batch->last_response_receive_time) :
                          (21); // If first，force delta > 20 to get a new batch
@@ -826,11 +823,9 @@ static ngx_int_t ngx_http_prefill_post_subrequest(ngx_http_request_t *subr, void
     // check policy
     if (g_state->pd_policy == PD_SEQUENTIAL) {
         omni_phase_transition_all(req, PHASE_PREFILLING, PHASE_DECODE_WAITING_SCHEDULE);
-        req->metrics.time_enter_wait_decode = ngx_current_msec;
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
+        omni_get_current_time(&req->metrics.time_enter_wait_decode);
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                    "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_enter_wait_decode.tv_sec, req->metrics.time_enter_wait_decode.tv_usec, req->request_id);
     } else {
         omni_remove_req_from_group_by_req_index(req->slot_index, &omni_get_local_state()->groups[PHASE_PREFILLING]);
 
@@ -933,10 +928,10 @@ static ngx_int_t ngx_http_prefill_wakeup(omni_req_t *req)
         omni_add_req_to_group(req->slot_index, &omni_get_global_state()->groups[PHASE_DECODE_WAITING_SCHEDULE]);
         omni_req_enter_phase(req, PHASE_DECODE_WAITING_SCHEDULE);
         ngx_shmtx_unlock(&g_state->shmtx);
-
-        req->metrics.time_enter_wait_decode = ngx_current_msec;
         struct timeval tv;
-        gettimeofday(&tv, NULL);
+        omni_get_current_time(&tv);
+        req->metrics.time_enter_wait_decode = tv;
+
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
     }
@@ -992,12 +987,10 @@ static ngx_int_t ngx_http_prefill_wakeup(omni_req_t *req)
 
     omni_phase_transition_all(req, PHASE_PREFILL_SCHEDULED, PHASE_PREFILLING);
 
-    req->metrics.time_to_prefill = ngx_current_msec;
+    omni_get_current_time(&req->metrics.time_to_prefill);
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "<<<Action: Enter state P running; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                    "<<<Action: Enter state P running; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_to_prefill.tv_sec, req->metrics.time_to_prefill.tv_usec, req->request_id);
 
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[Prefill-%d] Submit to:%d",
                   req->slot_index, req->prefill_upstream_endpoint_idx);
@@ -1137,7 +1130,7 @@ static void omni_proxy_update_decode_stats(ngx_http_request_t *r, ngx_buf_t *buf
 
     // Update request level statistics
 
-    if (req->metrics.time_last_reponse)
+    if (req->metrics.time_last_reponse.tv_sec > 0 || req->metrics.time_last_reponse.tv_usec > 0)
     {
         req->metrics.decoded_tokens++;
         ngx_uint_t decode_idx = req->decode_upstream_endpoint_idx;
@@ -1145,19 +1138,22 @@ static void omni_proxy_update_decode_stats(ngx_http_request_t *r, ngx_buf_t *buf
 
         if (req->metrics.decoded_tokens != 0)
         {
-            req->metrics.tpot =
-                ((req->metrics.tpot * (req->metrics.decoded_tokens - 1)) +
-                 ngx_current_msec - req->metrics.time_last_reponse) /
-                req->metrics.decoded_tokens;
+            struct timeval tv;
+            omni_get_current_time(&tv);
+            int64_t total_usec = (((req->metrics.tpot.tv_sec * 1000000 + req->metrics.tpot.tv_usec) * (req->metrics.decoded_tokens - 1)) + (tv.tv_sec * 1000000 + tv.tv_usec) - (req->metrics.time_last_reponse.tv_sec * 1000000 + req->metrics.time_last_reponse.tv_usec)) /
+            req->metrics.decoded_tokens;
+            req->metrics.tpot.tv_sec = total_usec / 1000000;
+            req->metrics.tpot.tv_usec = total_usec % 1000000;
+
         }
         if (req->metrics.decoded_tokens == 2){
             struct timeval tv;
-            gettimeofday(&tv, NULL);
+            omni_get_current_time(&tv);
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                         "<<<Action: Proxy got second token; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
         }else if (req->metrics.decoded_tokens == 3){
             struct timeval tv;
-            gettimeofday(&tv, NULL);
+            omni_get_current_time(&tv);
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                         "<<<Action: Proxy got third token; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
         }
@@ -1172,13 +1168,15 @@ static void omni_proxy_update_decode_stats(ngx_http_request_t *r, ngx_buf_t *buf
     else
     {
         struct timeval tv;
-        gettimeofday(&tv, NULL);
+        omni_get_current_time(&tv);
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Proxy got first token; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
-        req->metrics.ttft = ngx_current_msec - req->metrics.time_received;
-        req->metrics.time_first_token = req->metrics.tpot = ngx_current_msec - req->metrics.time_to_decode;
+
+        timersub(&tv, &req->metrics.time_received, &req->metrics.ttft);
+        timersub(&tv, &req->metrics.time_to_decode, &req->metrics.tpot);
+        req->metrics.time_first_token = req->metrics.tpot;
         req->metrics.decoded_tokens++;
-        omni_metrics_record_ttft(g_state, req->metrics.ttft);
+        omni_metrics_record_ttft(g_state, TIMEVAL_TO_MSEC(req->metrics.ttft));
 
         ngx_uint_t decode_idx = req->decode_upstream_endpoint_idx;
         ngx_atomic_fetch_add(&g_state->decode_states[decode_idx].num_tokens, 1);
@@ -1192,7 +1190,7 @@ static void omni_proxy_update_decode_stats(ngx_http_request_t *r, ngx_buf_t *buf
                       (unsigned long long)g_state->decode_states[decode_idx].num_tokens);
     }
 
-    req->metrics.time_last_reponse = ngx_current_msec;
+    omni_get_current_time(&req->metrics.time_last_reponse);
 
     omni_upstream_decode_t *us = &g_state->decode_states[req->decode_upstream_endpoint_idx];
     // Update batch level statistics
@@ -1585,12 +1583,11 @@ static ngx_int_t ngx_http_decode_wakeup(omni_req_t *req)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[Decode-%d]: wakeup", req->slot_index);
 
     omni_phase_transition_all(req, PHASE_DECODE_SCHEDULED, PHASE_DECODING);
-    req->metrics.time_to_decode = ngx_current_msec;
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
+    omni_get_current_time(&req->metrics.time_to_decode);
+
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                "<<<Action: Enter state D running; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+                "<<<Action: Enter state D running; Timestamp:%d.%06d; RequestID:%s", req->metrics.time_to_decode.tv_sec, req->metrics.time_to_decode.tv_usec, req->request_id);
 
     if (rc == NGX_OK)
     {
@@ -2232,8 +2229,10 @@ static void ngx_omni_tokenizer_pipe_handler(ngx_event_t *ev)
                           "Tokenizer completed for slot: %ui, prompt: %s",
                           slot_id, req->tokenizer_req.prompt);
 
-            req->metrics.time_tokenized = ngx_current_msec;
-            printf("Tokenize %ld, time taken:%lu\n", req->tokenizer_req.input_len, ngx_current_msec - req->metrics.time_contents_received);
+            struct timeval tv;
+            omni_get_current_time(&tv);
+            req->metrics.time_tokenized = tv;
+            printf("Tokenize %ld, time(us) taken:%lu\n", req->tokenizer_req.input_len, (tv.tv_sec - req->metrics.time_contents_received.tv_sec) * 1000000 + tv.tv_usec - req->metrics.time_contents_received.tv_usec);
             print_tokenize_result(&req->tokenizer_req);
             req->metrics.prompt_num_tokens = req->tokenizer_req.input_ids_len;
             ngx_log_error(NGX_LOG_INFO,
@@ -2244,8 +2243,6 @@ static void ngx_omni_tokenizer_pipe_handler(ngx_event_t *ev)
                   req->tokenizer_req.input_ids_len);
 
             ngx_http_request_t *r = omni_get_http_request(req);
-            struct timeval tv;
-            gettimeofday(&tv, NULL);
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                         "<<<Action: Enter state APC matching; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 
@@ -2822,43 +2819,43 @@ static ngx_int_t omni_req_time_var_get(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    ngx_msec_t time;
+    struct timeval time;
     switch (data) {
         case VAR_TIME_RECEIVED:
             time = ctx->metrics.time_received;
             break;
         case VAR_TIME_CONTENTS_RECEIVED:
-            time = ctx->metrics.time_contents_received - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_contents_received, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_TOKENIZED:
-            time = ctx->metrics.time_tokenized - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_tokenized, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_APC_UPDATED:
-            time = ctx->metrics.time_apc_updated - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_apc_updated, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_ENTER_WAIT_PREFILL:
-            time = ctx->metrics.time_enter_wait_prefill - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_enter_wait_prefill, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_PREFILL_SCHEDULED:
-            time = ctx->metrics.time_prefill_scheduled - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_prefill_scheduled, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_TO_PREFILL:
-            time = ctx->metrics.time_to_prefill - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_to_prefill, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_PREFILLED:
-            time = ctx->metrics.time_prefilled - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_prefilled, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_ENTER_WAIT_DECODE:
-            time = ctx->metrics.time_enter_wait_decode - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_enter_wait_decode, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_DECODE_SCHEDULED:
-            time = ctx->metrics.time_decode_scheduled - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_decode_scheduled, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_TO_DECODE:
-            time = ctx->metrics.time_to_decode - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_to_decode, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_LATENCY:
-            time = ctx->metrics.time_last_reponse - ctx->metrics.time_received;
+            timersub(&ctx->metrics.time_last_reponse, &ctx->metrics.time_received, &time);
             break;
         case VAR_TIME_FIRST_TOKEN:
             time = ctx->metrics.time_first_token;
@@ -2874,7 +2871,7 @@ static ngx_int_t omni_req_time_var_get(ngx_http_request_t *r,
             return NGX_ERROR;
     }
 
-    v->len = ngx_sprintf(p, "%ui", time) - p;
+    v->len = ngx_sprintf(p, "%d.%06d", time.tv_sec,time.tv_usec) - p;
     v->data = p;
     v->valid = 1;
     v->no_cacheable = 1;

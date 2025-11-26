@@ -34,6 +34,7 @@
     DOCKER_NAME_C: "sglang_proxy_container"
     SCRIPTS_PATH: "/tmp/scripts_path"
     GLOO_SOCKET_IFNAME: "network_interface"
+    USE_OMNI_PROXY: "1"
 
   vars:
     TRACE_PATH: "/data/trace_path"
@@ -43,6 +44,7 @@
       docker run -it --shm-size=500g \
         -e CODE_PATH=$CODE_PATH \
         -e LOG_PATH=$LOG_PATH \
+        -e PYTHONHASHSEED=123 \
         -e TRACE_PATH=$TRACE_PATH \
         --net=host \
         --privileged=true \
@@ -135,6 +137,7 @@
       #!/bin/bash
 
       . ~/.bashrc
+
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
@@ -196,7 +199,9 @@
 
     run_proxy_cmd: |
       #!/bin/bash
+      . ~/.bashrc
 
+      export PYTHONHASHSEED=123
       prefill_result="{{ PREFILL_API_SERVER_LIST }}"
       prefill_result=`echo "$prefill_result" | awk '$1=$1'`
 
@@ -261,21 +266,41 @@
       baseurl=http://mirrors.tools.huawei.com/openeuler/openEuler-22.03-LTS-SP4/update/aarch64/
       enabled=1
       gpgcheck=0" > /etc/yum.repos.d/openeuler.repo
-
+      
+      bash build.sh >> ${LOG_PATH}/install_nginx.log 2>&1
+      cd /workspace/omniinfer/omni/accelerators/sched/omni_proxy
+      bash build.sh >> ${LOG_PATH}/install_nginx.log 2>&1
       unset http_proxy
       unset https_proxy
-      bash build.sh >> ${LOG_PATH}/install_nginx.log 2>&1
 
-      bash global_proxy.sh \
-        --listen-port "$PROXY_NODE_PORT" \
-        --prefill-servers-list "$prefill_result" \
-        --decode-servers-list "$decode_result" \
-        --log-file ${LOG_PATH}/nginx_error.log \
-        --log-level error \
-        --core-num 4 \
-        --start-core-index 0 \
-        --engine-type sglang \
-        --bootstrap-port 8998 >> ${LOG_PATH}/nginx_error.log 2>&1
+
+      if [ ${USE_OMNI_PROXY} = "1" ]; then
+        cd /workspace/omniinfer/tools/scripts
+        bash omni_proxy.sh \
+          --omni-proxy-schedule-algo default \
+          --stream-ops off \
+          --listen-port "$PROXY_NODE_PORT" \
+          --prefill-endpoints "$prefill_result" \
+          --decode-endpoints "$decode_result" \
+          --log-file ${LOG_PATH}/{{ inventory_hostname }}/nginx_error.log \
+          --log-level info \
+          --access-log-file ${LOG_PATH}/{{ inventory_hostname }}/nginx_access.log \
+          --core-num 4 \
+          --start-core-index 0 \
+          --omni-proxy-pd-policy parallel >> ${LOG_PATH}/nginx_error.log 2>&1
+      else
+        cd /workspace/omniinfer/tools/scripts
+        bash global_proxy.sh \
+          --listen-port "$PROXY_NODE_PORT" \
+          --prefill-servers-list "$prefill_result" \
+          --decode-servers-list "$decode_result" \
+          --log-file ${LOG_PATH}/nginx_error.log \
+          --log-level error \
+          --core-num 4 \
+          --start-core-index 0 \
+          --engine-type sglang \
+          --bootstrap-port 8998 >> ${LOG_PATH}/nginx_error.log 2>&1
+      fi
 
     kill_python_processes_cmd: |
       #!/bin/bash
@@ -308,6 +333,7 @@
       -e API_PORT=$API_PORT
       -e NODE_RANK=$NODE_RANK
       -e HOST_IP=$HOST_IP
+      -e USE_OMNI_PROXY=$USE_OMNI_PROXY
       -d $DOCKER_NAME_P 
       /bin/bash -c {{ansible_env.SCRIPTS_PATH}}/sglang_run_for_p.sh
 
@@ -327,6 +353,8 @@
       {{ docker_exec_cmd }}
       -e PREFILL_LB_SDK=$PREFILL_LB_SDK
       -e DECODE_LB_SDK=$DECODE_LB_SDK
+      -e USE_OMNI_PROXY=$USE_OMNI_PROXY
+      -e MODEL_PATH=$MODEL_PATH      
       -d $DOCKER_NAME_C
       /bin/bash -c $SCRIPTS_PATH/run_proxy_server.sh
 
@@ -874,13 +902,12 @@
     #   tags:
     #     - rm_trace
 
-
     # - name: Sync the remote trace logs to the local directory.
     #   synchronize:
     #     src: "{{ TRACE_PATH }}/trace/"
     #     dest: "{{ TRACE_SYNC_PATH }}/sync"
-    #     mode: pull  
+    #     mode: pull
     #     rsync_opts:
-    #       - "--archive"  
-    #       - "--compress" 
+    #       - "--archive"
+    #       - "--compress"
     #   tags: collect_trace
