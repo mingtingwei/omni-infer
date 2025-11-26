@@ -137,6 +137,7 @@
       #!/bin/bash
 
       . ~/.bashrc
+
       export HCCL_INTRA_ROCE_ENABLE=1
       export HCCL_DETERMINISTIC=false
       export HCCL_OP_EXPANSION_MODE="AIV"
@@ -901,13 +902,12 @@
     #   tags:
     #     - rm_trace
 
-
     # - name: Sync the remote trace logs to the local directory.
     #   synchronize:
     #     src: "{{ TRACE_PATH }}/trace/"
     #     dest: "{{ TRACE_SYNC_PATH }}/sync"
-    #     mode: pull  
+    #     mode: pull
     #     rsync_opts:
-    #       - "--archive"  
-    #       - "--compress" 
+    #       - "--archive"
+    #       - "--compress"
     #   tags: collect_trace

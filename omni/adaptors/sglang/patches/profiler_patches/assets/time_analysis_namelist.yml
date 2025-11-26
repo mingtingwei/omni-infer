@@ -209,26 +209,6 @@ targets:
           else:
               omni_logger_print_timestamp(raw_request_id, f"d_4 tokennizer to sche")
 
-## -- tp_worker_overlap_thread.py -------------------------------------------------------------------------------------
-  - module: "sglang.srt.speculative.mtp_worker:MTPWorker"
-    function_name: "forward_batch_speculative_generation"
-    entry_operation: |
-      import os, time
-      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
-
-      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
-          reqs = args[0].reqs
-          for req in reqs:
-              omni_logger_print_timestamp(req.bootstrap_room, "p_9 开始执行Run forward")
-
-    exit_operation: |
-      import os, time
-      from omni.adaptors.sglang.patches.profiler_patches.omni_logger import omni_logger_is_prefilling, omni_logger_print_timestamp, omni_logger_enable, omni_logger_print
-
-      if omni_logger_enable() and omni_logger_is_prefilling() and len(args) >= 1:
-          reqs = args[0].reqs
-          for req in reqs:
-              omni_logger_print_timestamp(req.bootstrap_room, "p_9 结束执行Run forward")
 
 ## ---------------------------------------------------------------------------------------
   - module: "sglang.srt.managers.schedule_batch:ScheduleBatch"
@@ -254,10 +234,3 @@ targets:
     function_name: "__init__"
     entry_operation: |
       self.engine_core_str: str = None
-
-  - module: "sglang.srt.model_executor.forward_batch_info:ForwardBatch"
-    function_name: "init_new"
-    exit_operation: |
-      batch = args[0] if len(args) >= 1 else None
-      if batch is not None and hasattr(batch, 'engine_core_str'):
-        result.engine_core_str = batch.engine_core_str

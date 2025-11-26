@@ -30,8 +30,8 @@ targets:
           if not omni_logger_is_prefilling():
               batch.engine_core_str = f'{os.getpid()}|{execute_model_start_time}'
               
-  - module: "sglang.srt.model_executor.forward_batch_info"
-    function_name: "enable_num_token_non_padded"
+  - module: "sglang.srt.model_executor.forward_batch_info:ForwardMode"
+    function_name: "is_idle"
     scope: "sglang.srt.model_executor.forward_batch_info:ForwardBatch"
     scope_function: "init_new"
     exit_operation: |
@@ -141,7 +141,7 @@ targets:
                 omni_logger_print(
                     f"profile: engine_step start:{engine_step_start_time}|finish:{engine_step_finish_time}|execute time:{engine_step_execute_cost}"
                     f"|seqs:{running_reqs_num_after_step}|tokens:{total_tokens}|{waiting_reqs_num_after_step=}|{reqs_ids=}|{bs_tokens=}|{execute_model_start_time=}|{execute_model_end_time=}|{execute_model_cost_time=}"
-                    f"|{kv_cache_usage=}|{kv_blocks_num=}|{start_free_block_num=}|{end_free_block_num=}|{cost_blocks_num=}|{engine_core_str=}")
+                    f"|{kv_cache_usage=}|{kv_blocks_num=}|{start_free_block_num=}|{end_free_block_num=}|{cost_blocks_num=}|engine_core_str={engine_core_str}")
 
         for req in model_worker_batch.reqs:
             if omni_logger_enable() and omni_logger_is_prefilling():
