@@ -464,8 +464,7 @@ def omni_cli_start(
     entry_py: str = "start_api_servers.py",
     skip_verify_config: bool = False,
     dev: bool = False,
-    proxy_only: bool = False,
-    skip_process_nz_config = False
+    proxy_only: bool = False
 ) -> None:
     """
     Read inventory YAML, generate a per-host bash script, and run it via:
@@ -535,17 +534,7 @@ def omni_cli_start(
         export_block = _build_export_block(env)
         args_line = _build_args_line(args)
 
-        if not skip_process_nz_config:
-            start_server_cmd = f"""
-# Exec the command
-cd {_double_quotes(code_path)}/tools/scripts
-if [[ -e "/usr/local/Ascend/ascend-toolkit" ]]; then python /workspace/omniinfer/tools/scripts/process_nz_config.py /usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/config/ascend910_93/aic-ascend910_93-ops-info.json; else python /workspace/omniinfer/tools/scripts/process_nz_config.py /usr/local/Ascend/latest/opp/built-in/op_impl/ai_core/tbe/config/ascend910_93/aic-ascend910_93-ops-info.json; fi 
-echo "cd {_double_quotes(code_path)}/tools/scripts" >> {log_path}/omni_cli.log
-{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &
-echo "{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &" >> {log_path}/omni_cli.log
-"""
-        else:
-            start_server_cmd = f"""
+        start_server_cmd = f"""
 # Exec the command
 cd {_double_quotes(code_path)}/tools/scripts
 echo "cd {_double_quotes(code_path)}/tools/scripts" >> {log_path}/omni_cli.log
@@ -1111,7 +1100,6 @@ def run_docker_containers(
         -v /usr/local/sbin:/usr/local/sbin \\
         -v /etc/hccn.conf:/etc/hccn.conf \\
         -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \\
-        -v /tmp/ranktable_save_path:/tmp/ranktable_save_path \\
         -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime"""
 
     for host, hv in all_hosts:
@@ -1133,6 +1121,8 @@ def run_docker_containers(
         model_path = env.get("MODEL_PATH")
         docker_image_id = hv.get("DOCKER_IMAGE_ID")
         container_name = hv.get("container_name", f"omni_container_{host}")
+        # In configs/generate_ranktable.yml, the ranktable save path defaults to "/tmp/ranktable_save_path" when not defined in the inventory
+        ranktable_save_path = env.get("RANKTABLE_SAVE_PATH", "/tmp/ranktable_save_path")
 
         # Check required variables
         if not log_path:
@@ -1173,6 +1163,8 @@ def run_docker_containers(
 
             # Add LOG_PATH mount with actual path
             tf.write(f"docker_cmd+=\" -v {shlex.quote(log_path)}:{shlex.quote(log_path)}\"\n")
+
+            tf.write(f"docker_cmd+=\" -v {shlex.quote(ranktable_save_path)}:{shlex.quote(ranktable_save_path)}\"\n")
 
             # Add MODEL_PATH
             if model_path:
@@ -1254,7 +1246,6 @@ def main():
     start_parser.add_argument("--skip-verify-config", action="store_true", help="Skip verification of config")
     start_parser.add_argument("--proxy-only", action="store_true", help="Start the proxy only")
     # for temporary avoidance
-    start_parser.add_argument("--skip-process-nz-config", action="store_true", help="Skip process-nz of config for temporary avoidance")
     start_group = start_parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--normal",
@@ -1265,7 +1256,19 @@ def main():
     start_group.add_argument("--run-dev", action="store_true", help="Start in developer mode: Start the service, without ranktable and proxy")
 
     # STOP command configuration
-    subparsers.add_parser("stop", help="Stop the omni service")
+    srop_parser=subparsers.add_parser("stop", help="Stop the omni service")
+    # 添加 --config_path 参数
+    srop_parser.add_argument(
+        "--config_path",
+        default=None,
+        help="Path to the configuration file"
+    )
+    srop_parser.add_argument(
+        "--normal",
+        nargs=1,
+        metavar='config_path',
+        help="Start in normal mode (default) with config file"
+    )
 
     # CFG command configuration
     cfg_parser = subparsers.add_parser("cfg", help="Modify configuration")
@@ -1274,7 +1277,18 @@ def main():
     cfg_parser.add_argument('name', nargs=1, help='Node name (e.g., prefill_0)')
     cfg_parser.add_argument('remaining_args', nargs=argparse.REMAINDER, help='Additional optional parameters')
     cfg_group.add_argument("--delete", action='store_true', help="Delete configuration keys (e.g., --key)")
-
+    # 添加 --config_path 参数
+    cfg_parser.add_argument(
+        "--config_path",
+        default=None,
+        help="Path to the configuration file"
+    )
+    cfg_parser.add_argument(
+        "--normal",
+        nargs=1,
+        metavar='config_path',
+        help="Start in normal mode (default) with config file"
+    )
     # INSPECT command configuration
     inspect_parser = subparsers.add_parser("inspect", help="Inspect Configuration")
     inspect_parser.add_argument('name', nargs=1, help='Node name (e.g., prefill_0)')
@@ -1382,7 +1396,6 @@ def main():
     ))
 
     args = parser.parse_args()
-
     if hasattr(args, 'func'):
         if args.command == 'run':
             args.func(args)
@@ -1406,39 +1419,40 @@ def main():
 
     if args.command == "start" and not any([args.normal, args.run_dev]):
         args.normal = True
+    # set config_path for args.command
+    if args.config_path is None:
+        args.config_path = default_deploy_path
 
     if args.command == "start":
-        if args.config_path is None:
-            args.config_path = default_deploy_path
         if args.normal:
             print(f"{INFO} Starting omni service in Normal mode...")
             omni_cli_start(inventory_path=args.config_path,
                            skip_verify_config=args.skip_verify_config,
                            dev=False,
-                           proxy_only=args.proxy_only,
-                           skip_process_nz_config=args.skip_process_nz_config)
+                           proxy_only=args.proxy_only)
         elif args.run_dev:
             print(f"{INFO} Starting omni service in Developer mode...")
             omni_cli_start(inventory_path=args.config_path,
                            skip_verify_config=args.skip_verify_config,
                            dev=True,
-                           proxy_only=args.proxy_only,
-                           skip_process_nz_config=args.skip_process_nz_config)
+                           proxy_only=args.proxy_only)
     elif args.command == "stop":
         print(f"{INFO} Stopping omni service...")
-        omni_cli_stop(inventory_path=default_deploy_path)
+        omni_cli_stop(inventory_path=args.config_path)
     elif args.command == "cfg":
+        # 使用 args.config_path 作为配置文件路径
+        config_path = args.config_path if args.config_path is not None else default_deploy_path
         node_type, node_name = parse_node_name(args.name[0])
-        sections = parse_remaining_args(node_type, node_name, args.set, args.remaining_args, default_deploy_path)
+        sections = parse_remaining_args(node_type, node_name, args.set, args.remaining_args, args.config_path)
         if args.set:
             print(f"{INFO} Set configuration.")
-            cfg_set_process(node_type, node_name, args, sections, default_deploy_path)
+            cfg_set_process(node_type, node_name, args, sections, args.config_path)
         elif args.delete:
             print(f"{INFO} Delete configuration.")
-            cfg_delete_process(node_type, node_name, args, sections, default_deploy_path)
+            cfg_delete_process(node_type, node_name, args, sections, args.config_path)
     elif args.command == "inspect":
         print(f"{INFO} Inspect configuration.")
-        print_node_config(default_deploy_path, args.name[0])
+        print_node_config(args.config_path, args.name[0])
     elif args.command == "upgrade":
         print(f"{INFO} Upgrade packages")
         upgrade_packages()
@@ -1448,3 +1462,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
