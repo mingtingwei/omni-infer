@@ -204,6 +204,7 @@ class FusedMoE(torch.nn.Module):
         self.planner = kwargs.get("planner", None)
         self.moe_layer_idx = kwargs.get("moe_layer_idx", None)
         self.expert_mapping = kwargs.get("expert_mapping", None)
+        num_experts_ori = num_experts
         ep_size = get_ep_group().world_size
         if ep_size > 1:
             if model_extra_config.task_config.enable_attn_ffn_disaggregation:
@@ -232,7 +233,7 @@ class FusedMoE(torch.nn.Module):
         self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod(max_num_deployed_expert=self.num_experts))
+                UnquantizedFusedMoEMethod(max_num_deployed_expert=num_experts_ori))
             self.quant_mode = UNQUANT_MODE
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
