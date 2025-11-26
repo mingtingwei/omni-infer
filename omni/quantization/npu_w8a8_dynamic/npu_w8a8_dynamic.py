@@ -247,7 +247,6 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    ONES_SCALE = None
 
     def __init__(self, quant_config: NpuW8A8DynamicConfig):
         self.quant_config = quant_config
@@ -297,13 +296,6 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                                         requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
-
-        if NpuW8A8DynamicFusedMoEMethod.ONES_SCALE is None:
-            NpuW8A8DynamicFusedMoEMethod.ONES_SCALE = torch.ones(
-                (num_experts, layer.intermediate_size_per_partition), dtype=torch.float32, device='npu'
-            )
-            torch._dynamo.mark_static(NpuW8A8DynamicFusedMoEMethod.ONES_SCALE)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         w13 = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -337,6 +329,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             is_prefill: bool = False,
     ) -> torch.Tensor:
         moe_dispatch_combine = os.environ.get('MOE_DISPATCH_COMBINE', '0') == '1'
+        self.ones_scale = torch.ones((len(layer.w13_weight), layer.intermediate_size_per_partition), dtype=torch.float32, device='npu')
         if moe_dispatch_combine:
             return self.apply_all2all(
                 layer,
@@ -485,7 +478,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 weight_scale=layer.w13_weight_scale,
                 activation_scale=gathered_pertoken_scale,
                 bias=None,
-                quant_scale=NpuW8A8DynamicFusedMoEMethod.ONES_SCALE,
+                quant_scale=self.ones_scale,
                 quant_offset=None,
                 group_index=group_list,
                 activate_left=True,
@@ -602,7 +595,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 weight_scale=layer.w13_weight_scale,
                 activation_scale=dynamic_scales,
                 bias=None,
-                quant_scale=NpuW8A8DynamicFusedMoEMethod.ONES_SCALE,
+                quant_scale=self.ones_scale,
                 quant_offset=None,
                 group_index=group_list,
                 activate_left=True,
@@ -740,7 +733,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             weight_scale=layer.w13_weight_scale,
             activation_scale=expanded_scale,
             bias=None,
-            quant_scale=NpuW8A8DynamicFusedMoEMethod.ONES_SCALE,
+            quant_scale=self.ones_scale,
             quant_offset=None,
             group_index=expert_tokens,
             activate_left=True,
