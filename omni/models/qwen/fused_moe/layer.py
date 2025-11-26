@@ -1250,13 +1250,14 @@ class FusedMoE(torch.nn.Module):
     ) -> torch.Tensor:
         # omni placement
         if self.planner is not None:
-            _, topk_ids, _ = self.planner.plan(
-                layer_idx_moe=self.moe_layer_idx,
-                tokens=tokens,
-                token_expert_ids=topk_ids,
-                token_expert_scores=token_expert_scores,
-                expert_mapping=self.expert_mapping
-            )
+            if self.planner.is_moe_layer(self.moe_layer_idx):
+                _, topk_ids, _ = self.planner.plan(
+                    layer_idx_moe=self.moe_layer_idx,
+                    tokens=tokens,
+                    token_expert_ids=topk_ids,
+                    token_expert_scores=token_expert_scores,
+                    expert_mapping=self.expert_mapping
+                )
 
         # Forced load balance
         if model_extra_config.operator_opt_config.best_ep:
