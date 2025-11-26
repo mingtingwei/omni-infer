@@ -1121,7 +1121,7 @@ class DeepseekMLA(nn.Module):
             k_rope = rope_cache
         q_nope = q_nope.view(bsz, self.num_local_heads, self.kv_lora_rank)
         q_pe = q_pe.view(bsz, self.num_local_heads, -1)
-        return q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_norm
+        return q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_nope,dequant_scale_q_norm
 
     def _forward_decode(
         self,
@@ -1138,7 +1138,7 @@ class DeepseekMLA(nn.Module):
         dequant_scale_q_nope = None
         nz_block_size = 32 if self.fa_quant else 16
         if model_extra_config.operator_opt_config.use_mlaprolog:
-            q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_norm= self._forward_mlaprolog_decode(hidden_states, nope_cache, rope_cache, attn_metadata, nz_block_size)
+            q_nope, q_pe, q_norm, k_nope, k_rope, dequant_scale_q_nope, dequant_scale_q_norm= self._forward_mlaprolog_decode(hidden_states, nope_cache, rope_cache, attn_metadata, nz_block_size)
         else:
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
