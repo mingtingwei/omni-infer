@@ -171,9 +171,7 @@ class Eagle3Qwen2Model(Qwen2Model):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
-        
-        self.full_cos = None # get from main model
-        self.full_sin = None # get from main model
+
         self.attn_layer_name = f"model.layers.{start_layer_id}.self_attn.attn"
 
     def forward(
@@ -188,10 +186,7 @@ class Eagle3Qwen2Model(Qwen2Model):
 
         residual = None
 
-        if self.full_cos is not None:
-            cos = torch.index_select(self.full_cos, dim=0, index=positions)  # cos.shape [num_tokens, head_size]
-            sin = torch.index_select(self.full_sin, dim=0, index=positions)
-        elif attn_metadata is None:
+        if attn_metadata is None:
             cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
         else:
             if isinstance(attn_metadata, dict):
@@ -258,9 +253,6 @@ class Eagle3Qwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
         return self.model(input_ids, positions, previous_hidden_states, kv_caches, attn_metadata)
 
     def set_share_weight(self, target_model):
-        if hasattr(target_model.model, "full_cos"):
-            self.model.full_cos = target_model.model.full_cos
-            self.model.full_sin = target_model.model.full_sin
         self.model.embed_tokens = target_model.model.embed_tokens
         if not self.draft_id_to_target_id is None:
             base = torch.arange(self.config.draft_vocab_size, device=self.draft_id_to_target_id.device)
@@ -281,7 +273,6 @@ class Eagle3Qwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
                 f"(*, {self.config.vocab_size}), but got {logits.shape}"
             return logits
 
-        
         logits_new = logits.new_full((
             logits.shape[0],
             self.config.vocab_size,
@@ -330,6 +321,4 @@ class Eagle3Qwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly
 
     def mark_static_for_graph(self, *args, **kwargs):
-        if self.model.full_cos is not None:
-            torch._dynamo.mark_static(self.model.full_cos)
-            torch._dynamo.mark_static(self.model.full_sin)
+        pass
