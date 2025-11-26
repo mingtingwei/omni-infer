@@ -23,7 +23,7 @@ all:
       hosts:
         d0:
           DOCKER_IMAGE_ID: image-repository:tag
-          ansible_host: 127.0.0.1
+          ansible_host: 127.0.0.2
           ansible_ssh_common_args: -o StrictHostKeyChecking=no -o IdentitiesOnly=yes
           ansible_ssh_private_key_file: /path/to/key
           ansible_user: root
@@ -61,8 +61,8 @@ all:
             num-servers: 1
             served-model-name: gpt-oss
             server-offset: $SERVER_OFFSET
-            tp: 8
-          ascend_rt_visible_devices: 8,9,10,11,12,13,14,15
+            tp: 16
+          ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: gptoss_decode_d0
           env:
             API_PORT: 9100
@@ -74,13 +74,13 @@ all:
             ASCEND_AICPU_PATH: /usr/local/Ascend/ascend-toolkit/latest
             ASCEND_HOME_PATH: /usr/local/Ascend/ascend-toolkit/latest
             ASCEND_LAUNCH_BLOCKING: 0
-            ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
             ASCEND_OPP_PATH: /usr/local/Ascend/ascend-toolkit/latest/opp
             ASCEND_TOOLKIT_HOME: /usr/local/Ascend/ascend-toolkit/latest
             CODE_PATH: /workspace/omniinfer
             DECODE_POD_NUM: 1
-            DECODE_SERVER_LIST: 8,9,10,11,12,13,14,15
-            DECODE_TENSOR_PARALLEL_SIZE: 8
+            DECODE_SERVER_LIST: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+            DECODE_TENSOR_PARALLEL_SIZE: 16
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
@@ -89,7 +89,7 @@ all:
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
             HCCL_INTRA_ROCE_ENABLE: 1
-            HOST_IP: 127.0.0.1
+            HOST_IP: 127.0.0.2
             KV_RANK: 1
             LCCL_DETERMINISTIC: 0
             LCCL_PARALLEL: 0
@@ -105,7 +105,7 @@ all:
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
             RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/decode_config/local_*.json)
             ROLE: decode
-            SERVER_IP_LIST: 127.0.0.1
+            SERVER_IP_LIST: 127.0.0.2
             SERVER_OFFSET: 0
             SHLVL: 1
             SOCKET_IFNAME: enp23s0f3
@@ -121,7 +121,7 @@ all:
             VLLM_WORKER_MULTIPROC_METHOD: fork
             TIKTOKEN_ENCODINGS_BASE: ${CODE_PATH}/omni/models/openai/tiktoken_encodings
             TOKENIZER_PROC_POOL: 0
-          host_ip: 127.0.0.1
+          host_ip: 127.0.0.2
           master_node: d0
     P:
       hosts:
@@ -160,8 +160,8 @@ all:
             num-servers: 1
             served-model-name: gpt-oss
             server-offset: $SERVER_OFFSET
-            tp: 8
-          ascend_rt_visible_devices: 0,1,2,3,4,5,6,7
+            tp: 16
+          ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: gptoss_prefill_p0
           env:
             API_PORT: 9000
@@ -174,7 +174,7 @@ all:
             ASCEND_HOME_PATH: /usr/local/Ascend/ascend-toolkit/latest
             ASCEND_LAUNCH_BLOCKING: 0
             ASCEND_OPP_PATH: /usr/local/Ascend/ascend-toolkit/latest/opp
-            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
             ASCEND_TOOLKIT_HOME: /usr/local/Ascend/ascend-toolkit/latest
             CODE_PATH: /workspace/omniinfer
             DECODE_POD_NUM: 1
@@ -196,9 +196,9 @@ all:
             OMNI_REUSE_PREFILLED_TOKENS: 1
             OMNI_SKIP_DECODE_TOKENIZE: 1
             PREFILL_POD_NUM: 1
-            PREFILL_SERVER_LIST: 0,1,2,3,4,5,6,7
-            PREFILL_TENSOR_PARALLEL_SIZE: 8
-            DECODE_TENSOR_PARALLEL_SIZE: 8
+            PREFILL_SERVER_LIST: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+            PREFILL_TENSOR_PARALLEL_SIZE: 16
+            DECODE_TENSOR_PARALLEL_SIZE: 16
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
             RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/prefill_config/local_*$(echo  $PREFILL_SERVER_LIST | tr -d ",").json)
