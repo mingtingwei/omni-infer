@@ -326,7 +326,7 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
             is_prefill = True
         else:
-            is_prefill = False       
+            is_prefill = False
         if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
             mlp_layer = [self.mlp.gate_up_proj, self.mlp.down_proj]
             attn_layer = [next_layer.self_attn.qkv_proj, next_layer.self_attn.o_proj] if next_layer else None
