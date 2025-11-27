@@ -126,7 +126,7 @@ all:
             PREFILL_POD_NUM: 2
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/global/collect_files_d/local_*merge.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/global/collect_files_d/local_*merge.json)
             ROLE: decode
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 0
@@ -249,7 +249,7 @@ all:
             PREFILL_POD_NUM: 2
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/global/collect_files_d/local_*merge.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/global/collect_files_d/local_*merge.json)
             ROLE: decode
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 8
@@ -372,7 +372,7 @@ all:
             PREFILL_POD_NUM: 2
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/global/collect_files_d/local_*merge.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/global/collect_files_d/local_*merge.json)
             ROLE: decode
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 16
@@ -495,7 +495,7 @@ all:
             PREFILL_POD_NUM: 2
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/global/collect_files_d/local_*merge.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/global/collect_files_d/local_*merge.json)
             ROLE: decode
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 24
@@ -627,7 +627,7 @@ all:
             PREFILL_TENSOR_PARALLEL_SIZE: 8
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/prefill_config/local_*01234567.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/prefill_config/local_*01234567.json)
             ROLE: prefill
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 0
@@ -757,7 +757,7 @@ all:
             PREFILL_TENSOR_PARALLEL_SIZE: 8
             PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
             RANKTABLE_SAVE_PATH: /tmp/ranktable_save_path
-            RANK_TABLE_FILE_PATH: $(ls /tmp/ranktable_save_path/prefill_config/local_*01234567.json)
+            RANK_TABLE_FILE_PATH: $(ls ${RANKTABLE_SAVE_PATH}/prefill_config/local_*01234567.json)
             ROLE: prefill
             SERVER_IP_LIST: 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4
             SERVER_OFFSET: 0
