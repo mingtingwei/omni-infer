@@ -270,7 +270,7 @@
       
       bash build.sh >> ${LOG_PATH}/install_nginx.log 2>&1
       cd /workspace/omniinfer/omni/accelerators/sched/omni_proxy
-      bash build.sh >> ${LOG_PATH}/install_nginx.log 2>&1      
+      bash build.sh --skip-extras >> ${LOG_PATH}/install_nginx.log 2>&1
       unset http_proxy
       unset https_proxy
 
