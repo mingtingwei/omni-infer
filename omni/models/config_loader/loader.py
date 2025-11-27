@@ -70,6 +70,7 @@ class ModelParallelConfig:
     redundancy_shared_expert_num: int = 0
     attn_dies: int = 0
     eh_proj_tp_size: int = 1
+    enable_share_expert_tp: bool = False
 
  
 @dataclass
@@ -130,6 +131,8 @@ class ModelOperatorOptConfig:
     enable_c8: bool = False # GQA使能C8
     
     enable_scmoe_multi_stream: bool = False # 龙猫ScMoe架构多流开启
+    enable_mla_prefill_multistream: bool = False # mla prefill阶段qkv计算启用多流
+    
     def __post_init__(self):
 
         # Check the dependencies of use_prefetch and prefetch_Mb
