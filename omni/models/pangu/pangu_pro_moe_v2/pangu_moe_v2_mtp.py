@@ -81,6 +81,7 @@ class PanguProMoEMultiTokenPredictorLayer(PanguProMoEDecoderLayer):
     def __init__(
         self,
         config: PretrainedConfig,
+        vllm_config: VllmConfig,
         prefix: str,
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
@@ -105,6 +106,7 @@ class PanguProMoEMultiTokenPredictorLayer(PanguProMoEDecoderLayer):
             prefix=maybe_prefix(prefix, "shared_head"))
         self.mtp_block = PanguProMoEDecoderLayer(
             config,
+            vllm_config,
             cache_config,
             quant_config,
             prefix)
@@ -180,6 +182,7 @@ class PanguProMoeMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             str(i + self.mtp_start_layer_idx): 
             PanguProMoEMultiTokenPredictorLayer(
                 config,
+                vllm_config,
                 f"{prefix}.layers.{i + self.mtp_start_layer_idx}",
                 model_config=vllm_config.model_config,
                 cache_config=vllm_config.cache_config,
