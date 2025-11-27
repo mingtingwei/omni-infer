@@ -29,7 +29,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, CompilationLevel
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -57,7 +57,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
-
+from vllm.utils import supports_dynamo
 from omni.layers.activation import SiluAndMul
 from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.layers.layernorm import RMSNorm
@@ -544,12 +544,26 @@ class PanguProMoEV2Attention(nn.Module):
         output, _ = self.o_proj(attn_output, reduce_type="RS")
         return output
 
+def DeepseekMoE_forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
+        if attn_metadata is None or attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            is_prefill = True
+        else:
+            is_prefill = False
+         
+        if not self.is_init_gate:
+            self.gate.weight.data = torch_npu.npu_format_cast(self.gate.weight.data, 2)
+            self.is_init_gate = True
+        if is_prefill:
+            return self._forward_prefill_norm(hidden_states, residual, attn_metadata)
+        else:
+            return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
 
 class PanguProMoEDecoderLayer(nn.Module):
 
     def __init__(
         self,
         config: PretrainedConfig,
+        vllm_config: VllmConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -581,6 +595,7 @@ class PanguProMoEDecoderLayer(nn.Module):
 
         mlp_only_layers = [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
+            DeepseekMoE.forward = DeepseekMoE_forward
             self.mlp = DeepseekMoE(
                 config=config,
                 quant_config=quant_config,
@@ -710,6 +725,7 @@ class PanguProMoEModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: PanguProMoEDecoderLayer(
                 config=config,
+                vllm_config=vllm_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -824,6 +840,12 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
         self.return_hidden_states = True
+
+        self.enable_torchair_graph_mode = (
+                    vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
+        self.is_pd_seperate_d = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        self.is_hybrid_chunked_prefill_graph_mode = self.enable_torchair_graph_mode and not self.is_pd_seperate_d and \
+            not vllm_config.additional_config.get("enable_hybrid_graph_mode", False) and vllm_config.scheduler_config.enable_chunked_prefill
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -1058,4 +1080,6 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
             return True
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.model.layers[self.model.start_layer].layer_name]
+        if self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return False
         return attn_metadata.attn_state != AscendAttentionState.DecodeOnly
