@@ -73,6 +73,7 @@ from omni.layers.rotary_embedding import get_rope
 from omni.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 
 from omni.models.config_loader.loader import model_extra_config
+from omni.layers.utils import ConditionalTNGScope
 
 logger = init_logger(__name__)
 
@@ -254,6 +255,7 @@ def Attention_forward(
     # definition specify the output tensor shape.
     output_shape: Optional[torch.Size] = None,
     # patch for pangu 72Bv2 with attention sink
+    sink_pad_params: Optional[dict] = None,
     sink_query: Optional[torch.Tensor] = None,
     sink_key: Optional[torch.Tensor] = None,
     sink_value: Optional[torch.Tensor] = None,
@@ -314,6 +316,7 @@ def Attention_forward(
                                 **(dict(sink_query=sink_query,
                                 sink_key=sink_key,
                                 sink_value=sink_value,
+                                sink_pad_params=sink_pad_params,
                                 v_head_size=v_head_size) if sink_query is not None else {}))
         else:
             torch.ops.vllm.unified_attention_with_output(
@@ -504,6 +507,7 @@ class PanguProMoEV2Attention(nn.Module):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        sink_pad_params: Optional[dict] = None,
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
@@ -537,6 +541,7 @@ class PanguProMoEV2Attention(nn.Module):
                 sink_query=self.param_sink_query,
                 sink_key=param_sink_key,
                 sink_value=self.param_sink_value,
+                sink_pad_params=sink_pad_params,
             ) if self.enable_sink and attn_metadata is not None else {}),
         )
 
@@ -628,21 +633,25 @@ class PanguProMoEDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         cos: torch.Tensor,
         sin: torch.Tensor,
+        sink_pad_params: Optional[dict] = None,
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
         layer_id: Optional[int] = None,
         next_attn_weights: Optional[dict] = None,
+        next_input_layernorm: Optional[nn.Module] = None
     ) -> torch.Tensor:
 
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
             
         is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
+        enable_superkernel = not is_prefill and model_extra_config.operator_opt_config.use_super_kernel
+
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        else:
+        elif not enable_superkernel:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual, quant_symbol=self.quant_symbol)
 
@@ -651,48 +660,36 @@ class PanguProMoEDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             cos=cos,
             sin=sin,
+            sink_pad_params=sink_pad_params,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
         
-        if model_extra_config.operator_opt_config.use_prefetch:
-            if self.is_moe:
-                torch_npu.npu_prefetch(self.mlp.gate.weight, hidden_states, MAX_PREFETCH_SIZE * 1024 * 1024)
-            else:
-                torch_npu.npu_prefetch(self.mlp.gate_up_proj.weight, hidden_states, MAX_PREFETCH_SIZE * 1024 * 1024)
-
-        # Fully Connected
-        if self.is_moe == True and not is_prefill and model_extra_config.operator_opt_config.use_super_kernel:
-            with tng.scope.super_kernel(self.mlp.prefix, 'stream-fusion=1'):
-                if self.sandwich_norm:
-                    hidden_states = self.post_attention_layernorm(hidden_states)
-                    hidden_states = hidden_states + residual
-                    residual = hidden_states
-                    hidden_states = self.pre_mlp_layernorm(hidden_states)
+        with ConditionalTNGScope(super_kernel=enable_superkernel, scope='superkernel_decode_layer'):
+            if model_extra_config.operator_opt_config.use_prefetch:
+                if self.is_moe:
+                    torch_npu.npu_prefetch(self.mlp.gate.weight, hidden_states, model_extra_config.operator_opt_config.dense_mlp_prefetch * 1024 * 1024)
                 else:
-                    hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        else:
-            if self.sandwich_norm:
-                hidden_states = self.post_attention_layernorm(hidden_states)
-                hidden_states = hidden_states + residual
-                residual = hidden_states
-                hidden_states = self.pre_mlp_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        
-        if self.is_moe == True:
-            # omni placement do not support super kernel
-            hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id, next_attn_weights)
-            if isinstance(hidden_states, (tuple, list)):
-                assert len(hidden_states) == 2
-                hidden_states = hidden_states[0] + hidden_states[1]
-        else:
-            hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata)
+                    torch_npu.npu_prefetch(self.mlp.gate_up_proj.weight, hidden_states, model_extra_config.operator_opt_config.dense_mlp_prefetch * 1024 * 1024)
 
-        if self.sandwich_norm:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states, residual = self.pre_mlp_layernorm(hidden_states, residual)
+            
+            if self.is_moe == True:
+                # omni placement do not support super kernel
+                hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id, next_attn_weights)
+                if isinstance(hidden_states, (tuple, list)):
+                    assert len(hidden_states) == 2
+                    hidden_states = hidden_states[0] + hidden_states[1]
+            else:
+                hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata)
+
             hidden_states = self.post_mlp_layernorm(hidden_states)
-            hidden_states = hidden_states + residual
-            residual = None
+
+            if enable_superkernel and next_input_layernorm is not None:
+                hidden_states, residual = next_input_layernorm(
+                    hidden_states, residual, quant_symbol=self.quant_symbol
+                )
 
         return hidden_states, residual
 
@@ -752,6 +749,7 @@ class PanguProMoEModel(nn.Module):
         kv_caches: Optional[List[torch.Tensor]] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        lm_head=None
     ) -> Union[torch.Tensor, IntermediateTensors]:
         # print(f"get_world_group().world_size {get_world_group().world_size}" , flush = True)
         if get_pp_group().is_first_rank:
@@ -762,6 +760,8 @@ class PanguProMoEModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        sink_pad_params = None
+
         if attn_metadata is None :
             cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
         else:
@@ -769,6 +769,14 @@ class PanguProMoEModel(nn.Module):
                 attn_metadata = attn_metadata[next(iter(attn_metadata))]
             cos = attn_metadata.cos
             sin = attn_metadata.sin
+
+            sink_pad_params = {}
+            block_tables = F.pad(attn_metadata.block_tables, (1, 0, 0, 0), value=0)
+            actual_seq_lengths_kv = attn_metadata.seq_lens + 128
+            torch._dynamo.mark_static(block_tables)
+            torch._dynamo.mark_static(actual_seq_lengths_kv)
+            sink_pad_params['sink_block_tables'] = block_tables
+            sink_pad_params['sink_actual_seq_lengths_kv'] = actual_seq_lengths_kv
 
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
@@ -780,16 +788,24 @@ class PanguProMoEModel(nn.Module):
                 }
             else:
                 next_attn_weights = None
+
+            if layer_idx < self.end_layer - 1:
+                next_input_layernorm = self.layers[layer_idx + 1].input_layernorm
+            else:
+                next_input_layernorm = None
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
                 cos,
                 sin,
+                sink_pad_params,
                 kv_caches[layer_idx - self.start_layer] if kv_caches is not None else None,
                 attn_metadata,
                 layer_id,
-                next_attn_weights
+                next_attn_weights,
+                next_input_layernorm
             )
 
         if not get_pp_group().is_last_rank:
@@ -801,6 +817,9 @@ class PanguProMoEModel(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+
+        if model_extra_config.operator_opt_config.use_prefetch and lm_head is not None:
+            torch_npu.npu_prefetch(lm_head.weight, hidden_states, model_extra_config.operator_opt_config.lm_head_prefetch * 1024 * 1024)
 
         return hidden_states
 
@@ -867,7 +886,8 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
             positions,
             kv_caches,
             attn_metadata,
-            intermediate_tensors
+            intermediate_tensors,
+            self.lm_head
         )
 
         if attn_metadata is None:
