@@ -279,7 +279,10 @@ class ConfigUpdater:
         enable_omni_attn = check_omni_attn_cmd_arg(vllm_config.additional_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         is_kv_consumer = kv_transfer_config is None or kv_transfer_config.kv_role == 'kv_consumer'
-        omni_attn_config = vllm_config.additional_config.get("omni_attn_config", None)
+        if hasattr(vllm_config, "additional_config") and vllm_config.additional_config:
+            omni_attn_config = vllm_config.additional_config.get("omni_attn_config", None)
+        else:
+            omni_attn_config = None
         enable_omni_cache = os.getenv("ENABLE_OMNI_CACHE", "0") == "1"
         apply_omni_attn_patch(
             enable_attn=enable_omni_attn,
