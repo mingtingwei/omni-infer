@@ -45,6 +45,8 @@ from vllm.model_executor.layers.rotary_embedding import (_yarn_find_correction_d
                                             _yarn_get_mscale,
                                             _rotate_neox,
                                             _rotate_gptj)
+from omni.layers.utils import ConditionalTNGScope
+from omni.models.config_loader.loader import model_extra_config
 
 SCALE_FACTOR = 8
 LOW_FREQ_FACTOR = 1
@@ -686,21 +688,24 @@ class PanguProMoERotaryEmbedding(RotaryEmbeddingTorchNpu):
             cos_sin = self.cos_sin_cache.index_select(0, position_ids)
             cos, sin = cos_sin.chunk(2, dim=-1)
 
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, self.head_size) # TND
-        # query_rot = query[..., :self.rotary_dim]
-        # query_pass = query[..., self.rotary_dim:]
-        query_rot, query_pass = query.split([self.rotary_dim, query.shape[-1] - self.rotary_dim], dim=-1)
-        query_rot = self.apply_rotary_emb_torch(query_rot, cos, sin, self.is_neox_style)
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune, stream_id='11'):
+            query_shape = query.shape
+            query = query.view(num_tokens, -1, self.head_size) # TND
+            # query_rot = query[..., :self.rotary_dim]
+            # query_pass = query[..., self.rotary_dim:]
+            query_rot, query_pass = query.split([self.rotary_dim, query.shape[-1] - self.rotary_dim], dim=-1)
+            query_rot = self.apply_rotary_emb_torch(query_rot, cos, sin, self.is_neox_style)
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
         if key is not None:
-            key_shape = key.shape
-            key = key.view(num_tokens, -1, self.head_size)
-            # key_rot = key[..., :self.rotary_dim]
-            # key_pass = key[..., self.rotary_dim:]
-            key_rot, key_pass = key.split([self.rotary_dim, key.shape[-1] - self.rotary_dim], dim=-1)
-            key_rot = self.apply_rotary_emb_torch(key_rot, cos, sin, self.is_neox_style)
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune, stream_id='22'):
+                key_shape = key.shape
+                key = key.view(num_tokens, -1, self.head_size)
+                # key_rot = key[..., :self.rotary_dim]
+                # key_pass = key[..., self.rotary_dim:]
+                key_rot, key_pass = key.split([self.rotary_dim, key.shape[-1] - self.rotary_dim], dim=-1)
+                key_rot = self.apply_rotary_emb_torch(key_rot, cos, sin, self.is_neox_style)
+                key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
 

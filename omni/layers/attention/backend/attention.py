@@ -1346,6 +1346,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata: AscendMetadata,
             output: Optional[torch.Tensor] = None,
             trace_flag: bool = True,
+            sink_pad_params: Optional[dict] = None,
             sink_query: Optional[torch.Tensor] = None,
             sink_key: Optional[torch.Tensor] = None,
             sink_value: Optional[torch.Tensor] = None,
@@ -1408,8 +1409,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_batch = attn_metadata.query_lens.shape[0]
         
         # Sink stored in block 0, so pad block_tables with 0 at the beginning
-        block_tables = F.pad(attn_metadata.block_tables, (1, 0, 0, 0), value=0)
-        actual_seq_lengths_kv = attn_metadata.seq_lens + 128
+        if sink_pad_params is None:
+            block_tables = F.pad(attn_metadata.block_tables, (1, 0, 0, 0), value=0)
+            actual_seq_lengths_kv = attn_metadata.seq_lens + 128
+        else:
+            block_tables = sink_pad_params['sink_block_tables']
+            actual_seq_lengths_kv = sink_pad_params['sink_actual_seq_lengths_kv']
 
         if self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             attn_output = tng.ops.npu_fused_infer_attention_score_v2(
