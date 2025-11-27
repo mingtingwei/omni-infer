@@ -48,6 +48,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -126,7 +130,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -178,6 +182,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -256,7 +264,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -308,6 +316,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -386,7 +398,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -438,6 +450,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -516,7 +532,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -568,6 +584,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -646,7 +666,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -698,6 +718,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -776,7 +800,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -828,6 +852,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -906,7 +934,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -958,6 +986,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1036,7 +1068,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1088,6 +1120,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1166,7 +1202,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1218,6 +1254,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1296,7 +1336,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1348,6 +1388,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1426,7 +1470,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1478,6 +1522,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1556,7 +1604,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1608,6 +1656,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1686,7 +1738,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1738,6 +1790,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1816,7 +1872,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1868,6 +1924,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -1946,7 +2006,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -1998,6 +2058,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -2076,7 +2140,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -2128,6 +2192,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -2206,7 +2274,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -2258,6 +2326,10 @@ all:
               enable-expert-parallel: ''
               max-num-seqs: 60
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.88'
             kv-transfer-config:
               engine_id: 18
@@ -2336,7 +2408,7 @@ all:
             LOCAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 32768
+            MODEL_LEN_MAX_DECODE: 65536
             MODEL_PATH: /data/model/ascend_vllm_w8a8_mtp_1010
             OMNI_USE_DSV3: 1
             PREFILL_POD_NUM: 18
@@ -2389,6 +2461,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 0
@@ -2517,6 +2593,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 1
@@ -2645,6 +2725,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 2
@@ -2773,6 +2857,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 3
@@ -2901,6 +2989,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 4
@@ -3029,6 +3121,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 5
@@ -3157,6 +3253,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 6
@@ -3285,6 +3385,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 7
@@ -3413,6 +3517,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 8
@@ -3541,6 +3649,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 9
@@ -3669,6 +3781,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 10
@@ -3797,6 +3913,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 11
@@ -3925,6 +4045,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 12
@@ -4053,6 +4177,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 13
@@ -4181,6 +4309,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 14
@@ -4309,6 +4441,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 15
@@ -4437,6 +4573,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 16
@@ -4565,6 +4705,10 @@ all:
               max-num-batched-tokens: 30000
               max-num-seqs: 16
               no-enable-prefix-caching: ''
+              enable-reasoning: ''
+              reasoning-parser: pangu
+              enable-auto-tool-choice: ''
+              tool-call-parser: pangu
             gpu-util: '0.95'
             kv-transfer-config:
               engine_id: 17

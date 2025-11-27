@@ -139,6 +139,10 @@ class ModelOperatorOptConfig:
             self.expert_gate_up_prefetch = 0
             self.expert_down_prefetch = 0
             self.attn_prefetch = 0
+            self.dense_mlp_prefetch = 0
+            self.lm_head_prefetch = 0
+            self.shared_expert_gate_up_prefetch = 0
+            self.shared_expert_down_prefetch = 0
             logger.warning(f"[WARNING] When enable_prefetch is false, prefetch_Mb must be set to 0.")
 
             
