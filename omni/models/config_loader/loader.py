@@ -69,6 +69,7 @@ class ModelParallelConfig:
     attn_sp_size: int = 1
     redundancy_shared_expert_num: int = 0
     attn_dies: int = 0
+    enable_share_expert_tp: bool = False
     eh_proj_tp_size: int = 1
 
  
@@ -125,6 +126,7 @@ class ModelOperatorOptConfig:
     ascend_operator_fusion_pass_set: str = '' #用于控制关闭算子融合，为空代表不关闭任何算子融合
 
     enable_mlp_seq_split: bool = False # 模型大 + 权重大 + 长序列场景下会OOM，需要切分长度时打开以避免OOM，默认切分大小为4096
+    enable_mla_prefill_multistream: bool = False # mla prefill阶段qkv计算启用多流
     decode_experts_pruning: bool = False
     new_w4_op: bool = False # w4a8新算子
     enable_c8: bool = False # GQA使能C8
