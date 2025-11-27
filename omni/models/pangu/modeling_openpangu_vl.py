@@ -74,7 +74,7 @@ from omni.layers.attention.backend.attention import AscendAttentionState
 from vllm.attention import Attention, AttentionType, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from omni.layers.layernorm import RMSNorm
-
+from functools import lru_cache
 
 
 
@@ -139,19 +139,21 @@ class OpenPanguVisionAttention(nn.Module):
             for x in (q, k, v)
         ]
 
-        attn_out = torch.torch.empty_like(q)
-
-        torch_npu._npu_flash_attention_unpad(
-            query=q,
-            key=k,
-            value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.scale_value,
-            num_heads=self.num_attention_heads_per_partition,
-            num_kv_heads=self.num_attention_heads_per_partition,
-            out=attn_out)
+        head_num = q.shape[1]
+        actual_seq_len = tuple(cu_seqlens[1:].cpu().numpy().tolist())
+        attn_out = torch_npu.npu_fusion_attention(
+            q, k, v, head_num,
+            scale=1.0 / math.sqrt(q.shape[-1]),
+            keep_prob=1,
+            input_layout="TND",
+            actual_seq_qlen=actual_seq_len,
+            actual_seq_kvlen=actual_seq_len,
+            pre_tockens=2147483647,
+            next_tockens=2147483647,
+            sparse_mode=0)[0]
 
         attn_out = rearrange(attn_out, "(b s) h d -> (s b) (h d)", b=batch_size).contiguous()
+
         output, bias = self.proj(attn_out)
         if bias is not None:
             output = output + bias
@@ -238,11 +240,19 @@ class OpenPanguVisionBlock(nn.Module):
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.mlp")
         
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor, residual: Optional[torch.Tensor], cu_seqlens: torch.Tensor,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states + self.attn(self.norm1(hidden_states), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
-        return hidden_states
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.norm1(hidden_states)
+        else:
+            hidden_states, residual = self.norm1(hidden_states, residual)
+        hidden_states = self.attn(hidden_states, cu_seqlens=cu_seqlens, cos=cos, sin=sin)
+
+        # Fully Connected
+        hidden_states, residual = self.norm2(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states) 
+        return hidden_states, residual
 
 
 class OpenPanguVisionRotaryEmbedding(nn.Module):
@@ -496,6 +506,7 @@ class OpenPanguVisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
+
     def get_window_index(self, grid_thw):
         """
         see https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L238 # noqa: E501
@@ -543,32 +554,66 @@ class OpenPanguVisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cpu().to(torch.int32)
-
-        x = self.patch_embed(x)
-
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=x.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
-        cu_window_seqlens = torch.diff(cu_window_seqlens).cpu().to(torch.int32)
         seq_len, _ = x.size()
-        x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        x = x[window_index, :, :]
-        x = x.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        rotary_pos_emb = []
+        window_index: list = []
+        cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
+        cu_seqlens: list = []
 
+        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.patch_embed(hidden_states)
+
+        window_index_id = 0
+        cu_window_seqlens_last = 0
+        for t, h, w in grid_thw:
+            t, h, w = int(t), int(h), int(w)
+            llm_h = h // self.spatial_merge_size
+            llm_w = w // self.spatial_merge_size
+
+            (
+                rotary_pos_emb_thw,
+                window_index_thw,
+                cu_seqlens_window_thw,
+                cu_seqlens_thw,
+            ) = self.get_rope_by_thw(t, h, w)
+
+            window_index.append(window_index_thw + window_index_id)
+            window_index_id += (t * llm_h * llm_w)
+
+            cu_seqlens_window_thw = (cu_seqlens_window_thw +
+                                     cu_window_seqlens_last)
+            cu_window_seqlens_last = cu_seqlens_window_thw[-1]
+            cu_window_seqlens.append(cu_seqlens_window_thw)
+
+            rotary_pos_emb.append(rotary_pos_emb_thw)
+
+            cu_seqlens.append(cu_seqlens_thw)
+
+        rotary_pos_emb = torch.cat(rotary_pos_emb)
+        window_index = torch.cat(window_index)
+        cu_window_seqlens = torch.cat(cu_window_seqlens)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        cu_seqlens = torch.cat(cu_seqlens)
+        cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+
+        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+        cu_window_seqlens = cu_window_seqlens.to(device=self.device,
+                                                 non_blocking=True)
+        window_index = window_index.to(device=hidden_states.device,
+                                       non_blocking=True)
+
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        hidden_states = hidden_states.unsqueeze(1)
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
-
-        x = x.unsqueeze(1)
+        res = None
+        
         if self.local_merger:
             #enable merger parallel
             for layer_num, blk in enumerate(self.blocks):
@@ -576,12 +621,12 @@ class OpenPanguVisionTransformer(nn.Module):
                     cu_seqlens_now = cu_seqlens
                 else:
                     cu_seqlens_now = cu_window_seqlens
-                x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
                 if layer_num == self.take_indices[self.select_layer[self.merger_idx]]:
-                    local_feather = self.final_layernorm(x)
-            x = self.local_merger(local_feather)
+                    local_feather, _ = self.final_layernorm(hidden_states, res)
+            hidden_states = self.local_merger(local_feather)
             if self.world_size > 1:
-                x = tensor_model_parallel_all_reduce(x)
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         else:
             intermediates = []
             for layer_num, blk in enumerate(self.blocks):
@@ -589,19 +634,85 @@ class OpenPanguVisionTransformer(nn.Module):
                     cu_seqlens_now = cu_seqlens
                 else:
                     cu_seqlens_now = cu_window_seqlens
-                x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
                 if layer_num in self.take_indices:
-                    ln_hs = self.final_layernorm(x)
+                    ln_hs, _ = self.final_layernorm(hidden_states, res)
                     intermediates.append(ln_hs)
-
+        
             image_embeddings_list = []
             for idx, sl in enumerate(self.select_layer):
                 image_embeddings_list.append(self.merger[idx](intermediates[sl]))
-            x = sum(image_embeddings_list)
+            hidden_states = sum(image_embeddings_list)
 
         reverse_indices = torch.argsort(window_index)
-        x = x[reverse_indices, :]
-        return x
+        hidden_states = hidden_states[reverse_indices, :]
+        return hidden_states
+
+    def rotary_pos_emb_thw(self, t, h, w):
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        hpos_ids = hpos_ids.reshape(
+            h // self.spatial_merge_size,
+            self.spatial_merge_size,
+            w // self.spatial_merge_size,
+            self.spatial_merge_size,
+        ).permute(0, 2, 1, 3).flatten()
+        wpos_ids = wpos_ids.reshape(
+            h // self.spatial_merge_size,
+            self.spatial_merge_size,
+            w // self.spatial_merge_size,
+            self.spatial_merge_size,
+        ).permute(0, 2, 1, 3).flatten()
+        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
+        max_size = max(h, w)
+        rotary_pos_emb_full = self.rotary_pos_emb(max_size)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
+        rotary_pos_emb = rotary_pos_emb.reshape(
+            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit, -1)
+
+        return rotary_pos_emb
+
+    def get_window_index_thw(self, grid_t, grid_h, grid_w):
+        vit_merger_window_size = (self.window_size //
+                                  self.spatial_merge_size // self.patch_size)
+
+        llm_grid_h = grid_h // self.spatial_merge_size
+        llm_grid_w = grid_w // self.spatial_merge_size
+        index = torch.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+            grid_t, llm_grid_h, llm_grid_w)
+        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
+        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+        index_padded = F.pad(index, (0, pad_w, 0, pad_h), 'constant', -100)
+        index_padded = index_padded.reshape(grid_t, num_windows_h,
+                                            vit_merger_window_size,
+                                            num_windows_w,
+                                            vit_merger_window_size)
+        index_padded = index_padded.permute(0, 1, 3, 2, 4).reshape(
+            grid_t, num_windows_h * num_windows_w, vit_merger_window_size,
+            vit_merger_window_size)
+        seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+        index_padded = index_padded.reshape(-1)
+        index_new = index_padded[index_padded != -100]
+        cu_seqlens_tmp = seqlens.cumsum(0) * self.spatial_merge_unit
+        cu_seqlens_tmp = cu_seqlens_tmp.to(dtype=torch.int32)
+        cu_seqlens_tmp = torch.unique_consecutive(cu_seqlens_tmp)
+
+        return index_new, cu_seqlens_tmp
+
+    @lru_cache(maxsize=1024)  # noqa: B019
+    def get_rope_by_thw(self, t, h, w):
+        window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(
+            t, h, w)
+        rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
+        rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+        rotary_pos_emb_thw = rotary_pos_emb_thw.flatten(start_dim=0, end_dim=1)
+        cu_seqlens_thw = torch.repeat_interleave(
+            torch.tensor([h * w], dtype=torch.int32), t)
+        return (rotary_pos_emb_thw, window_index_thw, cu_seqlens_window_thw,
+                cu_seqlens_thw)
 
     def load_weights(self, weights) -> set[str]:
         def _padding_weight(name: str, w: torch.Tensor) -> torch.Tensor:
@@ -1222,6 +1333,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        attn_metadata: AttentionMetadata = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -1246,6 +1358,7 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
+            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
