@@ -401,9 +401,11 @@ class PrefillConnectorWorker:
         return all_done_sending, all_done_recving
 
     def get_pulled_kv_req_list(self):
-        path_p = f"tcp://{self.host_ip}:{self.trace_p_port}"
-        socket_p = self.ctx.socket(zmq.PUSH)
-        socket_p.connect(path_p)
+        if os.getenv("PROFILING_NAMELIST", None):
+            path_p = f"tcp://{self.host_ip}:{self.trace_p_port}"
+            socket_p = self.ctx.socket(zmq.PUSH)
+            socket_p.connect(path_p)
+
         while True:
             try:
                 if self.input_socket.poll(timeout=10) > 0:
@@ -925,19 +927,25 @@ class DecodeConnectorWorker:
             socket.connect(path)
             self.zmq_socket_map[path] = socket
             logger.info(f"create new socket path:{path}")
-
-        path_d = f"tcp://{self.host_ip}:{self.trace_d_port}"
-        socket_d = self.ctx.socket(zmq.PUSH)
-        socket_d.connect(path_d)
-
         try:
             json_data = json.dumps(data)
             socket.send_string(json_data)
             logger.info(f"send string {json_data} path:{path}")
-            if os.getenv("PROFILING_NAMELIST", None):
-                socket_d.send_string(json_data)
         except Exception as e:
             logger.error(f"Failed to send reqest_id {json_data} to prefill: {e}")
+        
+        if os.getenv("PROFILING_NAMELIST", None):
+            path_d = f"tcp://{self.host_ip}:{self.trace_d_port}"
+            if path_d in self.zmq_socket_map:
+                socket_d = self.zmq_socket_map[path_d]
+            else:
+                socket_d = self.ctx.socket(zmq.PUSH)
+                socket_d.connect(path_d)
+                self.zmq_socket_map[path_d] = socket_d
+            try:
+                socket_d.send_string(json_data)
+            except Exception as e:
+                logger.error(f"Failed to send {json_data} to DecodeConnectorScheduler: {e}")
 
     def get_finished(self, metadata: DatadistConnectorMetadata) -> tuple[set[str], set[str]]:
         # for decode size, done_sending is no need
