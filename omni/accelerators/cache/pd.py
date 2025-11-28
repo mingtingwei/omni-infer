@@ -1,5 +1,6 @@
 from typing_extensions import override
 import torch
+import os
 from llm_datadist.v2.llm_types import Cache, CacheDesc, BlocksCacheKey
 from omni.accelerators.pd.llmdatadist_manager import (
     LLMDataDistManager,
@@ -85,6 +86,8 @@ class OmniBiGroupDataDistManager(LLMDataDistManager):
         for omni. In contrast, `src_blocks` is a list corresponding to the block table
         allocated for all layers during prefill.
         """
+        if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
+            return
         if isinstance(src_blocks[0], int):
             src_blocks = [src_blocks] * len(tgt_blocks)
         torch.npu.set_device(f"npu:{self.local_rank}")

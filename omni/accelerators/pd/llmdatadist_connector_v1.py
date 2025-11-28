@@ -798,7 +798,10 @@ class DecodeConnectorWorker:
             else:
                 logger.error(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
                 raise RuntimeError(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
-            cluster_ids = self.datadist_manager.get_real_remote_cluster_ids(meta)
+            if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
+                cluster_ids = [0]
+            else:
+                cluster_ids = self.datadist_manager.get_real_remote_cluster_ids(meta)
             if self.multi_rank_pull_kv:
                 # If multi_rank_pull_kv is enabled, each DP rank will pull kv from multiple P ranks
                 # and the cluster_ids are obtained from registered_link_infos

@@ -274,6 +274,8 @@ class LLMDataDistManager:
     def pull_kv(self, src_blocks, tgt_blocks, prompt_cluster_id):
         # If this line is not added, the fx mode will report an error.
         # The preliminary reason is that the context is lost when multiple coroutines pull kv.
+        if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
+            return
         torch.npu.set_device(f"npu:{self.local_rank}")
         if self.data_dist_config.kv_producer_pp_size > 1:
             if self.data_dist_config.is_prefill:
@@ -297,6 +299,8 @@ class LLMDataDistManager:
                                 src_blocks, tgt_blocks)
 
     def register_link(self):
+        if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
+            return
 
         if self.data_dist_config.is_prefill:
             prefill_server_groups = [self.data_dist_config.local_group]
