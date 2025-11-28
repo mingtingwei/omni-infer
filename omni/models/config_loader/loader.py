@@ -113,7 +113,7 @@ class ModelOperatorOptConfig:
     tp_nnodes: int = 1
     c8_calib_path: str = None # 计算faquant的scale采集的kv_cache的calib地址，在test_config_prefill.json赋值
     experts_pruning: bool = False
-    use_tnd_pa: bool = False  # 稠密模型使用新CANN包FIA算子，以TND+PA格式计算attention
+    use_tnd_pa: bool = True  # 稠密模型使用新CANN包FIA算子，以TND+PA格式计算attention
 
     enable_dsa: bool = False # 使能mla = Indexer + select FA
     enable_indexer_quant: bool = False # 使能indexer量化
