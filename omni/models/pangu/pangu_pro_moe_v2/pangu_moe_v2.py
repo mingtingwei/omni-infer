@@ -893,7 +893,11 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
         if attn_metadata is None:
             logits = self.compute_lmhead(hidden_states[-1:, ...], None)
         else:
-            logits = self.compute_lmhead(hidden_states, selected_indices)
+            # when use ChunkedPrefill, selected_indices can cause GE graph recompilation, temporarily set to None
+            if self.is_hybrid_chunked_prefill_graph_mode:
+                logits = self.compute_lmhead(hidden_states, None)
+            else:
+                logits = self.compute_lmhead(hidden_states, selected_indices)
 
         return hidden_states, logits
 
