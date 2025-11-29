@@ -2,7 +2,7 @@
 from typing import Dict, List, Optional
 import torch
 import torch_npu
-
+import os
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import apply_min_token_penalties
@@ -227,6 +227,13 @@ class AscendSamplerV1(SamplerV1):
             if do_sample:
                 p = sampling_metadata.top_p
                 k = sampling_metadata.top_k
+                if os.getenv("OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE", "0") == "1":
+                    probs, idx = apply_top_k_top_p(
+                        logits_or_prob, sampling_metadata.top_k, sampling_metadata.top_p, is_logits,
+                    )
+                    return self.do_sample(
+                        probs, idx, sampling_metadata, spec_metadata,
+                    )
                 logits = logits_or_prob.type(torch.bfloat16)
                 if p is not None:
                     p = p.type(torch.bfloat16)
