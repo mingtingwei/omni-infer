@@ -794,7 +794,11 @@ class NPUModelRunner(GPUModelRunner):
                     attn_metadata_i.seq_lens_list = attn_metadata_i.seq_lens.tolist()
                 else:
                     attn_metadata_i.seq_lens_list = []
-                cos, sin = self.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+
+                if getattr(self, 'drafter', None) is not None and first_layer_in_group in self.drafter.attn_layer_names:
+                    cos, sin = next(self.drafter.model.model.layers.children()).self_attn.rotary_emb.get_cos_sin(positions)
+                else:
+                    cos, sin = self.model.model.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
                 attn_metadata_i.cos = cos
                 attn_metadata_i.sin = sin
             if kv_cache_group_id == 0:
