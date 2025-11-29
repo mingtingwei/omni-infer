@@ -301,25 +301,14 @@ class DeepseekMoE(nn.Module):
             )
             if self.redundancy_shared_expert_num <= 0:
                 intermediate_size = config.moe_intermediate_size * self.n_shared_experts
-                if model_extra_config.parall_config.enable_share_expert_tp:
-                    self.shared_experts = ParallelDeepseekMLP(
-                        hidden_size=config.hidden_size,
-                        intermediate_size=intermediate_size,
-                        hidden_act=config.hidden_act,
-                        quant_config=quant_config,
-                        reduce_results=False,
-                        prefix=f"{prefix}.shared_experts",
-                        comm_group=get_local_world_group()
-                    )
-                else:
-                    self.shared_experts = ReplicatedDeepseekMLP(
-                        hidden_size=config.hidden_size,
-                        intermediate_size=intermediate_size,
-                        hidden_act=config.hidden_act,
-                        quant_config=quant_config,
-                        reduce_results=False,
-                        prefix=f"{prefix}.shared_experts",
-                    )
+                self.shared_experts = ReplicatedDeepseekMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
                 self.gate_up_prefetch_size = model_extra_config.operator_opt_config.shared_expert_gate_up_prefetch * 1024 * 1024
                 self.down_prefetch_size = model_extra_config.operator_opt_config.shared_expert_down_prefetch * 1024 * 1024
             tp_size = self.fake_experts.tp_size
@@ -376,14 +365,25 @@ class DeepseekMoE(nn.Module):
                     self.moe_layer_idx = OmniPlanner.get_deepseek_v3_moe_layer_idx(f"{prefix}.share_experts", first_k_dense_replace=self.first_k_dense_replace)
                     self.expert_mapping = self.planner.expert_mapping_on_current_layer(self.moe_layer_idx, is_prefill=False)
 
-                self.shared_experts = ReplicatedDeepseekMLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    reduce_results=False,
-                    prefix=f"{prefix}.shared_experts",
-                )
+                if model_extra_config.parall_config.enable_share_expert_tp:
+                    self.shared_experts = ParallelDeepseekMLP(
+                        hidden_size=config.hidden_size,
+                        intermediate_size=intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False,
+                        prefix=f"{prefix}.shared_experts",
+                        comm_group=get_local_world_group()
+                    )
+                else:
+                    self.shared_experts = ReplicatedDeepseekMLP(
+                        hidden_size=config.hidden_size,
+                        intermediate_size=intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False,
+                        prefix=f"{prefix}.shared_experts",
+                    )
                 self.gate_up_prefetch_size = model_extra_config.operator_opt_config.shared_expert_gate_up_prefetch * 1024 * 1024
                 self.down_prefetch_size = model_extra_config.operator_opt_config.shared_expert_down_prefetch * 1024 * 1024
             
