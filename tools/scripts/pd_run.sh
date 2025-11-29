@@ -406,6 +406,11 @@ else
     EXTRA_ARGS="$EXTRA_ARGS"
 fi
 
+if [[ -z "$VLLM_LOGGING_CONFIG_PATH" ]]; then
+    SCRIPT_DIR=$(dirname "$(realpath "$0")")
+    export VLLM_LOGGING_CONFIG_PATH=$SCRIPT_DIR"/logging_config_default.json"
+fi
+
 # Print current configuration
 echo "==== Current Configuration ===="
 echo "GLOBAL_RANK_TABLE_FILE_PATH: $GLOBAL_RANK_TABLE_FILE_PATH"
@@ -455,6 +460,7 @@ echo "RAY_PORT: $RAY_PORT"
 echo "RAY_MIN_WORKER_PORT: $RAY_MIN_WORKER_PORT"
 echo "RAY_MAX_WORKER_PORT: $RAY_MAX_WORKER_PORT"
 echo "PRINT_SCREEN: $PRINT_SCREEN"
+echo "VLLM_LOGGING_CONFIG_PATH: $VLLM_LOGGING_CONFIG_PATH"
 echo "=================="
 
 # Execute Python script
