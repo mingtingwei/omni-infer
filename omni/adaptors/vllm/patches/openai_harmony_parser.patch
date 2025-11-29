@@ -397,7 +397,7 @@ index 7743ae47f..fab1b1005 100644
      parallel_tool_calls: Optional[bool] = False
      user: Optional[str] = None
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
-index 03ec17201..dbca1c605 100755
+index 18f0103d6..7eb0fdaf2 100755
 --- a/vllm/entrypoints/openai/serving_chat.py
 +++ b/vllm/entrypoints/openai/serving_chat.py
 @@ -5,13 +5,14 @@ import json
@@ -761,15 +761,6 @@ index 03ec17201..dbca1c605 100755
              # if auto tools are not enabled, and a named tool choice using
              #   outlines is not being used
              if (not self.enable_auto_tools or not self.tool_parser) and \
-@@ -1160,7 +1322,7 @@ class OpenAIServingChat(OpenAIServing):
-                     return self.create_error_response(str(e))
- 
-                 tool_call_info = tool_parser.extract_tool_calls(
--                    content if content is not None else "", request=request)
-+                    content if content is not None else "", request=request, token_ids=token_ids)
-                 # In the OpenAI API the finish_reason is "tools_called"
-                 # if the tool choice is auto and the model produced a tool
-                 # call. The same is not true for named function calls
 @@ -1431,6 +1593,36 @@ class OpenAIServingChat(OpenAIServing):
  
          return enable_thinking
