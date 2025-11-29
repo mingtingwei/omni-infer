@@ -234,7 +234,7 @@ class PanguUltraMoEDecoderLayer(nn.Module):
                 attn_metadata=attn_metadata,
             )
 
-            if model_extra_config.operator_opt_config.use_prefetch:
+            if model_extra_config.operator_opt_config.use_prefetch and model_extra_config.operator_opt_config.dense_mlp_prefetch > 0:
                 if self.is_moe:
                     torch_npu.npu_prefetch(self.mlp.gate.weight, hidden_states, model_extra_config.operator_opt_config.dense_mlp_prefetch * 1024 * 1024)
                 elif model_extra_config.parall_config.dense_mlp_tp_size > 1:
@@ -478,7 +478,7 @@ class PanguUltraMoEModel(nn.Module):
 
         hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
-        if model_extra_config.operator_opt_config.use_prefetch and lm_head is not None:
+        if model_extra_config.operator_opt_config.use_prefetch and model_extra_config.operator_opt_config.lm_head_prefetch > 0 and lm_head is not None:
             torch_npu.npu_prefetch(lm_head.weight, hidden_states, model_extra_config.operator_opt_config.lm_head_prefetch * 1024 * 1024)
 
         return hidden_states

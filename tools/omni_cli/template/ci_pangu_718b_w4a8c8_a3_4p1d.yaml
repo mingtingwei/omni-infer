@@ -32,6 +32,7 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
                 max_moe_layer_num: 58
@@ -111,7 +112,7 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_BUFFSIZE: 800
+            HCCL_BUFFSIZE: 1200
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
@@ -164,6 +165,7 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
                 max_moe_layer_num: 58
@@ -243,7 +245,7 @@ all:
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
             GLOO_SOCKET_IFNAME: enp23s0f3
-            HCCL_BUFFSIZE: 800
+            HCCL_BUFFSIZE: 1200
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
@@ -295,8 +297,9 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
+                pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: False
                 max_redundant_per_expert: 1
@@ -429,8 +432,9 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
+                pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: False
                 max_redundant_per_expert: 1
@@ -563,8 +567,9 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
+                pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: False
                 max_redundant_per_expert: 1
@@ -697,8 +702,9 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../omni/accelerators/placement/patterns/A2_900_placement_pattern_20250904_2k2k_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
+                pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: False
                 max_redundant_per_expert: 1
