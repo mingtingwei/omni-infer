@@ -45,10 +45,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo,
 )
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear,
-                                               MergedColumnParallelLinear)
 from omni.layers.linear import (
     RowParallelFlashCommLinear,
     QKVParallelFlashCommLinear,
@@ -88,6 +84,9 @@ class OpenPanguVisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        enable_vit_sp: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -95,29 +94,42 @@ class OpenPanguVisionAttention(nn.Module):
         self.embed_dim = embed_dim
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
-        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
-        self.num_attention_heads_per_partition = dist_utils.divide(
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+        self.enable_vit_sp = enable_vit_sp #序列并行默认开启
+        if self.enable_vit_sp:
+            self.sp_size = parallel_state.get_tensor_model_parallel_world_size()
+            self.num_attention_heads_per_partition = dist_utils.divide(
+            num_heads, self.sp_size)
+        else:
+            self.sp_size = 1
+            self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
 
-        self.qkv = QKVParallelLinear(
+        self.qkv = QKVParallelFlashCommLinear(
             hidden_size=embed_dim,
             head_size=self.hidden_size_per_attention_head,
             total_num_heads=num_heads,
             total_num_kv_heads=num_heads,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv")
-        self.proj = RowParallelLinear(input_size=projection_size,
-                                      output_size=embed_dim,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.proj")
+        self.proj = RowParallelFlashCommLinear(
+            input_size=projection_size,
+            output_size=embed_dim,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj")
         self.scale_value = self.hidden_size_per_attention_head**-0.5
 
     def forward(
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        true_seq: int,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
@@ -125,7 +137,31 @@ class OpenPanguVisionAttention(nn.Module):
         x, bias = self.qkv(x)
         if bias is not None:
             x = x + bias
-        x = x.unsqueeze(1)
+
+        if self.enable_vit_sp and self.sp_size > 1:
+            # Transfer shape (b, s/sp, h, d) to (b, s, h/sp, d)
+            x = rearrange(x, 's (b t h d) -> (b t) s h d',
+            b=1,
+            t=3,
+            h=self.num_attention_heads_per_partition * self.sp_size)
+
+            batch_size, shard_seqlen, head_num, head_dim = x.shape
+            seq_len = shard_seqlen * self.sp_size
+            shard_head_num = head_num // self.sp_size
+            x = x.reshape(batch_size, shard_seqlen, self.sp_size, shard_head_num, head_dim).transpose(0,2).contiguous()
+            x_all_to_all = torch.empty_like(x)
+            torch.distributed.all_to_all_single(x_all_to_all, x)
+            x_all_to_all = x_all_to_all.reshape(seq_len, batch_size, shard_head_num, head_dim).transpose(0,1).contiguous()
+            cur_seq = x_all_to_all.shape[1]
+            x_all_to_all = x_all_to_all[:, :true_seq, :, :]
+            x = rearrange(x_all_to_all,
+                '(b t) s h d-> s b (t h d)',
+                b=1,
+                t=3,
+                h=self.num_attention_heads_per_partition)
+        else:
+            x = x.unsqueeze(1)
+        
         q, k, v = x.chunk(3, dim=2)
         batch_size = q.shape[1]
 
@@ -152,6 +188,19 @@ class OpenPanguVisionAttention(nn.Module):
             next_tockens=2147483647,
             sparse_mode=0)[0]
 
+        if self.enable_vit_sp and self.sp_size > 1:
+            # Transfer shape (s, h/sp, d) to (s/sp, h, d)
+            padding = (0, 0, 0, 0, 0, cur_seq - true_seq)
+            attn_out = F.pad(attn_out, padding)
+            seq_len, shard_head_num, head_dim = attn_out.shape
+            head_num = shard_head_num * self.sp_size
+            shard_seqlen = seq_len // self.sp_size
+
+            attn_out = attn_out.reshape(self.sp_size, shard_seqlen, shard_head_num, head_dim).transpose(1, 2).contiguous()
+            attn_out_all_to_all = torch.empty_like(attn_out)
+            torch.distributed.all_to_all_single(attn_out_all_to_all, attn_out)
+            attn_out = attn_out_all_to_all.reshape(head_num, shard_seqlen, head_dim).transpose(0, 1).contiguous()
+
         attn_out = rearrange(attn_out, "(b s) h d -> (s b) (h d)", b=batch_size).contiguous()
 
         output, bias = self.proj(attn_out)
@@ -168,32 +217,42 @@ class OpenPanguVisionMLP(nn.Module):
                  bias: bool = False,
                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
                  vision_config = None,
+                 tp_size: int = 1,
+                 tp_rank: int = 0,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
         self.hidden_act = vision_config.hidden_act
         ################ TODO From BF 
         if self.hidden_act == "silu":
-            tp_size = parallel_state.get_tensor_model_parallel_world_size()
             if hidden_features % tp_size != 0:
                 hidden_features = (hidden_features + tp_size - 1) // tp_size * tp_size
-            self.gate_up_proj = MergedColumnParallelLinear(input_size=in_features,
-                                                           output_sizes=[hidden_features] * 2,
-                                                           bias=bias,
-                                                           quant_config=quant_config,
-                                                           prefix=f"{prefix}.gate_up_proj",)
+            self.gate_up_proj = MergedColumnParallelFlashCommLinear(
+                in_features,
+                [hidden_features] * 2,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj",)
         else:
-            self.up_proj = ColumnParallelLinear(in_features,
-                                                hidden_features,
-                                                bias=bias,
-                                                quant_config=quant_config,
-                                                prefix=f"{prefix}.up_proj")
+            self.up_proj = ColumnParallelFlashCommLinear(
+                in_features,
+                hidden_features,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.up_proj")
         
-        self.down_proj = RowParallelLinear(hidden_features,
-                                              in_features,
-                                              bias=bias,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.down_proj")
+        self.down_proj = RowParallelFlashCommLinear(
+                            hidden_features,
+                            in_features,
+                            tp_size=tp_size,
+                            tp_rank=tp_rank,
+                            bias=bias,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.down_proj")
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
@@ -216,6 +275,9 @@ class OpenPanguVisionBlock(nn.Module):
         num_heads: int,
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        enable_vit_sp: bool = True,
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         vision_config = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -230,6 +292,9 @@ class OpenPanguVisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            enable_vit_sp=enable_vit_sp,
             quant_config=quant_config,
             prefix=f"{prefix}.attn")
         self.mlp = OpenPanguVisionMLP(dim,
@@ -237,17 +302,19 @@ class OpenPanguVisionBlock(nn.Module):
                                      act_fn=act_fn,
                                      bias=True,
                                      vision_config=vision_config,
+                                     tp_size=tp_size,
+                                     tp_rank=tp_rank,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.mlp")
         
-    def forward(self, hidden_states: torch.Tensor, residual: Optional[torch.Tensor], cu_seqlens: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor, residual: Optional[torch.Tensor], cu_seqlens: torch.Tensor, true_seq: int,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
             hidden_states = self.norm1(hidden_states)
         else:
             hidden_states, residual = self.norm1(hidden_states, residual)
-        hidden_states = self.attn(hidden_states, cu_seqlens=cu_seqlens, cos=cos, sin=sin)
+        hidden_states = self.attn(hidden_states, cu_seqlens=cu_seqlens, true_seq=true_seq, cos=cos, sin=sin)
 
         # Fully Connected
         hidden_states, residual = self.norm2(hidden_states, residual)
@@ -369,85 +436,96 @@ class OpenPanguVisionTransformer(nn.Module):
         use_data_parallel: bool = False,
     ) -> None:
         self.use_data_parallel = use_data_parallel
-        self._tp_group = self._get_tp_group()
-        with parallel_state.patch_tensor_parallel_group(self._tp_group):
-            super().__init__()
-            self.hidden_size = vision_config.hidden_size
-            self.num_heads = vision_config.num_heads
-            self.window_size = vision_config.window_size
-            self.patch_size = vision_config.patch_size
-            self.spatial_merge_size = vision_config.spatial_merge_size
-            self.fullatt_block_indexes = vision_config.fullatt_block_indexes
-            self.spatial_merge_unit = self.spatial_merge_size**2
-
-            norm_layer = partial(RMSNorm, eps=norm_eps)
-            self.interleaved = interleaved
-            self.out_hidden_size = vision_config.out_hidden_size
-            self.hidden_act = vision_config.hidden_act
-
-            head_dim = self.hidden_size // self.num_heads
-            self.rotary_pos_emb = OpenPanguVisionRotaryEmbedding(head_dim // 2)
-            self.patch_embed = OpenPanguVisionPatchEmbed(
-                patch_size=vision_config.patch_size,
-                temporal_patch_size=vision_config.temporal_patch_size,
-                in_channels=vision_config.in_channels,
-                hidden_size=self.hidden_size,
-            )
-            self.blocks = nn.ModuleList(
-                [
-                    OpenPanguVisionBlock(
-                        dim=self.hidden_size,
-                        num_heads=self.num_heads,
-                        mlp_hidden_dim=vision_config.intermediate_size,
-                        act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act], ############ TODO From BF
-                        vision_config=vision_config,
-                        norm_layer=norm_layer,
-                        quant_config=quant_config,
-                        prefix=f"{prefix}.blocks.{layer_idx}",
-                    )
-                    for layer_idx in range(vision_config.depth)
-                ]
-            )
+        super().__init__()
+        self.enable_vit_sp = True #序列并行默认使能
+        if self.enable_vit_sp:
+            self.tp_size = 1
+            self.tp_rank = 0
+        else:
             self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
             self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
-            self.hidden_size_per_attention_head = dist_utils.divide(self.hidden_size, self.num_heads)
+        self.hidden_size = vision_config.hidden_size
+        self.num_heads = vision_config.num_heads
+        self.window_size = vision_config.window_size
+        self.patch_size = vision_config.patch_size
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
+        self.spatial_merge_unit = self.spatial_merge_size**2
 
-            self.select_layer = getattr(vision_config, "mm_unit_vision_select_layer", [-1, -3])
-            self.select_index = [vision_config.depth + i for i in self.select_layer]
-            self.select_index = self.select_index[::-1]
-            self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
-            self.num_merger = len(self.select_layer)
-            self.rank = torch.distributed.get_rank()
-            self.world_size = torch.distributed.get_world_size()
-            merge_parallel = False
-            if self.world_size % self.num_merger == 0:
-                merge_parallel = True
-                self.tp_size = self.world_size // self.num_merger
-                self.tp_rank = self.rank % self.tp_size
-            self.local_merger = None
+        norm_layer = partial(RMSNorm, eps=norm_eps)
+        self.interleaved = interleaved
+        self.out_hidden_size = vision_config.out_hidden_size
+        self.hidden_act = vision_config.hidden_act
+
+        head_dim = self.hidden_size // self.num_heads
+        self.rotary_pos_emb = OpenPanguVisionRotaryEmbedding(head_dim // 2)
+        self.patch_embed = OpenPanguVisionPatchEmbed(
+            patch_size=vision_config.patch_size,
+            temporal_patch_size=vision_config.temporal_patch_size,
+            in_channels=vision_config.in_channels,
+            hidden_size=self.hidden_size,
+        )
+        self.blocks = nn.ModuleList(
+            [
+                OpenPanguVisionBlock(
+                    dim=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_hidden_dim=vision_config.intermediate_size,
+                    act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act], ############ TODO From BF
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    enable_vit_sp=self.enable_vit_sp,
+                    vision_config=vision_config,
+                    norm_layer=norm_layer,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
+                )
+                for layer_idx in range(vision_config.depth)
+            ]
+        )
+        self.hidden_size_per_attention_head = dist_utils.divide(self.hidden_size, self.num_heads)
+
+        self.select_layer = getattr(vision_config, "mm_unit_vision_select_layer", [-1, -3])
+        self.select_index = [vision_config.depth + i for i in self.select_layer]
+        self.select_index = self.select_index[::-1]
+        self.select_layer = [-1 * (i + 1) for i in range(len(self.select_index))]
+       
+        self.rank = torch.distributed.get_rank()
+        self.world_size = torch.distributed.get_world_size()
+        self.local_merger = None
+        merge_parallel = False
+        merge_tp_size = self.tp_size
+        merge_tp_rank = self.tp_rank
+        self.num_merger = len(self.select_layer)
+        if self.world_size % self.num_merger == 0 and not self.enable_vit_sp:
+            merge_parallel = True
+            merge_tp_size = self.world_size // self.num_merger
+            merge_tp_rank = self.rank % merge_tp_size
+
+        
+        self.take_indices = self.select_index
+
+        self.final_layernorm = RMSNorm(self.hidden_size, eps=norm_eps)
+        self.merger = nn.ModuleList(
+            [
+                OpenPanguVisionPatchMerger(
+                    d_model=vision_config.out_hidden_size,
+                    context_dim=self.hidden_size,
+                    norm_layer=norm_layer,
+                    spatial_merge_size=self.spatial_merge_size,
+                    quant_config=quant_config,
+                    tp_size = merge_tp_size,
+                    tp_rank = merge_tp_rank,
+                    merge_parallel = merge_parallel,
+                    prefix=f"{prefix}.merger",
+                )
+                for i in range(len(self.select_layer))
+            ]
+        )
+        if merge_parallel:
+            self.merger_idx = self.rank // self.tp_size
+            self.local_merger = self.merger[self.merger_idx]
             
-            self.take_indices = self.select_index
-
-            self.final_layernorm = RMSNorm(self.hidden_size, eps=norm_eps)
-            self.merger = nn.ModuleList(
-                [
-                    OpenPanguVisionPatchMerger(
-                        d_model=vision_config.out_hidden_size,
-                        context_dim=self.hidden_size,
-                        norm_layer=norm_layer,
-                        spatial_merge_size=self.spatial_merge_size,
-                        quant_config=quant_config,
-                        tp_size = self.tp_size,
-                        tp_rank = self.tp_rank,
-                        merge_parallel = merge_parallel,
-                        prefix=f"{prefix}.merger",
-                    )
-                    for i in range(len(self.select_layer))
-                ]
-            )
-            if merge_parallel:
-                self.merger_idx = self.rank // self.tp_size
-                self.local_merger = self.merger[self.merger_idx]
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
@@ -610,8 +688,18 @@ class OpenPanguVisionTransformer(nn.Module):
         hidden_states = hidden_states[window_index, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
 
-        hidden_states = hidden_states.unsqueeze(1)
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
+        if self.enable_vit_sp and self.world_size > 1:
+            merge_size = self.spatial_merge_size**2
+            padding_size = math.ceil(math.ceil(seq_len / self.world_size) / merge_size) * merge_size *  self.world_size - seq_len
+            if padding_size > 0:
+                padding = torch.zeros(padding_size,
+                                    *hidden_states.size()[1:],
+                                    dtype=hidden_states.dtype,
+                                    device=hidden_states.device)
+                hidden_states = torch.cat([hidden_states, padding], dim=0)
+            hidden_states = hidden_states.chunk(self.world_size, dim=0)[self.rank]
+        hidden_states = hidden_states.unsqueeze(1)
         res = None
         
         if self.local_merger:
@@ -621,7 +709,7 @@ class OpenPanguVisionTransformer(nn.Module):
                     cu_seqlens_now = cu_seqlens
                 else:
                     cu_seqlens_now = cu_window_seqlens
-                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, true_seq=seq_len, cos=cos, sin=sin)
                 if layer_num == self.take_indices[self.select_layer[self.merger_idx]]:
                     local_feather, _ = self.final_layernorm(hidden_states, res)
             hidden_states = self.local_merger(local_feather)
@@ -634,7 +722,7 @@ class OpenPanguVisionTransformer(nn.Module):
                     cu_seqlens_now = cu_seqlens
                 else:
                     cu_seqlens_now = cu_window_seqlens
-                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+                hidden_states, res = blk(hidden_states, res, cu_seqlens=cu_seqlens_now, true_seq=seq_len, cos=cos, sin=sin)
                 if layer_num in self.take_indices:
                     ln_hs, _ = self.final_layernorm(hidden_states, res)
                     intermediates.append(ln_hs)
@@ -644,6 +732,10 @@ class OpenPanguVisionTransformer(nn.Module):
                 image_embeddings_list.append(self.merger[idx](intermediates[sl]))
             hidden_states = sum(image_embeddings_list)
 
+        if self.enable_vit_sp and self.world_size > 1:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+            if padding_size:
+                hidden_states = hidden_states[:-padding_size // merge_size]
         reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
@@ -728,40 +820,38 @@ class OpenPanguVisionTransformer(nn.Module):
             pad = [0] * (w.ndim * 2)
             pad[-(dim + 1) * 2 + 1] = pad_len
             return F.pad(w, pad, mode='constant', value=0)
+        stacked_params_mapping = [
+            ("attn.qkv.", "attn.q.", "q"),
+            ("attn.qkv.", "attn.k.", "k"),
+            ("attn.qkv.", "attn.v.", "v"),
+        ]
+        if self.hidden_act == "silu":
+            stacked_params_mapping.extend([
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ])
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
 
-        with parallel_state.patch_tensor_parallel_group(self._tp_group):
-            stacked_params_mapping = [
-                ("attn.qkv.", "attn.q.", "q"),
-                ("attn.qkv.", "attn.k.", "k"),
-                ("attn.qkv.", "attn.v.", "v"),
-            ]
+        for name, loaded_weight in weights:
             if self.hidden_act == "silu":
-                stacked_params_mapping.extend([
-                    ("gate_up_proj", "gate_proj", 0),
-                    ("gate_up_proj", "up_proj", 1),
-                ])
-            params_dict = dict(self.named_parameters(remove_duplicate=False))
-            loaded_params: set[str] = set()
+                loaded_weight = _padding_weight(name, loaded_weight)
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
 
-            for name, loaded_weight in weights:
-                if self.hidden_act == "silu":
-                    loaded_weight = _padding_weight(name, loaded_weight)
-                for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                loaded_params.add(name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
         return loaded_params
 
     def _get_tp_group(self) -> None:
