@@ -157,6 +157,12 @@ class LLMDataDistManager:
 
         self.registered_link_infos = {}
 
+        if self.data_dist_config.is_prefill:
+            prefill_server_groups = [self.data_dist_config.local_group]
+        else:
+            prefill_server_groups = self.data_dist_config.global_rank_table.prefill_group
+        self.prefill_tp_dp_size = len(prefill_server_groups[0].device_list) // self.data_dist_config.kv_producer_pp_size
+
     def get_real_remote_cluster_ids(self, meta: "ReqMeta"):
         remote_cluster_ids = self.registered_link_infos.get(
             (meta.remote_cluster_id, meta.remote_dp_rank, self.rank), None)
@@ -278,16 +284,11 @@ class LLMDataDistManager:
             return
         torch.npu.set_device(f"npu:{self.local_rank}")
         if self.data_dist_config.kv_producer_pp_size > 1:
-            if self.data_dist_config.is_prefill:
-                prefill_server_groups = [self.data_dist_config.local_group]
-            else:
-                prefill_server_groups = self.data_dist_config.global_rank_table.prefill_group
-            prefill_tp_dp_size = len(prefill_server_groups[0].device_list) // self.data_dist_config.kv_producer_pp_size
             for pp_stage_ind, cur_pp_stage_kv_caches in enumerate(self.registered_kv_caches):
                 for model_id, kv_cache in enumerate(cur_pp_stage_kv_caches):
-                    cluster_id_pp_offset = pp_stage_ind * prefill_tp_dp_size
+                    cluster_id_pp_offset = pp_stage_ind * self.prefill_tp_dp_size
                     prompt_cache_key = BlocksCacheKey(
-                        prompt_cluster_id=prompt_cluster_id +cluster_id_pp_offset, model_id=model_id
+                        prompt_cluster_id=prompt_cluster_id + cluster_id_pp_offset, model_id=model_id
                     )
                     self._pull_blocks(prompt_cache_key, kv_cache,
                                     src_blocks, tgt_blocks)

@@ -1412,6 +1412,7 @@ class DeepseekMLA(nn.Module):
                     attn_metadata.slot_mapping,
                     kv_cache[1],
                     kv_cache[0],
+                    c_kv_scale=self.kv_scale_reci_tile,
                     epsilon=self.kv_a_layernorm.variance_epsilon,
                     cache_mode="PA_NZ",
                     is_output_kv=True)
@@ -1470,7 +1471,7 @@ class DeepseekMLA(nn.Module):
                 ):
                     prefill_q = q[computed_tokens:computed_tokens + actual_seq_qlen[-1]]
                     if prefill_metadata.kv_index_list and kv_cache is not None and isinstance(kv_cache, Tuple) and \
-                            kv_cache[0].numel() > 0:
+                            kv_cache[0].numel() > 0 and not self.fa_quant:
 
                         block_num, block_size, head_size, _ = kv_cache[0].shape
                         kv_cache_a = (kv_cache[0]

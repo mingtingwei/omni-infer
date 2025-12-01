@@ -325,7 +325,7 @@ class DeepseekMoE(nn.Module):
                     from omni.accelerators.placement.omni_placement.omni_planner import OmniPlanner
                     self.planner = OmniPlanner(device="npu",
                                             rank=get_world_group().rank_in_group,
-                                            world_size=get_world_group().world_size,
+                                            world_size=get_ep_group().world_size,
                                             num_experts=self.n_routed_experts,
                                             num_redundancy_shared_expert_rank=self.redundancy_shared_expert_num)
                     self.moe_layer_idx = OmniPlanner.get_deepseek_v3_moe_layer_idx(moe_prefix, first_k_dense_replace=self.first_k_dense_replace)
