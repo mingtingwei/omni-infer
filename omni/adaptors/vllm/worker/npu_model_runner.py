@@ -483,7 +483,7 @@ class NPUModelRunner(GPUModelRunner):
         graph_pad_size = 0
         if self.enable_torchair_graph_mode and len(self.decode_gear_list) > 1:
             if attn_state == AscendAttentionState.DecodeOnly:
-                self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, num_reqs)
+                self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, total_num_scheduled_tokens)
             elif self.is_hybrid_chunked_prefill_graph_mode and attn_state ==  AscendAttentionState.ChunkedPrefill:
                 self.max_batch_size = self._get_closest_gear(num_input_tokens)
 
