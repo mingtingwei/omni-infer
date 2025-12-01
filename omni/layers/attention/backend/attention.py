@@ -899,14 +899,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # Scale-format constraints under GQA quantization with BNSD layout.
             k_scale = layer.k_scale.view(self.num_kv_heads, 1, -1) 
             v_scale = layer.v_scale.view(self.num_kv_heads, 1, -1)
-            # MTP=0
-            sparse_mode = 0
-            atten_mask = None
         else:
             k_scale = None 
             v_scale = None
-            sparse_mode = 3
-            atten_mask = AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE
         use_omni_cache = model_extra_config.operator_opt_config.use_omni_cache
         omni_cache = getattr(attn_metadata, "omni_cache", None)
         block_size = kv_cache[0].shape[-2] if kv_cache[0].numel() > 0 else 128
@@ -989,8 +984,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value_quant_mode=0,
                 block_table=attn_metadata.block_tables,
                 block_size=block_size,
-                sparse_mode=sparse_mode,
-                atten_mask=atten_mask,
                 actual_seq_kvlen=attn_metadata.seq_lens,
                 inner_precise=1
             )[0]
