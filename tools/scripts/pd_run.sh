@@ -397,7 +397,7 @@ fi
 export ENABLE_APC_EVENT=0
 
 # path to local dir of profile, comment to disable profile api
-export VLLM_TORCH_PROFILER_DIR=/tmp/profiling
+# export VLLM_TORCH_PROFILER_DIR=/tmp/profiling
 
 # enable middleware
 if [[ -n "$VALIDATORS_CONFIG_PATH" ]]; then
