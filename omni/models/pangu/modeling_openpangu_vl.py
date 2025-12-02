@@ -18,17 +18,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
+from functools import partial, lru_cache
 from typing import Callable, Literal, Optional, TypedDict, Union
 from collections.abc import Iterable, Mapping, Sequence
 import math
 import itertools
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
 from einops import rearrange
+from torchvision.transforms.v2 import functional
 
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce
@@ -45,12 +45,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo,
 )
-from omni.layers.linear import (
-    RowParallelFlashCommLinear,
-    QKVParallelFlashCommLinear,
-    ColumnParallelFlashCommLinear,
-    MergedColumnParallelFlashCommLinear)
-    
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader 
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
@@ -61,21 +55,22 @@ from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.processing import PromptUpdate, PromptReplacement
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.attention import Attention, AttentionType, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 
 from transformers.utils import logging
 
 from .processor_openpangu_vl import OpenPanguVLProcessor
 from .pangu_dense import PanguEmbeddedForCausalLM
 from omni.layers.attention.backend.attention import AscendAttentionState
-from vllm.attention import Attention, AttentionType, AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
 from omni.layers.layernorm import RMSNorm
-from functools import lru_cache
-
-
+from omni.layers.linear import (
+    RowParallelFlashCommLinear,
+    QKVParallelFlashCommLinear,
+    ColumnParallelFlashCommLinear,
+    MergedColumnParallelFlashCommLinear)
 
 logger = logging.get_logger(__name__)
-
 
 class OpenPanguVisionAttention(nn.Module):
 
@@ -903,6 +898,8 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
                 max_pixels=max_pixels,
                 size=size,
                 use_fast=kwargs.get("use_fast", True),
+                do_rescale=False,
+                do_normalize=False
             ),
             **kwargs,
         )
@@ -1203,6 +1200,18 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             architectures=["PanguEmbeddedForCausalLM"],
         )
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self._image_post_process_config(config.vision_config, vllm_config.model_config)
+    
+    def _image_post_process_config(self, vision_config, model_config):
+        processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+        self.channel = vision_config.in_channels
+        self.patch_size = vision_config.patch_size
+        self.temporal_patch_size = vision_config.temporal_patch_size
+        self.do_rescale = True
+        self.do_normalize = True
+        self.rescale_factor = processor.info.get_hf_processor().image_processor.rescale_factor
+        self.image_mean = tuple(processor.info.get_hf_processor().image_processor.image_mean)
+        self.image_std = tuple(processor.info.get_hf_processor().image_processor.image_std)
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
             if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
@@ -1370,6 +1379,34 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 placeholder_token_id=self.config.video_token_id,
             )
         return inputs_embeds
+    
+    @lru_cache(maxsize=10)
+    def _fuse_mean_std_and_rescale_factor(self, do_normalize, image_mean, image_std, do_rescale, rescale_factor, device):
+        if do_rescale and do_normalize:
+            image_mean = torch.tensor(image_mean, device=device) * (1.0 / rescale_factor)
+            image_std = torch.tensor(image_std, device=device) * (1.0 / rescale_factor)
+            do_rescale = False
+        return image_mean, image_std, do_rescale
+    
+    def rescale_and_normalize(self, images, do_rescale, rescale_factor, do_normalize, image_mean, image_std):
+        """
+        Rescale and normalize images.
+        """
+        image_mean, image_std, do_rescale = self._fuse_mean_std_and_rescale_factor(
+            do_normalize=do_normalize,
+            image_mean=image_mean,
+            image_std=image_std,
+            do_rescale=do_rescale,
+            rescale_factor=rescale_factor,
+            device=images.device
+        )
+        # if/elif as we use fused rescale and normalize if both are set to True
+        if do_normalize:
+            origin_dtype = images.dtype
+            images = functional.normalize(images.to(torch.float32), image_mean, image_std).to(origin_dtype)
+        elif do_rescale:
+            images = images * rescale_factor
+        return images
 
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
@@ -1380,6 +1417,10 @@ class OpenPanguVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = pixel_values.reshape(-1, self.channel, self.patch_size, self.patch_size)
+            pixel_values = self.rescale_and_normalize(pixel_values, self.do_rescale, 
+                                                self.rescale_factor, self.do_normalize, self.image_mean, self.image_std)
+            pixel_values = pixel_values.reshape(-1, self.channel * self.temporal_patch_size * self.patch_size * self.patch_size)
             if self.use_data_parallel:
                 image_embeds = run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw, rope_type="rope_3d"
