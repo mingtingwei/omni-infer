@@ -1,4 +1,4 @@
-{
+{ "omni_logging_format":true,
   "formatters": {
     "vllm": {
       "class": "vllm.logging_utils.NewLineFormatter",

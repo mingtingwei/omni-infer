@@ -71,7 +71,8 @@ def replace_logger_file(config_json, logger_file_path):
     set_file_handler = False
     for handler_name, handler_config in config_json.get("handlers", {}).items():
         if "filename" in handler_config:
-            handler_config["filename"] = logger_file_path
+            if config_json.get("omni_logging_format", False):
+                handler_config["filename"] = logger_file_path
             set_file_handler = True
     return config_json, set_file_handler
 
