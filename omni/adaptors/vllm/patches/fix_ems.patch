@@ -1,0 +1,21 @@
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index e606b0d16..b91fd044c 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -442,6 +442,7 @@ class Scheduler(SchedulerInterface):
+                 request = self.waiting.peek_request()
+ 
+                 # KVTransfer: skip request if still waiting for remote kvs.
++                old_status = request.status
+                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                     is_ready = self._update_waiting_for_remote_kv(request)
+                     if is_ready:
+@@ -480,7 +481,7 @@ class Scheduler(SchedulerInterface):
+                 load_kv_async = False
+ 
+                 # Get already-cached tokens.
+-                if request.num_computed_tokens == 0:
++                if request.num_computed_tokens == 0 and old_status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+                     # Get locally-cached tokens.
+                     new_computed_blocks, num_new_local_computed_tokens = \
+                         self.kv_cache_manager.get_computed_blocks(

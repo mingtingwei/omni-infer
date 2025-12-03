@@ -45,3 +45,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/support_v1_priority_schedule_for_xiaoy
 git apply --whitespace=nowarn $PATCH_ROOT/gpt_oss_model_init.patch
 git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_parser.patch
 git apply --whitespace=nowarn $PATCH_ROOT/apply_tool_parser_content.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_ems.patch
