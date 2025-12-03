@@ -847,7 +847,7 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       quant_config=self.quant_config,
-                                      parallel_lmhead=(get_dp_group().world_size > 1))
+                                      parallel_lmhead=False)
 
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -1077,12 +1077,17 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
                         else:
                             name = remapped_kv_scale_name
                     param = params_dict[name]
-                    if (name.endswith("kv_scale") or 
-                        name.endswith("key_antiquant_scale") or 
-                        name.endswith("value_antiquant_scale") or
-                        name.endswith("param_sink_key") or 
-                        name.endswith("param_sink_value")):
-                        set_weight_attrs(param, {"is_2_dims": True})
+                    # Parameters that need 2-dims attribute
+                    is_2_dims_suffixes = (
+                        "kv_scale",
+                        "key_antiquant_scale",
+                        "value_antiquant_scale",
+                        "param_sink_key",
+                        "param_sink_value",
+                    )
+                    if name.endswith(is_2_dims_suffixes):
+                        if not hasattr(param, "is_2_dims"):
+                            set_weight_attrs(param, {"is_2_dims": True})
 
                     if name.endswith("param_sink_key") or name.endswith("param_sink_value"):
                         weight_loader = getattr(param, "weight_loader", sharded_weight_loader(-2))
