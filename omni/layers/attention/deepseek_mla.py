@@ -215,7 +215,7 @@ class Indexer(nn.Module):
             q_rope_mini, q_nope_mini = torch.split(q_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64,64+64]
 
             q_rope_mini = q_rope_mini.unsqueeze(2)
-            q_rope_mini = torch_npu.npu_interleave_rope(q_rope_mini, cos_q, sin_q)
+            q_rope_mini = torch_npu.npu_rotary_mul(q_rope_mini, cos_q, sin_q)
             q_rope_mini = q_rope_mini.squeeze(2)
 
             if model_extra_config.parall_config.attn_sp_size > 1:
@@ -234,7 +234,7 @@ class Indexer(nn.Module):
         k_mini_rope, k_mini_nope = torch.split(k_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64+64]
 
         k_mini_rope = k_mini_rope.unsqueeze(2)
-        k_mini_rope = torch_npu.npu_interleave_rope(k_mini_rope, cos, sin)
+        k_mini_rope = torch_npu.npu_rotary_mul(k_mini_rope, cos, sin)
         k_mini_rope = k_mini_rope.squeeze(2)
 
         k_mini = torch.cat([k_mini_rope, k_mini_nope], dim=-1)  # [b*s,128]
