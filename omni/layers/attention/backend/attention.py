@@ -40,7 +40,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.platforms import current_platform
 from vllm.config import (get_current_vllm_config, CompilationLevel)
-from omni.layers.rotary_embedding import QwenMRotaryEmbedding
+from omni.layers.rotary_embedding import QwenMRotaryEmbedding, MRotaryEmbeddingInterleaved
 from omni.layers.attention.backend.attention_dummy_builder import DummyAttentionMetadataBuilder
 from omni.models.config_loader.loader import model_extra_config
 
@@ -404,7 +404,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         if hasattr(self.runner.model, 'language_model') and hasattr(self.runner.model.language_model, 'model'):
             first_layer_ind = self.runner.model.language_model.model.start_layer
-            Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding]
+            Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding, MRotaryEmbeddingInterleaved]
             if type(self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb) in Rotary_List:
                 cos, sin = None, None
             else:
@@ -468,7 +468,7 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         if hasattr(self.runner.model, 'language_model') and hasattr(self.runner.model.language_model, 'model'):
             first_layer_ind = self.runner.model.language_model.model.start_layer
-            Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding]
+            Rotary_List = [QwenMRotaryEmbedding, DynamicNTKScalingRotaryEmbedding, MRotaryEmbeddingInterleaved]
             if type(self.runner.model.language_model.model.layers[first_layer_ind].self_attn.rotary_emb) in Rotary_List:
                 cos, sin = None, None
             else:
