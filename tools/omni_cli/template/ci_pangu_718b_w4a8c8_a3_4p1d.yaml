@@ -69,6 +69,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu_a3_4p1d_d0
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9000
             VLLM_LLMDATADIST_ZMQ_PORT: 5573
             ASCEND_AICPU_PATH: /usr/local/Ascend/latest
@@ -202,6 +203,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu_a3_4p1d_d1
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9000
             VLLM_LLMDATADIST_ZMQ_PORT: 5574
             ASCEND_AICPU_PATH: /usr/local/Ascend/latest
@@ -335,6 +337,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7
           container_name: pangu_a3_4p1d_p0
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             ASCEND_GLOBAL_LOG_LEVEL: 3
             VLLM_LLMDATADIST_ZMQ_PORT: 5569
             API_PORT: 9000
@@ -470,6 +473,7 @@ all:
           ascend_rt_visible_devices: 8,9,10,11,12,13,14,15
           container_name: pangu_a3_4p1d_p1
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             ASCEND_GLOBAL_LOG_LEVEL: 3
             VLLM_LLMDATADIST_ZMQ_PORT: 5570
             API_PORT: 9001
@@ -605,6 +609,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7
           container_name: pangu_a3_4p1d_p2
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             ASCEND_GLOBAL_LOG_LEVEL: 3
             VLLM_LLMDATADIST_ZMQ_PORT: 5571
             API_PORT: 9002
@@ -740,6 +745,7 @@ all:
           ascend_rt_visible_devices: 8,9,10,11,12,13,14,15
           container_name: pangu_a3_4p1d_p3
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             ASCEND_GLOBAL_LOG_LEVEL: 3
             VLLM_LLMDATADIST_ZMQ_PORT: 5572
             API_PORT: 9003
