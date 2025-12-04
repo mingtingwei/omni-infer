@@ -72,6 +72,12 @@ _GLOBAL_STEP = 0
 MAX_GEAR_NUM = 6
 NPU_GENERATOR_OFFSET_STEP = 12 # ascend npu, move 12 every one generation, which is 4 on cuda.
 
+PRE_NUM_REQS = 0
+PRE_NUM_INPUT_TOKENS = 0
+COUNTER = 0
+PRE_COST = 0
+COST_THRESHOLD: float = float(os.environ.get("NPU_MODEL_RUNNER_COST_THRESHOLD", "0"))
+
 def _get_pad_size(num_seqs):
     tp_size = get_tensor_model_parallel_world_size()
     if model_extra_config.parall_config.attn_sp_size > 1:
@@ -409,8 +415,17 @@ class NPUModelRunner(GPUModelRunner):
         num_input_tokens = total_num_scheduled_tokens
         tp_rank = get_tensor_model_parallel_rank()
         if tp_rank == 0:
-            logger.warning(f"current num reqs = {num_reqs}, num_input_tokens = {num_input_tokens}")
-
+            if COST_THRESHOLD == 0:
+                logger.info(f"current num reqs = {num_reqs}, num_input_tokens = {num_input_tokens}")
+            else:
+                global PRE_NUM_REQS, PRE_NUM_INPUT_TOKENS, COUNTER
+                if num_reqs != PRE_NUM_REQS or num_input_tokens != PRE_NUM_INPUT_TOKENS:
+                    logger.info(f"current num reqs = {num_reqs}, num_input_tokens = {num_input_tokens}, last_counter = {COUNTER}")
+                    PRE_NUM_REQS = num_reqs
+                    PRE_NUM_INPUT_TOKENS = num_input_tokens
+                    COUNTER = 0
+                else:
+                    COUNTER += 1
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -1237,10 +1252,13 @@ class NPUModelRunner(GPUModelRunner):
 
         cost_output = time.time() - start_9
         cost = cost_upd_states + cost_proc_reqs + cost_logits + cost_bitmask + cost_sampler + cost_disc + cost_drafter + cost_device_output + cost_output
-        logger.debug(f" ***** execute model cost:{cost:.6f}="
-                    f"{cost_upd_states:.6f}+{cost_proc_reqs:.6f}+{cost_logits:.6f}+{cost_bitmask:.6f}"
-                    f"+{cost_disc:.6f}+{cost_sampler:.6f}+{cost_drafter:.6f}+{cost_device_output:.6f}+{cost_output:.6f}")
 
+        global PRE_COST, COST_THRESHOLD
+        if abs(cost - PRE_COST) >= COST_THRESHOLD:
+            logger.info(f" ***** execute model cost:{cost:.6f}="
+                        f"{cost_upd_states:.6f}+{cost_proc_reqs:.6f}+{cost_logits:.6f}+{cost_bitmask:.6f}"
+                        f"+{cost_disc:.6f}+{cost_sampler:.6f}+{cost_drafter:.6f}+{cost_device_output:.6f}+{cost_output:.6f}")
+        PRE_COST = cost
         finished_sending = self.finished_sending
         finished_recving = self.finished_recving
         loading_kv_failure = self.loading_kv_failure
