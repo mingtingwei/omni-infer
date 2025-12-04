@@ -268,18 +268,20 @@ class PanguUltraMoEDecoderLayer(nn.Module):
             residual = torch.cat(residual_out)[:local_length]
             hidden_states = self.post_mlp_layernorm(hidden_states)
         else:
-            with ConditionalTNGScope(super_kernel=enable_superkernel, scope='superkernel_decode_layer'):
-                if self.is_moe == True:
+            if self.is_moe == True:
+                with ConditionalTNGScope(super_kernel=enable_superkernel and model_extra_config.parall_config.redundancy_shared_expert_num > 0, 
+                                         scope='superkernel_decode_layer'):
                     # omni placement do not support super kernel
                     hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
                     if isinstance(hidden_states, (tuple, list)):
                         assert len(hidden_states) == 2
                         hidden_states = hidden_states[0] + hidden_states[1]
-                else:
+            else:
+                with ConditionalTNGScope(super_kernel=enable_superkernel, scope='superkernel_decode_layer'):
                     hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata)
 
+            with ConditionalTNGScope(super_kernel=enable_superkernel, scope='superkernel_decode_layer'):
                 hidden_states = self.post_mlp_layernorm(hidden_states)
-
                 if enable_superkernel and next_input_layernorm is not None:
                     hidden_states, residual = next_input_layernorm(
                         hidden_states, residual, quant_symbol=(not model_extra_config.operator_opt_config.use_mlaprolog and self.quant_symbol))
