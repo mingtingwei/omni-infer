@@ -513,14 +513,15 @@ start_ray_log_rotate(){
 
 setup_multi_server_ray_backend_logging_config() {
     [ -z "$VLLM_LOGGING_CONFIG_PATH" ] || [ ! -f "$VLLM_LOGGING_CONFIG_PATH" ] && return
+    local temp_file=$(mktemp)
+    cp "$VLLM_LOGGING_CONFIG_PATH" "$temp_file"
     if grep -q '"omni_logging_format":true' "$VLLM_LOGGING_CONFIG_PATH"; then
-      local temp_file=$(mktemp)
-      cp "$VLLM_LOGGING_CONFIG_PATH" "$temp_file"
-      sed -i 's|"filename": *"[^"]*"|"filename": "'"$LOG_DIR"'/server_0.log"|g' "$temp_file"
-      export VLLM_LOGGING_CONFIG_PATH="$temp_file"
-    else
-      return
+        sed -i 's|"filename": *"[^"]*"|"filename": "'"$LOG_DIR"'/server_0.log"|g' "$temp_file"
     fi
+    if grep -q '"process_logging_config": true' "$VLLM_LOGGING_CONFIG_PATH"; then
+        python process_logging_config.py "$temp_file" --inplace
+    fi
+    export VLLM_LOGGING_CONFIG_PATH="$temp_file"
 }
 
 if [ $(echo -n "$NODE_IP_LIST" | tr -cd ',' | wc -c) -ge 1 ]; then
