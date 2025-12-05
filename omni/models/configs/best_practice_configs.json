@@ -619,8 +619,8 @@
       "prefill_node_num": 1,
       "decode_node_num": 1,        
       "pd_disaggregation": false,
-      "prefill_config_file": "gpt-oss_hybrid_bf16.json",
-      "decode_config_file": "gpt-oss_hybrid_bf16.json"
+      "prefill_config_file": "gpt-oss_hybrid_normal.json",
+      "decode_config_file": "gpt-oss_hybrid_normal.json"
    },
    {
       "model": "gpt-oss",
@@ -629,8 +629,8 @@
       "prefill_node_num": 1,
       "decode_node_num": 1,        
       "pd_disaggregation": false,
-      "prefill_config_file": "gpt-oss_hybrid_bf16.json",
-      "decode_config_file": "gpt-oss_hybrid_bf16.json"
+      "prefill_config_file": "gpt-oss_hybrid_normal.json",
+      "decode_config_file": "gpt-oss_hybrid_normal.json"
    },
    {
       "model": "gpt-oss",
@@ -639,8 +639,8 @@
       "prefill_node_num": 1,
       "decode_node_num": 1,        
       "pd_disaggregation": false,
-      "prefill_config_file": "gpt-oss_hybrid_bf16.json",
-      "decode_config_file": "gpt-oss_hybrid_bf16.json"
+      "prefill_config_file": "gpt-oss_w8a8c16_a2_hybrid.json",
+      "decode_config_file": "gpt-oss_w8a8c16_a2_hybrid.json"
    },
    {
       "model": "gpt-oss",
@@ -649,8 +649,8 @@
       "prefill_node_num": 1,
       "decode_node_num": 1,        
       "pd_disaggregation": false,
-      "prefill_config_file": "gpt-oss_hybrid_bf16.json",
-      "decode_config_file": "gpt-oss_hybrid_bf16.json"
+      "prefill_config_file": "gpt-oss_hybrid_normal.json",
+      "decode_config_file": "gpt-oss_hybrid_normal.json"
    },
    {
       "model": "pangu_pro_moe_v2",
