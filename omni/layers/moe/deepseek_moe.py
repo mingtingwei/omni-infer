@@ -282,7 +282,7 @@ class DeepseekMoE(nn.Module):
         self.shared_experts = None
         self.experts = None
         self.fake_experts = None
-        self.global_rank = get_world_group().rank_in_group
+        self.global_rank = get_ep_group().rank_in_group
         self.planner = None
         self.moe_layer_idx = None
         self.expert_mapping = None
@@ -666,10 +666,10 @@ class DeepseekMoE(nn.Module):
         }
 
         experts_tp_size = layer.tp_size
-        world_size = get_world_group().world_size
+        world_size = get_ep_group().world_size
         # In fact, what we get is the die number, and the ep group is not adapted by default.
         # The default ep group is experts_num/die_num.
-        global_rank = get_world_group().rank_in_group
+        global_rank = get_ep_group().rank_in_group
         all_to_all_group_size = world_size // experts_tp_size
 
         kwargs.update({
