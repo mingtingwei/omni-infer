@@ -98,7 +98,7 @@
       # export TASK_QUEUE_ENABLE=2
       # export CPU_AFFINITY_CONF=1
       # export OMP_NUM_THREADS=1
-      export SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=1200
+      export SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=12000
 
       # export PROFILING_NAMELIST_ENGINE_STEP=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/sglang_trace_namelist_engine_step.yml
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
@@ -148,7 +148,7 @@
       export ASCEND_CONNECT_TIMEOUT=30000
       export ASCEND_TRANSFER_TIMEOUT=30000
       export ROLE=decode
-      export SGLANG_DISAGGREGATION_WAITING_TIMEOUT=1200
+      export SGLANG_DISAGGREGATION_WAITING_TIMEOUT=12000
 
       # export PROFILING_NAMELIST_ENGINE_STEP=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/sglang_trace_namelist_engine_step.yml
       # export PROFILING_NAMELIST_TIME_ANALYSIS=${CODE_PATH}/omniinfer/omni/adaptors/sglang/patches/profiler_patches/assets/time_analysis_namelist.yml
