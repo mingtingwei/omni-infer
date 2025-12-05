@@ -29,6 +29,7 @@ import sys
 import socket
 import json
 import shutil
+from process_logging_config import set_env_logger_file
 
 # Get the terminal width
 terminal_width = shutil.get_terminal_size().columns
@@ -75,23 +76,6 @@ def replace_logger_file(config_json, logger_file_path):
                 handler_config["filename"] = logger_file_path
             set_file_handler = True
     return config_json, set_file_handler
-
-def replace_env(config_str):
-    def replacer(match):
-        var, default = match.groups()
-        return os.getenv(var, default or "")
-    return re.sub(r'\$\{([^:}]+)(?::-(.*?))?\}', replacer, config_str)
-
-def set_env_logger_file(config_json):
-    if isinstance(config_json, dict):
-        return {k: set_env_logger_file(v) for k, v in config_json.items()}
-    elif isinstance(config_json, list):
-        return [set_env_logger_file(v) for v in config_json]
-    elif isinstance(config_json, str):
-        return replace_env(config_json)
-    else:
-        return config_json
-
 
 def start_single_node_api_servers(
     num_servers,
@@ -218,7 +202,7 @@ def start_single_node_api_servers(
             with open(os.getenv("VLLM_LOGGING_CONFIG_PATH"), "r") as f:
                 config_json = json.load(f)
             config_json, set_file_handler = replace_logger_file(config_json, logger_path)
-            if not set_file_handler:
+            if config_json.get("process_logging_config", False):
                 config_json = set_env_logger_file(config_json)
             print(f"Use VLLM_LOGGING_CONFIG: {config_json}")
 

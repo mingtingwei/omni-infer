@@ -1,4 +1,5 @@
 {
+    "process_logging_config": true,
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
