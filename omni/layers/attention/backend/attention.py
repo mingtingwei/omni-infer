@@ -816,17 +816,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if (self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly) or (self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill):
             attn_output = tng.ops.npu_fused_infer_attention_score_v2(
-                torch.transpose(query.view(num_batch, -1, self.num_heads, self.head_size), 1, 2),
+                query,
                 kv_cache[0].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
                 kv_cache[1].view(-1, self.num_kv_heads, self.head_size // NZ_DIM, block_size, NZ_DIM),
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
-                input_layout="BNSD",
+                input_layout="TND",
                 softmax_scale=self.scale,
                 block_table=attn_metadata.block_tables,
                 block_size=block_size,
                 sparse_mode=sparse_mode,
                 atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
+                actual_seq_qlen=attn_metadata.query_lens.cumsum(dim=0),
                 actual_seq_kvlen=attn_metadata.seq_lens,
                 inner_precise=1,
                 pre_tokens=pre_tokens,
