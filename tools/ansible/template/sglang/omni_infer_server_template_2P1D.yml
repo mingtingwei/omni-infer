@@ -195,7 +195,7 @@
         --ep-size ${dp} \
         --pp-size 1 \
         --enable-multi-api-server \
-        --context-length 44000 \
+        --context-length 68000 \
         --max-running-requests 1024 > ${LOG_PATH}/run_decode_sglang.log 2>&1 &
 
     run_proxy_cmd: |
