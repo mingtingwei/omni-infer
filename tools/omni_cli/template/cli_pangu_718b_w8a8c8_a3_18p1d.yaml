@@ -33,7 +33,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -73,6 +73,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d0
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9100
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -167,7 +168,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -207,6 +208,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d1
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9116
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -301,7 +303,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -341,6 +343,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d2
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9132
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -435,7 +438,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -475,6 +478,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d3
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9148
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -569,7 +573,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -609,6 +613,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d4
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9164
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -703,7 +708,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -743,6 +748,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d5
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9180
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -837,7 +843,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -877,6 +883,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d6
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9196
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -971,7 +978,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1011,6 +1018,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d7
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9212
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1105,7 +1113,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1145,6 +1153,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d8
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9228
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1239,7 +1248,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1279,6 +1288,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d9
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9244
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1373,7 +1383,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1413,6 +1423,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d10
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9260
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1507,7 +1518,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1547,6 +1558,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d11
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9276
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1641,7 +1653,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1681,6 +1693,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d12
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9292
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1775,7 +1788,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1815,6 +1828,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d13
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9308
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -1909,7 +1923,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -1949,6 +1963,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d14
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9324
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2043,7 +2058,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -2083,6 +2098,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d15
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9340
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2177,7 +2193,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -2217,6 +2233,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d16
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9356
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2311,7 +2328,7 @@ all:
                 use_ge_graph_cached: true
               enable_omni_placement: true
               omni_placement_config:
-                pattern_path: "../../tests/test_config/ep_pangu_718b_w8a8c8_a3_18p1d_d.npy"
+                pattern_path: "../../tests/test_config/ep_pangu_718b_v10_w8a8c8_a3_18p1d_d.npy"
                 max_moe_layer_num: 58
                 enable_dynamic: false
                 max_redundant_per_expert: 30
@@ -2351,6 +2368,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_d17
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9372
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2486,6 +2504,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p0
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9000
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2618,6 +2637,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p1
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9016
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2750,6 +2770,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p2
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9032
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -2882,6 +2903,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p3
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9048
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3014,6 +3036,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p4
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9064
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3146,6 +3169,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p5
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9080
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3278,6 +3302,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p6
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9096
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3410,6 +3435,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p7
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9112
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3542,6 +3568,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p8
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9128
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3674,6 +3701,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p9
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9144
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3806,6 +3834,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p10
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9160
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -3938,6 +3967,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p11
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9176
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4070,6 +4100,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p12
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9192
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4202,6 +4233,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p13
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9208
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4334,6 +4366,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p14
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9224
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4466,6 +4499,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p15
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9240
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4598,6 +4632,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p16
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9256
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
@@ -4730,6 +4765,7 @@ all:
           ascend_rt_visible_devices: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
           container_name: pangu18p1d_p17
           env:
+            OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE: 1
             API_PORT: 9272
             ASCEND_GLOBAL_LOG_LEVEL: 3
             HCCL_OP_EXPANSION_MODE: "AIV"
