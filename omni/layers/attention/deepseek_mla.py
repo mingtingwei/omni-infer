@@ -1191,7 +1191,6 @@ class DeepseekMLA(nn.Module):
                 cache_mode = (
                         "PA"
                         if model_extra_config.operator_opt_config.enable_dsa
-                        or model_extra_config.operator_opt_config.use_omni_cache
                         else "PA_NZ"
                     )
                 kv = kv.unsqueeze(1).unsqueeze(1)
@@ -1308,17 +1307,8 @@ class DeepseekMLA(nn.Module):
                 sparse_mode=3,
             )
         else:
-            if model_extra_config.operator_opt_config.use_omni_cache:
-                num_tokens = attn_metadata.decode.seq_lens.size(0)
-                q_nope = q_nope.view(num_tokens, 1, self.num_local_heads, 512)
-                q_pe = q_pe.view(num_tokens, 1, self.num_local_heads, 64)
-                k_nope = k_nope.view(-1, 128, 512)
-                k_rope = k_rope.view(-1, 128, 64)
-                input_layout_mla = "BSND"
-                actual_seq_lengths_mla = None
-            else:
-                input_layout_mla = input_layout
-                actual_seq_lengths_mla = self.actual_seq_lengths[bsz]
+            input_layout_mla = input_layout
+            actual_seq_lengths_mla = self.actual_seq_lengths[bsz]
             attn_output, _ = op_scope.npu_fused_infer_attention_score(
                 q_nope, k_nope, k_nope, query_rope=q_pe, key_rope=k_rope,
                 num_heads=self.num_local_heads,
@@ -1333,7 +1323,7 @@ class DeepseekMLA(nn.Module):
                 actual_seq_lengths_kv=attn_metadata.decode.seq_lens,
             )
 
-        if model_extra_config.operator_opt_config.enable_dsa or model_extra_config.operator_opt_config.use_omni_cache:
+        if model_extra_config.operator_opt_config.enable_dsa:
             attn_output = attn_output.squeeze(1).transpose(0, 1)
         else:
             # Apply UV, (N, B, L) @ W_UV (N, L, V) -> (N, B, V)
