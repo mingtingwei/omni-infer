@@ -96,8 +96,8 @@ targets:
       logger = init_logger(__name__)
       for req_id in (args[0].finished_sending or ()):
           if req_id in self.requests and req_id not in self._cached_reqs_data:
-              headers = self.connector.pop_trace_headers(req_id) or {}
-              if headers and headers.get('traceparent') is not None:
+              headers = args[0].finished_sending_headers.pop(req_id, None)
+              if headers and headers.get('traceparent'):
                   start_time = int(headers.get("start_time_ns"))
                   trace_headers = {"traceparent": headers["traceparent"]}
                   timestamp = time.time_ns()
@@ -217,9 +217,9 @@ targets:
       from omni.tools.profiler.trace.tracing import create_span
       from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       class CustomList(list):
-          def __init__(self, connector, iterable=()):
+          def __init__(self, scheduler_instance, iterable=()):
               super().__init__(iterable)
-              self.connector = connector        
+              self.scheduler = scheduler_instance        
           def append(self, item):
               if os.getenv('ROLE') == "prefill":
                   if item.trace_headers:
@@ -233,7 +233,7 @@ targets:
                       item.trace_headers = carrier
                   safe_print(trace_output_directory, f"<<<Action: success add to seq groups; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               else:
-                  headers = self.connector.pop_trace_headers(item.request_id) or {}
+                  headers = self.scheduler.finished_recving_kv_req_headers.pop(item.request_id, None)
                   if headers and headers.get('traceparent') is not None:
                       start_time = int(headers.get("start_time_ns"))
                       trace_headers = {"traceparent": headers["traceparent"]}
@@ -247,8 +247,7 @@ targets:
                       item.trace_headers = carrier
                   safe_print(trace_output_directory, f"<<<Action: Start append running sequece for decode; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               super().append(item)
-      # self.running = CustomList(self.running)
-      self.running = CustomList(connector=self.connector, iterable=self.running)
+      self.running = CustomList(scheduler_instance=self, iterable=self.running)
 
       for request in self.waiting:
           if request.request_id not in self.traced_waiting_ids:
@@ -262,7 +261,9 @@ targets:
                       TraceContextTextMapPropagator().inject(carrier, context=ctx)
                       carrier['start_time_ns'] = str(timestamp)
                       request.trace_headers = carrier
-                      self.traced_waiting_ids.add(request.request_id)
+                      self.traced_waiting_ids[request.request_id] = None
+                      if len(self.traced_waiting_ids) > 1000:
+                          self.traced_waiting_ids.popitem(last=False) 
           safe_print(trace_output_directory, f"<<<Action: try to schedule in waiting queue; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")          
     exit_operation: |
       self.schedule_output = result # for accessing schedule_output in engine core
