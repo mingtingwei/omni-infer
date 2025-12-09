@@ -135,14 +135,12 @@ class NPUModelRunner(GPUModelRunner):
         if vllm_config.additional_config is not None:
             self.use_rejection_sampler = vllm_config.additional_config.get("use_rejection_sampler", False)
             self.use_penalty = vllm_config.additional_config.get("use_penalty", False)
-            self.topk = vllm_config.additional_config.get("rejection_sampler_topk", -1)
             self.total_step = vllm_config.additional_config.get("multi_step", 1)
             self.combine_block = vllm_config.additional_config.get("combine_block", 1)
             self.use_process_before_sample = vllm_config.additional_config.get("use_process_before_sample", False)
         else:
             self.use_rejection_sampler = False
             self.use_penalty = False
-            self.topk = -1
             self.total_step = 1
             self.combine_block = 1
             self.use_process_before_sample = False
@@ -151,16 +149,16 @@ class NPUModelRunner(GPUModelRunner):
         self.num_tokens_per_reqs_decode = num_tokens_per_reqs_decode
         self.decode_max_num_tokens = self.max_num_reqs * self.num_tokens_per_reqs_decode
         if get_pp_group().is_last_rank:
+            from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
+            self.sampler = NewAscendSamplerV1(self)
             if self.use_spec_decode:
-                from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
                 from omni.adaptors.vllm.sample.validator import SimpleValidator, SparseRejectionSamplerValidator
-                
-                self.sampler = NewAscendSamplerV1(self)
-                self.rejection_sampler = SimpleValidator(self) if not self.use_rejection_sampler else SparseRejectionSamplerValidator(self.sampler, self.topk, self.decode_max_num_tokens)
+                if not self.use_rejection_sampler:
+                    self.rejection_sampler = SimpleValidator(vllm_config, device, self)
+                else:
+                    self.rejection_sampler = SparseRejectionSamplerValidator(vllm_config, device, self)
                 self.drafter = PostDrafter(vllm_config, device, self)
-            else:
-                from omni.adaptors.vllm.sample.sampler import AscendSamplerV1 as NewAscendSamplerV1
-                self.sampler = NewAscendSamplerV1(self)
+
 
         self._init_graph_options()
 
