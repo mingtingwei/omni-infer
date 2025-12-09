@@ -101,7 +101,7 @@ class LongcatFlashDecoderLayer(nn.Module):
                     rope_scaling=getattr(config, "rope_scaling", None),
                     rope_is_neox_style=True,
                     max_position_embeddings=getattr(config, "max_position_embeddings", 8192),
-                    quant_config=None,
+                    quant_config=quant_config,
                     layer_id=layer_id,
                     reduce_results=False,
                     prefix=add_prefix(f"self_attn.{i}", prefix)

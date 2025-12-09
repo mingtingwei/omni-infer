@@ -533,6 +533,16 @@
       "decode_config_file": "longcat_decode_w8a8_2p1d.json"
    },
    {
+      "model": "longcat-flash",
+      "hardware": "A3",
+      "precision": "w8a8",
+      "prefill_node_num": 4,
+      "decode_node_num": 1,
+      "pd_disaggregation": true,
+      "prefill_config_file": "longcat_prefill_w8a8_2p1d.json",
+      "decode_config_file": "longcat_decode_w8a8_2p1d.json"
+   },
+   {
       "model": "ling-mini",
       "hardware": "A3",
       "precision": "bf16",
