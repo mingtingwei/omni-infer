@@ -138,12 +138,14 @@ class NPUModelRunner(GPUModelRunner):
             self.use_penalty = vllm_config.additional_config.get("use_penalty", False)
             self.topk = vllm_config.additional_config.get("rejection_sampler_topk", -1)
             self.total_step = vllm_config.additional_config.get("multi_step", 1)
+            self.combine_block = vllm_config.additional_config.get("combine_block", 1)
             self.use_process_before_sample = vllm_config.additional_config.get("use_process_before_sample", False)
         else:
             self.use_rejection_sampler = False
             self.use_penalty = False
             self.topk = -1
             self.total_step = 1
+            self.combine_block = 1
             self.use_process_before_sample = False
         self.curr_step = 0
         num_tokens_per_reqs_decode = 1 if not self.use_spec_decode else (1 + self.speculative_config.num_speculative_tokens)
@@ -187,9 +189,11 @@ class NPUModelRunner(GPUModelRunner):
         self.chunk_next_tokens = torch.zeros(
             self.max_num_reqs * num_tokens_per_reqs_decode, dtype= torch.int64, device=self.device
         )
+        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
+                                           self.block_size*self.combine_block)*self.combine_block
         self.graph_block_tables = np.zeros(
             (self.max_num_reqs * num_tokens_per_reqs_decode,
-             (self.model_config.max_model_len + self.block_size - 1) // self.block_size),
+             self.max_num_blocks_per_req),
             dtype=np.int32)
 
         self.cu_num_draft_tokens = torch.zeros(
@@ -220,8 +224,6 @@ class NPUModelRunner(GPUModelRunner):
 
         self.attn_mask = None
         self.attn_state = None
-        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
-                                           self.block_size)
 
         self.model_mark_static = False
         self.dummy_model_mark_static = False
@@ -1494,7 +1496,7 @@ class NPUModelRunner(GPUModelRunner):
         self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
+            max_model_len=self.max_num_blocks_per_req*self.block_size,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=is_pin_memory_available(),
@@ -1578,7 +1580,7 @@ class NPUModelRunner(GPUModelRunner):
         self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
+            max_model_len=self.max_num_blocks_per_req*self.block_size,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=is_pin_memory_available(),
