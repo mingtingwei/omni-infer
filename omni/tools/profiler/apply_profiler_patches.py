@@ -197,9 +197,8 @@ def monkey_patch_async_generator_io_logger():
                 pass
             elif yield_count == 2:
                 # Second chat_completion_stream_generator yield.
-                headers = self.headers_map.get(request_id) or {}
+                headers = self.headers_map.pop(request_id, {})
                 if headers.get('traceparent'):
-                    logger.info(f"<<< output_trace_headers, req_id:{request_id}, trace_headers:{headers}")
                     timestamp = time.time_ns()
                     ttft_trace_id.set(headers.get("ttft_traceparent"))
                     ttft_start_time.set(headers.get('ttft_start_time'))
@@ -254,15 +253,15 @@ def patch_enginecorerequest():
     vllm.v1.engine.EngineCoreRequest = PatchedEngineCoreRequest
     vllm.v1.engine.core.EngineCoreRequest = PatchedEngineCoreRequest
     import vllm.v1.request
+    import vllm.v1.engine.processor
+    vllm.v1.engine.processor.EngineCoreRequest = PatchedEngineCoreRequest
     vllm.v1.request.EngineCoreRequest = PatchedEngineCoreRequest
     print("<<< Monkey patch patch_enginecorerequest is applied")
 
 def patch_enginecoreoutput():
     import vllm.v1.engine
-    import msgspec, time
     from typing import Optional, Mapping
     from msgspec import Struct
-    from vllm.v1.metrics.stats import SchedulerStats
     class PatchedEngineCoreOutput(vllm.v1.engine.EngineCoreOutput, Struct, kw_only=True):
         trace_headers: Optional[Mapping[str, str]] = None
     vllm.v1.engine.EngineCoreOutput = PatchedEngineCoreOutput
@@ -270,19 +269,9 @@ def patch_enginecoreoutput():
     vllm.v1.core.sched.scheduler.EngineCoreOutput = PatchedEngineCoreOutput
     import vllm.v1.engine.core_client
     vllm.v1.engine.core_client.EngineCoreOutput = PatchedEngineCoreOutput
-    from vllm.v1.engine import UtilityOutput
-    class PatchedEngineCoreOutputs(msgspec.Struct,array_like=True,  omit_defaults=True,  gc=False): 
-        engine_index: int = 0
+
+    class PatchedEngineCoreOutputs(vllm.v1.engine.EngineCoreOutputs):
         outputs: list[PatchedEngineCoreOutput] = []
-        scheduler_stats: Optional[SchedulerStats] = None
-        timestamp: float = 0.0
-        utility_output: Optional[UtilityOutput] = None
-        finished_requests: Optional[set[str]] = None
-        wave_complete: Optional[int] = None
-        start_wave: Optional[int] = None
-        def __post_init__(self):
-            if self.timestamp == 0.0:
-                self.timestamp = time.monotonic()
     vllm.v1.engine.EngineCoreOutputs = PatchedEngineCoreOutputs
     vllm.v1.engine.core.EngineCoreOutputs = PatchedEngineCoreOutputs
     vllm.v1.core.sched.scheduler.EngineCoreOutputs = PatchedEngineCoreOutputs
@@ -299,32 +288,14 @@ def patch_request():
     Request.__init__ = new_init
     import vllm.v1.request
     vllm.v1.request.Request.__init__ = new_init
-    patch_enginecorerequest()
-    from vllm.v1.engine import EngineCoreRequest
-    from vllm.multimodal.inputs import MultiModalKwargs
-    from vllm.utils import is_list_of
-    from vllm.v1.structured_output.request import StructuredOutputRequest
-    @classmethod
-    def patch_from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
-        if request.mm_inputs is not None:
-            assert isinstance(request.mm_inputs, list)
-            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
-                "mm_inputs was not updated in EngineCore.add_request")
-        return cls(
-            request_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            multi_modal_inputs=request.mm_inputs,
-            multi_modal_hashes=request.mm_hashes,
-            multi_modal_placeholders=request.mm_placeholders,
-            sampling_params=request.sampling_params,
-            eos_token_id=request.eos_token_id,
-            arrival_time=request.arrival_time,
-            lora_request=request.lora_request,
-            structured_output_request=StructuredOutputRequest(sampling_params=request.sampling_params),
-            cache_salt=request.cache_salt,
-            trace_headers = request.trace_headers,
-        )
-    Request.from_engine_core_request = patch_from_engine_core_request
+
+    orig_from_engine_core_request = Request.from_engine_core_request.__func__
+    def patch_from_engine_core_request(cls, request):
+        outputs = orig_from_engine_core_request(cls, request)
+        outputs.trace_headers = request.trace_headers
+        return outputs
+    Request.from_engine_core_request = classmethod(patch_from_engine_core_request)
+
     print("<<< Monkey patch patch_request is applied")
 
 def patch_requestoutput():
@@ -336,106 +307,58 @@ def patch_requestoutput():
         self.trace_headers = trace_headers
     RequestOutput.__init__ = new_init
     import vllm.outputs
+    import vllm.v1.engine.output_processor
+    vllm.v1.engine.output_processor.RequestOutput.__init__ = new_init
     vllm.outputs.RequestOutput.__init__ = new_init
 
-    from vllm.logger import init_logger
-    import logging, time
-    logging.basicConfig(level=logging.INFO)
-    logger = init_logger(__name__)
-    patch_enginecoreoutput()
-    from vllm.v1.engine import FinishReason
-    from vllm.v1.core.sched.scheduler import EngineCoreOutputs
-    from vllm.v1.core.sched.scheduler import EngineCoreOutput
     import vllm.v1.engine.output_processor as otpro
-    from vllm.v1.engine.output_processor import OutputProcessorOutput
+    _origin_process_outputs = otpro.OutputProcessor.process_outputs
     def _patch_process_outputs(self, engine_core_outputs, engine_core_timestamp, iteration_stats):
-        request_outputs: list[RequestOutput] = []
-        reqs_to_abort: list[str] = []
+        headers_map = {}
+        req_state_map = {}
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
-            req_state = self.request_states.get(req_id)
-
-            # if getattr(engine_core_output, "trace_headers", {}):
             trace_headers = engine_core_output.trace_headers
+            headers_map[req_id] = trace_headers
+            req_state_map[req_id] = self.request_states.get(req_id)
+        _outputs = _origin_process_outputs(self, engine_core_outputs, engine_core_timestamp, iteration_stats)
 
+        # AsyncLLM: put into queue for handling by generate().
+        for engine_core_output in engine_core_outputs:
+            req_id = engine_core_output.request_id
+            trace_headers = headers_map[req_id]
+            req_state = req_state_map[req_id]
             if req_state is None:
-                # Ignore output for already-aborted request.
                 continue
+            if req_state.queue is not None and trace_headers and req_state.queue.output is not None:
+                req_state.queue.output.trace_headers = trace_headers
 
-            # 1) Compute stats for this iteration.
-            self._update_stats_from_output(req_state, engine_core_output,
-                                           engine_core_timestamp,
-                                           iteration_stats)
-
-            new_token_ids = engine_core_output.new_token_ids
-            finish_reason = engine_core_output.finish_reason
-            stop_reason = engine_core_output.stop_reason
-            kv_transfer_params = engine_core_output.kv_transfer_params
-            num_cached_tokens = engine_core_output.num_cached_tokens
-            req_state.is_prefilling = False
-
-            # 2) Detokenize the token ids into text and perform stop checks.
-            stop_string = req_state.detokenizer.update(
-                new_token_ids, finish_reason == FinishReason.STOP)
-            if stop_string:
-                finish_reason = FinishReason.STOP
-                stop_reason = stop_string
-
-            # 3) Compute sample and prompt logprobs for request, if required.
-            req_state.logprobs_processor.update_from_output(engine_core_output)
-
-            # 4) Create and handle RequestOutput objects.
-            if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason,
-                    kv_transfer_params, num_cached_tokens):
-
-                if req_state.queue is not None:
-                    # AsyncLLM: put into queue for handling by generate().
-                    if trace_headers is not None:
-                        req_state.trace_headers = trace_headers
+        for request_output in _outputs.request_outputs:
+            req_id = request_output.request_id
+            req_state = self.request_states.get(req_id)
+            trace_headers = headers_map.pop(req_id, None) #headers_map[req_id]
+            req_state = req_state_map.pop(req_id, None)
+            if req_state is None:
+                continue
+            if req_state.queue is not None:
+                pass
+            else:
+                # LLMEngine: return list of RequestOutputs.
+                if trace_headers:
                     request_output.trace_headers = getattr(req_state, "trace_headers", None)
-                    req_state.queue.put(request_output)
-                else:
-                    # LLMEngine: return list of RequestOutputs.
-                    if trace_headers is not None:
-                        req_state.trace_headers = trace_headers
-                    request_output.trace_headers = getattr(req_state, "trace_headers", None)
-                    request_outputs.append(request_output)
-
-            # Free completed requests.
-            if finish_reason is not None:
-                self.request_states.pop(req_id)
-                # Remove parent request if applicable.
-                parent_req = req_state.parent_req
-                if parent_req and not parent_req.child_requests:
-                    self.parent_requests.pop(parent_req.request_id, None)
-                if not engine_core_output.finished:
-                    # If req not finished in EngineCore, but Detokenizer
-                    # detected stop string, abort needed in EngineCore.
-                    reqs_to_abort.append(req_id)
-
-                # Track per-request stats
-                self._update_stats_from_finished(req_state, finish_reason,
-                                                 iteration_stats)
-
-        self.lora_states.update_iteration_stats(iteration_stats)
-        # for  pro_output in request_outputs:
-            # logger.info(f"<<< RequestOutput.trace_headers, req_id:{req_id}, trace_headers:{pro_output.trace_headers}")
-        return OutputProcessorOutput(
-            request_outputs=request_outputs,
-            reqs_to_abort=reqs_to_abort,
-        )
+        return _outputs
     otpro.OutputProcessor.process_outputs = _patch_process_outputs
-
     print("<<< Monkey patch patch_requestoutput is applied")
+
 
 def patch_scheduler():
     import vllm.v1.core.sched.scheduler as sch
     from typing import Optional, Mapping
+    from collections import OrderedDict
     _orig_init = sch.Scheduler.__init__
     def _patched_init(self, *args, **kwargs):
         _orig_init(self, *args, **kwargs)
-        self.traced_waiting_ids: set[str] = set()
+        self.traced_waiting_ids: 'OrderedDict[str, None]' = OrderedDict() #set[str] = set()
     sch.Scheduler.__init__ = _patched_init
 
     patch_enginecoreoutput()
@@ -448,21 +371,13 @@ def patch_scheduler():
         orig_init(self, *args, **kwargs)
         self.trace_headers = trace_headers
     otp.NewRequestData.__init__ = new_init
-    @classmethod
+
+    _orig_from_request = otp.NewRequestData.from_request.__func__
     def patch_from_request(cls, request, block_ids,):
-        return cls(
-            req_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            mm_inputs=request.mm_inputs,
-            mm_hashes=request.mm_hashes,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
-            block_ids=block_ids,
-            num_computed_tokens=request.num_computed_tokens,
-            lora_request=request.lora_request,
-            trace_headers=request.trace_headers,
-        )
-    otp.NewRequestData.from_request = patch_from_request
+        outputs = _orig_from_request(cls, request, block_ids,)
+        outputs.trace_headers = request.trace_headers
+        return outputs
+    otp.NewRequestData.from_request = classmethod(patch_from_request)
 
     _orig_update_from_output = sch.Scheduler.update_from_output
     def _patch_update_from_output(self, scheduler_output, model_output, num_steps):
@@ -473,86 +388,61 @@ def patch_scheduler():
                 headers_map[req.req_id] = req.trace_headers
         
         for core_output in engine_core_outputs.outputs:
-            core_output.trace_headers = headers_map.get(core_output.request_id)
+            core_output.trace_headers = headers_map.pop(core_output.request_id, None) #headers_map.get(core_output.request_id)
         return engine_core_outputs
     sch.Scheduler.update_from_output = _patch_update_from_output
     print("<<< Monkey patch patch_scheduler is applied")
 
 
 def patch_create_chat_completion_api():
-    from vllm.entrypoints.openai.api_server import chat, completion, base
-    from vllm.entrypoints.openai.protocol import ErrorResponse
-    from fastapi.responses import JSONResponse, Response, StreamingResponse
+    from fastapi.responses import JSONResponse
+    from fastapi import Request
+    from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+    from functools import wraps
     from vllm.entrypoints.openai import api_server
-    from fastapi import Request, HTTPException
-    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                CompletionRequest, ChatCompletionResponse)
-    from typing import Union
-    from http import HTTPStatus
-    from vllm.logger import init_logger
-    import logging, time
-    logging.basicConfig(level=logging.DEBUG)
-    logger = init_logger(__name__)
-
-    async def new_create_chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
-        handler = chat(raw_request)
-        if handler is None:
-            return base(raw_request).create_error_response(
-                message="The model does not support Chat Completions API")
-
-        generator = await handler.create_chat_completion(request, raw_request)
-        # logger.warning(f"<<< generator's type is {type(generator)}")
-        if isinstance(generator, ErrorResponse):
-            response = JSONResponse(content=generator.model_dump(),
-                                status_code=generator.code)
-            response.headers["X-Request-Id"] = generator.id
+    import vllm.entrypoints.openai.api_server
+    orig_create_chat_completion = vllm.entrypoints.openai.api_server.create_chat_completion
+    def patch_response_headers(fn):
+        @wraps(fn)
+        async def wrapper(request: ChatCompletionRequest, raw_request: Request):
+            response = await fn(request, raw_request)
+            if isinstance(response, JSONResponse):
+                try:
+                    content = json.loads(response.body)
+                except Exception as e:
+                    print("Failed to load body:", e)
+                    content = None
+                if isinstance(content, dict):
+                    kv_params = content.get("kv_transfer_params") or {}
+                    trace_headers = kv_params.get("trace_headers", {})
+                    if trace_headers:
+                        response.headers["X-Request-Id"] = content.get("id")
+                        response.headers["Traceparent"] = trace_headers.get("traceparent")
+                        response.headers["Start_time_ns"] = trace_headers.get("start_time_ns")
             return response
-        elif isinstance(generator, ChatCompletionResponse):
-            response = JSONResponse(content=generator.model_dump())
-            trace_headers = (generator.kv_transfer_params or {}).get("trace_headers", {})
-            if trace_headers:
-                response.headers["X-Request-Id"] = generator.id
-                response.headers["Traceparent"] = trace_headers.get("traceparent")
-                response.headers["Start_time_ns"] = trace_headers.get("start_time_ns")
-                # start_time = trace_headers.get("start_time_ns")
-                # logger.info(f"*****1111111 Add header P to proxy, req_id:{request.request_id}, trace_headers:{trace_headers}, Start_time_ns:{start_time}")
-            return response
-        return StreamingResponse(content=generator, media_type="text/event-stream")
+        return wrapper
 
+    new_create_chat_completion = patch_response_headers(orig_create_chat_completion)
     for route in api_server.router.routes:
         if getattr(route, "path", None) == "/v1/chat/completions":
             route.endpoint = new_create_chat_completion
-            print("<<< Monkey patch route.endpoint is applied")
-
-    import vllm.entrypoints.openai.api_server
     vllm.entrypoints.openai.api_server.create_chat_completion = new_create_chat_completion
-
     print("<<< Monkey patch patch_create_chat_completion_api is applied")
-
 
 
 # following monkey patch is for passing tracer span_context inside process_input_socket function
 def patched_process_inputs():
     from vllm.v1.engine.processor import Processor
-    import time
-    from collections.abc import Mapping, Sequence
-    from typing import Any, Literal, Optional, Union
-
-    from vllm.inputs import ProcessorInputs, PromptType
-    from vllm.inputs.parse import split_enc_dec_inputs
-    from vllm.inputs.preprocess import InputPreprocessor
+    from typing import Any, Optional, Union, Mapping
+    from vllm.inputs import PromptType
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
-                             MultiModalRegistry)
-    from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
     from vllm.pooling_params import PoolingParams
     from vllm.prompt_adapter.request import PromptAdapterRequest
     from vllm.sampling_params import SamplingParams
-    # from vllm.transformers_utils.tokenizer_group import TokenizerGroup
     from vllm.v1.engine import EngineCoreRequest
-    # from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+    patch_enginecorerequest()
+
+    _origin_process_inputs = Processor.process_inputs
     def my_process_inputs(
         self,
         request_id: str,
@@ -565,111 +455,22 @@ def patched_process_inputs():
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> tuple[Optional[str], EngineCoreRequest]:
-
-        # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Support encoder-decoder models.
-        self._validate_lora(lora_request)
-        self._validate_params(params, lora_request)
-        if priority != 0:
-            raise ValueError("V1 does not support priority yet.")
-        if trace_headers is not None:
-            pass
-            # raise ValueError("V1 does not support tracing yet.")
-        if prompt_adapter_request is not None:
-            raise ValueError("V1 does not support prompt_adapter_request.")
-
-        if arrival_time is None:
-            arrival_time = time.time()
-
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+        raw_trace_headers = trace_headers
+        trace_headers = None
+        prompt, outputs = _origin_process_inputs(
+            self,
+            request_id,
             prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-            return_mm_hashes=self.use_hash,
+            params,
+            arrival_time,
+            lora_request,
+            tokenization_kwargs,
+            trace_headers,
+            prompt_adapter_request,
+            priority,
         )
-        from vllm.platforms import current_platform
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-            processed_inputs=processed_inputs,
-        )
-        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
-
-        self._validate_model_inputs(processed_inputs, lora_request)
-
-        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-
-        # TODO: Impl encoder-decoder
-        if encoder_inputs is not None:
-            raise NotImplementedError
-
-        assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case?
-        sampling_params = params.clone()
-        # If unset max tokens, then generate up to the max_model_len.
-        if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (
-                self.model_config.max_model_len -
-                len(decoder_inputs["prompt_token_ids"]))
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
-        sampling_params.update_from_tokenizer(
-            self.tokenizer.get_lora_tokenizer(lora_request))
-
-        # Multimodal related.
-        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
-        sorted_mm_positions: Optional[list[PlaceholderRange]] = None
-        sorted_mm_hashes: Optional[list[str]] = None
-        if decoder_inputs["type"] == "multimodal":
-            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
-
-            (
-                sorted_item_modalities,
-                sorted_mm_positions,
-                sorted_mm_hashes,
-            ) = merge_and_sort_multimodal_metadata(
-                decoder_inputs["mm_placeholders"],
-                decoder_inputs["mm_hashes"] if self.use_hash else None,
-            )
-
-            unique_modalities = set(sorted_item_modalities)
-            if len(unique_modalities) > 1:
-                orig_sorted_mm_inputs = []
-                used_indices = {modality: 0 for modality in unique_modalities}
-
-                for modality in sorted_item_modalities:
-                    items = decoder_mm_inputs.get_items(modality)
-                    item = items[used_indices[modality]]
-
-                    orig_sorted_mm_inputs.append(
-                        MultiModalKwargs.from_items([item]))
-                    used_indices[modality] += 1
-            else:
-                orig_sorted_mm_inputs = [
-                    MultiModalKwargs.from_items([item]) for item in
-                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
-                ]
-
-            if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
-                    orig_sorted_mm_inputs, sorted_mm_hashes)
-            else:
-                sorted_mm_inputs = orig_sorted_mm_inputs
-
-        return decoder_inputs.get("prompt"), EngineCoreRequest(
-            request_id=request_id,
-            prompt_token_ids=decoder_inputs["prompt_token_ids"],
-            mm_inputs=sorted_mm_inputs,
-            mm_hashes=sorted_mm_hashes,
-            mm_placeholders=sorted_mm_positions,
-            sampling_params=sampling_params,
-            eos_token_id=eos_token_id,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            cache_salt=decoder_inputs.get("cache_salt"),
-            trace_headers=trace_headers,
-        )
+        outputs.trace_headers = raw_trace_headers
+        return prompt, outputs
     Processor.process_inputs = my_process_inputs
     print("<<< Monkey patch patched_process_inputs is applied")
 
@@ -682,6 +483,39 @@ def patch_chatcompletionrequest():
     ChatCompletionRequest = PatchedChatCompletionRequest
     print("<<< Monkey patch patch_chatcompletionrequest is applied")
 
+def patch_ModelRunnerOutput():
+    from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+    from functools import wraps
+    import os
+    original_init = ModelRunnerOutput.__init__
+    @wraps(original_init)
+    def patched_init(self, *args, **kwargs):
+        finished_sending_headers = kwargs.pop('finished_sending_headers', None)
+        finished_recving_headers = kwargs.pop('finished_recving_headers', None)
+        original_init(self, *args, **kwargs)
+        self.finished_sending_headers = finished_sending_headers if isinstance(finished_sending_headers, dict) else {}
+        self.finished_recving_headers = finished_recving_headers if isinstance(finished_recving_headers, dict) else {}
+    ModelRunnerOutput.__init__ = patched_init
+    if hasattr(EMPTY_MODEL_RUNNER_OUTPUT, 'req_ids'):
+        EMPTY_MODEL_RUNNER_OUTPUT.finished_sending_headers = {}
+        EMPTY_MODEL_RUNNER_OUTPUT.finished_recving_headers = {}
+
+    import vllm.v1.core.sched.scheduler as sch
+    _orig_init = sch.Scheduler.__init__
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        self.finished_recving_kv_req_headers = {}
+    sch.Scheduler.__init__ = _patched_init
+
+    orig_update_from_kv_xfer_finished = sch.Scheduler._update_from_kv_xfer_finished
+    def new__update_from_kv_xfer_finished(self, model_runner_output: ModelRunnerOutput):
+        if model_runner_output.finished_recving_headers:
+            for req_id in list(model_runner_output.finished_recving_headers.keys()):
+                headers = model_runner_output.finished_recving_headers.pop(req_id)
+                self.finished_recving_kv_req_headers[req_id] = headers
+        orig_update_from_kv_xfer_finished(self, model_runner_output)
+    sch.Scheduler._update_from_kv_xfer_finished = new__update_from_kv_xfer_finished
+    print("<<< Monkey patch patch_ModelRunnerOutput is applied")
 
 profiling_namelist = os.getenv("PROFILING_NAMELIST", None)
 if profiling_namelist is not None:
@@ -696,6 +530,7 @@ if profiling_namelist is not None:
         patch_request()
         patch_scheduler()
         patch_requestoutput()
+        patch_ModelRunnerOutput()
         apply_patches(profiling_namelist)
         monkey_patch_async_generator_io_logger()
     else:

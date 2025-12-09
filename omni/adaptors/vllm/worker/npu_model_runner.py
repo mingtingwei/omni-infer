@@ -60,6 +60,12 @@ from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
 from omni.accelerators.pd.omni_cache_connector_v1 import decode_h2d_trigger
 
+import json
+profiling_is_set = os.getenv("PROFILING_NAMELIST", None) is not None
+if profiling_is_set:
+    from omni.tools.profiler.apply_profiler_patches import patch_ModelRunnerOutput
+    patch_ModelRunnerOutput()
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -998,6 +1004,19 @@ class NPUModelRunner(GPUModelRunner):
         output.finished_sending = finished_sending
         output.finished_recving = finished_recving
         output.loading_kv_failure = loading_kv_failure
+        if profiling_is_set:
+            finished_sending_raw = set()
+            finished_recving_raw = set()
+            for item in finished_sending:
+                req_id, headers_str = item.split('|', 1)
+                finished_sending_raw.add(req_id)
+                output.finished_sending_headers[req_id] = json.loads(headers_str)
+            for item in finished_recving:
+                req_id, headers_str = item.split('|', 1)
+                finished_recving_raw.add(req_id)
+                output.finished_recving_headers[req_id] = json.loads(headers_str)
+            output.finished_sending = finished_sending_raw
+            output.finished_recving = finished_recving_raw
         return output
 
     @staticmethod
@@ -1092,7 +1111,7 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     logger.warning("==== omni_cache is None, cannot sync ascend_cl_stream ====")
             hidden_states, raw_hidden_states, input_ids, temp_finished_sending, temp_finished_recving = self._execute_model(scheduler_output,
-                                                   attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
+                                                attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
             if temp_finished_sending is not None:
                 self.finished_sending.update(temp_finished_sending)
             if temp_finished_recving is not None:
@@ -1279,7 +1298,7 @@ class NPUModelRunner(GPUModelRunner):
                     selected_token_ranks=positions[:hidden_states.shape[0]].cpu()
                 )
 
-        return ModelRunnerOutput(
+        output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=cached_sampled_token_ids,
@@ -1290,6 +1309,20 @@ class NPUModelRunner(GPUModelRunner):
             finished_recving=finished_recving,
             loading_kv_failure=loading_kv_failure,
         )
+        if profiling_is_set:
+            finished_sending_raw = set()
+            finished_recving_raw = set()
+            for item in finished_sending:
+                req_id, headers_str = item.split('|', 1)
+                finished_sending_raw.add(req_id)
+                output.finished_sending_headers[req_id] = json.loads(headers_str)
+            for item in finished_recving:
+                req_id, headers_str = item.split('|', 1)
+                finished_recving_raw.add(req_id)
+                output.finished_recving_headers[req_id] = json.loads(headers_str)
+            output.finished_sending = finished_sending_raw
+            output.finished_recving = finished_recving_raw
+        return output
 
     def recompute_fallback(self, scheduler_output: "SchedulerOutput"):
         remove_req_indices = []
