@@ -18,6 +18,7 @@ from openai_harmony import (Author, ChannelConfig, Conversation,
                             ReasoningEffort, Role, StreamableParser,
                             SystemContent, TextContent, ToolDescription,
                             load_harmony_encoding)
+import os
 
 _harmony_encoding = None
 
@@ -39,6 +40,12 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
+    # It needs to be combined with the default start token_id <|channel|> for openai harmony parser.
+    # The start token_id <|channel|> has already been returned in the prefill node.
+    # So it is necessary to append the default start token_id <|channel|> 
+    # at the decoding node to ensure parsing successfully.
+    if os.getenv('ROLE') == "decode":
+        parser.process(200005)
     for token_id in token_ids:
         parser.process(token_id)
     return parser
