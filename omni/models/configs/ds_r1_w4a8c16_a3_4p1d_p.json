@@ -11,7 +11,7 @@
         "merge_qkv": false,
         "gmm_nz": true,
         "use_mlaprolog": true,
-        "fa_quant": true,
+        "fa_quant": false,
         "control_accept_rate": -1,
         "enable_prefill_micro_batch": false,
         "experts_pruning": true
