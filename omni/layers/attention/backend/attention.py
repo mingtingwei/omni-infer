@@ -956,7 +956,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
   
 
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and model_extra_config.operator_opt_config.enable_c8:
+        if (attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or not attn_metadata.is_pd_seperate_d) and model_extra_config.operator_opt_config.enable_c8:
             attn_output = torch_npu.npu_fused_infer_attention_score_v2(
                     query.unsqueeze(0),
                     key.unsqueeze(0),

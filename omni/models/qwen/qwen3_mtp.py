@@ -77,10 +77,12 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
         *,
         vllm_config,
         prefix: str,
+        kv_ind: int,
     ):
         self.config = vllm_config.model_config.hf_config
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
+        self.kv_ind = kv_ind
         super().__init__(
             config=self.config,
             cache_config=self.cache_config,
@@ -140,7 +142,7 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
         encoded_states, residual = Qwen3MoeDecoderLayer.forward(
             self,
             positions=positions,
-            kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
+            kv_cache=kv_caches[self.kv_ind] if kv_caches is not None else None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             residual=None
@@ -207,13 +209,14 @@ class Qwen3MultiTokenPredictor(nn.Module):
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
         self.mtp_start_layer_idx = self.config.num_hidden_layers
+        self.num_mtp_layers = self.config.num_nextn_predict_layers
+        self.ignore_share_weight = True
+        real_num_mtp = min(self.num_mtp_layers, vllm_config.speculative_config.num_speculative_tokens)
         if not hasattr(self.config, "num_nextn_predict_layers") or self.config.num_nextn_predict_layers is None:
             raise ValueError(
                 "if open mtp ,num_nextn_predict_layers should be getted from model config." \
                 "or you can just close mtp."
             )
-        self.num_mtp_layers = self.config.num_nextn_predict_layers
-        self.ignore_share_weight = True
 
         if self.num_mtp_layers > 3:
             raise ValueError(
@@ -225,13 +228,9 @@ class Qwen3MultiTokenPredictor(nn.Module):
                 str(i + self.mtp_start_layer_idx): mtp_class_list[i](
                     vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{i+self.mtp_start_layer_idx}",
+                    kv_ind=i - real_num_mtp,
                 )
-                for i in range(
-                    min(
-                        self.num_mtp_layers,
-                        vllm_config.speculative_config.num_speculative_tokens,
-                    )
-                )
+                for i in range(real_num_mtp)
             }
         )
         self.logits_processor = LogitsProcessor(
@@ -253,7 +252,7 @@ class Qwen3MultiTokenPredictor(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         selected_indices: Optional[torch.Tensor] = None,
-        mtp_layer_idx=0,
+        mtp_layer_idx: int = 0,
     ) -> torch.Tensor:
         return self.layers[str(self.mtp_start_layer_idx + mtp_layer_idx)](
             input_ids=input_ids,
@@ -273,6 +272,7 @@ class Qwen3MTP(nn.Module):
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
         self.model = Qwen3MultiTokenPredictor(vllm_config=vllm_config, prefix=f"model")
+        self.n_predictor = self.config.num_nextn_predict_layers
 
     def set_share_weight(self, target_model):
         self.model.set_share_weight(target_model)
@@ -285,7 +285,7 @@ class Qwen3MTP(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         selected_indices: Optional[torch.Tensor] = None,
-        mtp_layer_idx=0,
+        mtp_layer_idx: int = 0,
         **kwargs,
     ):
         return self.model(
@@ -295,7 +295,7 @@ class Qwen3MTP(nn.Module):
             attn_metadata=attn_metadata,
             previous_hidden_states=previous_hidden_states,
             selected_indices=selected_indices,
-            mtp_layer_idx=mtp_layer_idx,
+            mtp_layer_idx=min(self.n_predictor - 1, mtp_layer_idx),
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:

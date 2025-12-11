@@ -932,7 +932,6 @@ class FusedMoE(torch.nn.Module):
     ):
         super().__init__()
         self.is_prefill = os.environ.get("ROLE", "") == "prefill"
-        self.is_prefill_instance = os.environ.get("ROLE", "") == "prefill"
         self.prefix = prefix
 
         if params_dtype is None:
@@ -1372,7 +1371,7 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            is_prefill=is_prefill
+            is_prefill=self.is_prefill
         )
 
         return final_hidden_states
