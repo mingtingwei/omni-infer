@@ -8,6 +8,7 @@ if os.getenv("PROFILING_NAMELIST", None):
     print("<<<Profiler patch environmental variable is enabled, applying profiler patches.")
     from omni.tools.profiler import apply_profiler_patches
 
+
 def register_model():
     is_A2 = torch_npu.npu.get_device_name(0).startswith("Ascend910B")
     ModelRegistry.register_model(
@@ -15,24 +16,25 @@ def register_model():
         "omni.models.deepseek.deepseek_v2:CustomDeepseekV2ForCausalLM")
 
     ModelRegistry.register_model(
-            "DeepseekV3ForCausalLM",
-            "omni.models.deepseek.deepseek_v3:DeepseekV3ForCausalLM")
+        "DeepseekV3ForCausalLM",
+        "omni.models.deepseek.deepseek_v3:DeepseekV3ForCausalLM")
     from transformers import AutoConfig, DeepseekV3Config
+
     class DeepseekV32Config(DeepseekV3Config):
         model_type = "deepseek_v32"
         keys_to_ignore_at_inference = ["past_key_values"]
     AutoConfig.register("deepseek_v32", DeepseekV32Config)
     ModelRegistry.register_model(
-            "DeepseekV32ForCausalLM",
-            "omni.models.deepseek.deepseek_v32:DeepseekV32ForCausalLM")
+        "DeepseekV32ForCausalLM",
+        "omni.models.deepseek.deepseek_v32:DeepseekV32ForCausalLM")
     ModelRegistry.register_model(
-            "PanguUltraMoEForCausalLM",
-            "omni.models.pangu.pangu_ultra_moe:PanguUltraMoEForCausalLM")
+        "PanguUltraMoEForCausalLM",
+        "omni.models.pangu.pangu_ultra_moe:PanguUltraMoEForCausalLM")
 
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
         "omni.models.deepseek.deepseek_mtp:DeepseekV3MTP")
-    
+
     ModelRegistry.register_model(
         "DeepSeekMTPModelDuo",
         "omni.models.deepseek.deepseek_mtp:DeepseekV3MTPDuo")
@@ -44,19 +46,19 @@ def register_model():
     ModelRegistry.register_model(
         "DeepseekForCausalLM",
         "omni.models.deepseek.deepseek:DeepseekForCausalLM")
-    
+
     ModelRegistry.register_model(
         "DeepseekOCRForCausalLM",
         "omni.models.deepseek.deepseek_ocr:DeepseekOCRForCausalLM")
 
     ModelRegistry.register_model(
-            "LongcatFlashForCausalLM",
-            "omni.models.longcat.longcat_flash:LongcatFlashForCausalLM")
+        "LongcatFlashForCausalLM",
+        "omni.models.longcat.longcat_flash:LongcatFlashForCausalLM")
 
     ModelRegistry.register_model(
         "Qwen2ForCausalLM",
         "omni.models.qwen.qwen2:Qwen2ForCausalLM")
-    
+
     ModelRegistry.register_model(
         "EagleQwen2ForCausalLM",
         "omni.models.qwen.qwen2_eagle:EagleQwen2ForCausalLM")
@@ -101,7 +103,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "omni.models.pangu.pangu_pro_moe.pangu_moe:PanguProMoEForCausalLM")
-    
+
     ModelRegistry.register_model(
         "PanguProMoEV2ForCausalLM",
         "omni.models.pangu.pangu_pro_moe_v2.pangu_moe_v2:PanguProMoEV2ForCausalLM")
@@ -117,11 +119,11 @@ def register_model():
     ModelRegistry.register_model(
         "InternLM2ForCausalLM",
         "omni.models.internvl.internlm2:InternLM2ForCausalLM")
-    
+
     ModelRegistry.register_model(
         "InternVLChatModel",
         "omni.models.internvl.internvl:InternVLChatModel")
-    
+
     ModelRegistry.register_model(
         "Gemma3ForCausalLM",
         "omni.models.gemma.gemma3:Gemma3ForCausalLM")
@@ -133,15 +135,18 @@ def register_model():
     ModelRegistry.register_model(
         "BailingMoeV2ForCausalLM",
         "omni.models.bailing.bailing:BailingMoeV2ForCausalLM")
-		
+
     ModelRegistry.register_model(
         "GlmForCausalLM",
         "omni.models.glm.glm:GlmForCausalLM")
-    
+
+    ModelRegistry.register_model(
+        "OpenPanguOmniForConditionalGeneration",
+        "omni.models.pangu.modeling_openpangu_omni:OpenPanguOmniForConditionalGeneration")
+
     ModelRegistry.register_model(
         "OpenPanguVLForConditionalGeneration",
-        "omni.models.pangu.modeling_openpangu_vl:OpenPanguVLForConditionalGeneration",
-    )
+        "omni.models.pangu.modeling_openpangu_vl:OpenPanguVLForConditionalGeneration")
 
     ModelRegistry.register_model(
         "GptOssForCausalLM",

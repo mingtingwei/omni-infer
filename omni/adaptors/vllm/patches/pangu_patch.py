@@ -2,18 +2,21 @@ from omni.adaptors.vllm.utils import get_attr_by_names
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-# The following patches are corresponding to vllm-0.9.0 
+# The following patches are corresponding to vllm-0.9.0
+
+
 def patch_pangu():
     from vllm.config import ModelConfig
 
     @property
     def is_deepseek_mla(self) -> bool:
         kv_lora_dim_names = ['attention_kv_lora_dim', 'kv_lora_rank']
-        kv_lora_dim = get_attr_by_names(self.hf_text_config, kv_lora_dim_names, None)
+        kv_lora_dim = get_attr_by_names(
+            self.hf_text_config, kv_lora_dim_names, None)
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp', 'pangu_ultra_moe', 'longcat_flash', 'kimi_k2', 'pangu_moe_v2_mtp'):
+                ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp', 'pangu_ultra_moe', 'longcat_flash', 'kimi_k2', 'pangu_moe_v2_mtp'):
             return kv_lora_dim is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -29,7 +32,7 @@ def patch_pangu():
             "num_experts",  # Jamba
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
-            "num_routed_experts", # Pangu
+            "num_routed_experts",  # Pangu
         ]
         num_experts = 0
         for name in num_expert_names:
@@ -45,13 +48,16 @@ def patch_pangu():
         if self.is_deepseek_mla:
             qk_rope_dim_names = ['attention_qk_rope_dim', 'qk_rope_head_dim']
             kv_lora_dim_names = ['attention_kv_lora_dim', 'kv_lora_rank']
-            qk_rope_dim = get_attr_by_names(self.hf_text_config, qk_rope_dim_names, 0)
-            kv_lora_dim = get_attr_by_names(self.hf_text_config, kv_lora_dim_names, 0)
+            qk_rope_dim = get_attr_by_names(
+                self.hf_text_config, qk_rope_dim_names, 0)
+            kv_lora_dim = get_attr_by_names(
+                self.hf_text_config, kv_lora_dim_names, 0)
             if self.use_mla:
                 return kv_lora_dim + qk_rope_dim
             else:
                 qk_dim_names = ['attention_qk_dim', 'qk_nope_head_dim']
-                qk_dim = get_attr_by_names(self.hf_text_config, qk_dim_names, 0)
+                qk_dim = get_attr_by_names(
+                    self.hf_text_config, qk_dim_names, 0)
                 if qk_rope_dim and qk_dim:
                     return qk_rope_dim + qk_dim
 
@@ -70,7 +76,7 @@ def patch_pangu():
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
             })
-        
+
         if hf_config.model_type == "pangu_ultra_moe":
             hf_config.model_type = "pangu_ultra_moe_mtp"
         if hf_config.model_type == "pangu_ultra_moe_mtp":
@@ -114,16 +120,16 @@ def patch_pangu():
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
-                (self.target_model_config.hf_text_config.model_type \
-                        in ["deepseek_v3", "deepseek_v32", "kimi_k2"] or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "mimo" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "pangu_ultra_moe" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "PanguProMoE" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "qwen3_moe"):
+                (self.target_model_config.hf_text_config.model_type
+                 in ["deepseek_v3", "deepseek_v32", "kimi_k2"] or
+                    self.target_model_config.hf_text_config.model_type
+                 == "mimo" or
+                    self.target_model_config.hf_text_config.model_type
+                 == "pangu_ultra_moe" or
+                    self.target_model_config.hf_text_config.model_type
+                 == "PanguProMoE" or
+                    self.target_model_config.hf_text_config.model_type
+                 == "qwen3_moe"):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -137,7 +143,6 @@ def patch_pangu():
         if self.method is None and (self.model is not None
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
-        
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -201,7 +206,7 @@ def patch_pangu():
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
-                
+
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
@@ -218,41 +223,43 @@ def patch_pangu():
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.info(
-                                "All Deepseek MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
-                            )
+                            "All Deepseek MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
+                        )
                 elif (self.draft_model_config.hf_config.model_type ==
                       "qwen3_moe" and self.method == "deepseek_mtp"):
                     self.method = "qwen3_mtp"
-                    n_predict = getattr(self.draft_model_config.hf_config, "num_nextn_predict_layers", None)
+                    n_predict = getattr(
+                        self.draft_model_config.hf_config, "num_nextn_predict_layers", None)
                     self.draft_model_config.hf_config.model_type = "qwen3_mtp"
                     self.draft_model_config.hf_config.n_predict = n_predict
-                    self.draft_model_config.hf_config.architectures = ["Qwen3MTPModel"]
-                    if self.num_speculative_tokens > 1: 
+                    self.draft_model_config.hf_config.architectures = [
+                        "Qwen3MTPModel"]
+                    if self.num_speculative_tokens > 1:
                         logger.info(
-                                "All Qwen3 MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
-                            )
+                            "All Qwen3 MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
+                        )
                 elif (self.draft_model_config.hf_config.model_type ==
                         "pangu_moe_v2_mtp"):
                     self.method = "pangu_moe_v2_mtp"
                     if self.num_speculative_tokens > 1:
                         print(
-                                "All Pangu MTP models only have "
-                                "one layer. Might need some code changes "
-                                "to support multiple layers."
-                            )
+                            "All Pangu MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
+                        )
                 elif (self.draft_model_config.hf_config.model_type ==
                       "pangu_ultra_moe_mtp"):
                     self.method = "pangu_ultra_moe_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.info(
-                                "All Pangu Ultra MoE MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
-                            )
+                            "All Pangu Ultra MoE MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
+                        )
                 else:
                     self.method = "draft_model"
 
@@ -278,7 +285,7 @@ def patch_pangu():
                         and hasattr(self.draft_model_config.hf_config,
                                     "num_lookahead_tokens")):
                     self.draft_model_config.hf_config.num_lookahead_tokens = \
-                    self.num_speculative_tokens
+                        self.num_speculative_tokens
 
                 n_predict = getattr(self.draft_model_config.hf_config,
                                     "n_predict", None)
@@ -298,7 +305,7 @@ def patch_pangu():
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size,
                         self.draft_model_config.hf_config
-                )
+                    )
 
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -321,12 +328,31 @@ def patch_pangu():
         self._verify_args()
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp","pangu_ultra_moe_mtp","qwen3_mtp","pangu_moe_v2_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp", "pangu_ultra_moe_mtp", "qwen3_mtp", "pangu_moe_v2_mtp")
 
     def patch_chat_utils():
-        from vllm.entrypoints.chat_utils import BaseMultiModalItemTracker
-        from omni.adaptors.vllm.entrypoints.chat_utils import _placeholder_str_add_pangu
+        from vllm.entrypoints.chat_utils import BaseMultiModalItemTracker, AsyncMultiModalContentParser
+        from omni.adaptors.vllm.entrypoints.chat_utils import _placeholder_str_add_pangu, parse_video
         BaseMultiModalItemTracker._placeholder_str = _placeholder_str_add_pangu
+        AsyncMultiModalContentParser.parse_video = parse_video
+
+    def patch_multimodal_utils():
+        from vllm.multimodal.utils import MediaConnector
+        from omni.adaptors.vllm.multimodal.utils import fetch_video_async
+        MediaConnector.fetch_video_async = fetch_video_async
+
+    def patch_multimodal_video():
+        from vllm.multimodal.video import VideoMediaIO
+        from omni.adaptors.vllm.multimodal.video import __init__, load_bytes
+        VideoMediaIO.__init__ = __init__
+        VideoMediaIO.load_bytes = load_bytes
+
+    def patch_rotary_embedding():
+        from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+        from omni.layers.rotary_embedding import get_input_positions_tensor, _pangu_omni_get_input_positions_tensor
+        MRotaryEmbedding.get_input_positions_tensor = get_input_positions_tensor
+        MRotaryEmbedding._pangu_omni_get_input_positions_tensor = _pangu_omni_get_input_positions_tensor
+        print("+++++++++++++++++++++++patch_rotary_embedding+++++++++++++++++++++++++++")
 
     ModelConfig.is_deepseek_mla = is_deepseek_mla
     ModelConfig._verify_with_expert_parallelism = _verify_with_expert_parallelism
@@ -337,6 +363,9 @@ def patch_pangu():
     SpeculativeConfig.use_eagle = use_eagle
 
     patch_chat_utils()
+    patch_multimodal_utils()
+    patch_multimodal_video()
+    patch_rotary_embedding()
 
     from omni.adaptors.vllm.reasoning import register_reasoning
     from omni.adaptors.vllm.entrypoints.openai.tool_parsers import register_tool

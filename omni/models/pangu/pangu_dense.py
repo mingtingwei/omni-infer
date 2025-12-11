@@ -44,9 +44,9 @@ from vllm.sequence import IntermediateTensors
 
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                                              is_pp_missing_parameter,
+                                              make_empty_intermediate_tensors_factory, make_layers,
+                                              maybe_prefix)
 from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.layers.activation import SiluAndMul
 from omni.layers.layernorm import RMSNormFlashComm
@@ -200,7 +200,8 @@ class PanguEmbeddedAttention(nn.Module):
         else:
             q, k = self.rotary_emb(positions, q, k, cos, sin)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output, reduce_type=reduce_type, next_layer=next_layer)
+        output, _ = self.o_proj(
+            attn_output, reduce_type=reduce_type, next_layer=next_layer)
         return output
 
     def _init_rotary_emb(self, config: PretrainedConfig,
@@ -260,7 +261,7 @@ class PanguEmbeddedDecoderLayer(nn.Module):
             attn_type = AttentionType.DECODER
         else:
             attn_type = AttentionType.ENCODER_ONLY
-        
+
         tp_size = get_tensor_model_parallel_world_size()
         self.enable_flashcomm = True
 
@@ -294,9 +295,9 @@ class PanguEmbeddedDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNormFlashComm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNormFlashComm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNormFlashComm(config.hidden_size,
+                                                         eps=config.rms_norm_eps)
         self.layer_name = f"{prefix}.self_attn.attn"
 
     def forward(
@@ -312,7 +313,7 @@ class PanguEmbeddedDecoderLayer(nn.Module):
             return self.forward_flashcomm(positions, hidden_states, residual, cos, sin, next_layer)
         else:
             return self.forward_norm(positions, hidden_states, residual, cos, sin)
-    
+
     def forward_flashcomm(
         self,
         positions: torch.Tensor,
@@ -329,7 +330,8 @@ class PanguEmbeddedDecoderLayer(nn.Module):
             is_prefill = False
         if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
             mlp_layer = [self.mlp.gate_up_proj, self.mlp.down_proj]
-            attn_layer = [next_layer.self_attn.qkv_proj, next_layer.self_attn.o_proj] if next_layer else None
+            attn_layer = [next_layer.self_attn.qkv_proj,
+                          next_layer.self_attn.o_proj] if next_layer else None
         else:
             mlp_layer = None
             attn_layer = None
@@ -337,26 +339,28 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         if residual is None:
             tp_size = get_tensor_model_parallel_world_size()
             tp_rank = get_tensor_model_parallel_rank()
-            residual = hidden_states.chunk(tp_size,dim=0)[tp_rank]
+            residual = hidden_states.chunk(tp_size, dim=0)[tp_rank]
             hidden_states = self.input_layernorm(hidden_states)
             x_transform = None
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
             x_transform = "AG"
-        
+
         if model_extra_config.operator_opt_config.use_prefetch and attn_layer and not is_prefill:
             attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
             for layer in attn_layer:
-                torch_npu.npu_prefetch(layer.weight, hidden_states, attn_prefetch_size)
+                torch_npu.npu_prefetch(
+                    layer.weight, hidden_states, attn_prefetch_size)
 
         hidden_states = self.self_attn(positions=positions,
-                                    hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, reduce_type="RS", next_layer=mlp_layer)
+                                       hidden_states=hidden_states, cos=cos, sin=sin, x_transform=x_transform, reduce_type="RS", next_layer=mlp_layer)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, x_transform="AG", reduce_type="RS", is_prefill=is_prefill)
+        hidden_states = self.mlp(
+            hidden_states, x_transform="AG", reduce_type="RS", is_prefill=is_prefill)
         return hidden_states, residual
 
     def forward_norm(
@@ -371,7 +375,7 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         if attn_metadata is not None and attn_metadata[next(iter(attn_metadata))].attn_state == AscendAttentionState.PrefillNoCache:
             is_prefill = True
         else:
-            is_prefill = False    
+            is_prefill = False
         if model_extra_config.operator_opt_config.use_prefetch and not is_prefill:
             mlp_layer = [self.mlp.gate_up_proj, self.mlp.down_proj]
         else:
@@ -383,9 +387,9 @@ class PanguEmbeddedDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        
+
         hidden_states = self.self_attn(positions=positions,
-                                    hidden_states=hidden_states, cos=cos, sin=sin, next_layer=mlp_layer)
+                                       hidden_states=hidden_states, cos=cos, sin=sin, next_layer=mlp_layer)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -433,7 +437,8 @@ class PanguEmbeddedModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
-            self.norm = RMSNormFlashComm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNormFlashComm(
+                config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -450,8 +455,8 @@ class PanguEmbeddedModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        attn_metadata: Optional[AttentionMetadata] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
@@ -469,9 +474,10 @@ class PanguEmbeddedModel(nn.Module):
             cos = None
             sin = None
         else:
-            if attn_metadata is None :
-                cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
-            else :
+            if attn_metadata is None:
+                cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(
+                    positions)
+            else:
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[next(iter(attn_metadata))]
                 cos = attn_metadata.cos
@@ -482,9 +488,11 @@ class PanguEmbeddedModel(nn.Module):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             if idx == self.end_layer - self.start_layer - 1:
-                hidden_states, residual = layer(positions, hidden_states, residual, cos, sin)
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, cos, sin)
             else:
-                hidden_states, residual = layer(positions, hidden_states, residual, cos, sin, self.layers[idx+1])
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, cos, sin, self.layers[idx+1])
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -523,7 +531,7 @@ class PanguEmbeddedModel(nn.Module):
                 # the checkpoint. Skip them.
                 continue
             if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+                    (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -565,6 +573,7 @@ class PanguEmbeddedModel(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
 
 @support_torch_compile
 class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -662,8 +671,8 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     prefix: str = "",
                     layer_type: type[nn.Module] = PanguEmbeddedDecoderLayer):
         return PanguEmbeddedModel(vllm_config=vllm_config,
-                          prefix=prefix,
-                          layer_type=layer_type)
+                                  prefix=prefix,
+                                  layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -699,7 +708,7 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-    
+
     def should_use_eager_mode(self, *args, **kwargs):
         attn_metadata = kwargs.get("attn_metadata", None)
         if not attn_metadata:
