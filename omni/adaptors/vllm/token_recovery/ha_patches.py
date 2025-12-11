@@ -1,4 +1,5 @@
 import functools
+import threading
 import time
 from vllm.logger import init_logger
 from omni.adaptors.vllm.token_recovery.envs import ENV
@@ -18,6 +19,7 @@ UPDATE_HA_CMD = "update_ha_cmd"
 
 HTTP_MAX_PORT = 65535
 ProcessGroups = []
+lock = threading.Lock()
 
 # register this method to every RayWorkerWrapper
 def update_failure_server_info(self, ip, port):
@@ -38,10 +40,11 @@ def register_process_group(process_group):
     ProcessGroups.append(process_group)
 
 def stop_device(self):
-    start_time = time.time()
-    logger.info(f"local_rank={self.local_rank}, start stop_device.")
-    torch_npu.npu.stop_device(self.local_rank)
-    logger.info(f"local_rank={self.local_rank}, finish stop_device, time_used: {time.time() - start_time}.")
+    with lock:
+        start_time = time.time()
+        logger.info(f"local_rank={self.local_rank}, start stop_device.")
+        torch_npu.npu.stop_device(self.local_rank)
+        logger.info(f"local_rank={self.local_rank}, finish stop_device, time_used: {time.time() - start_time}.")
 
 
 def restart_device(self, rebuild_all_resources=False):

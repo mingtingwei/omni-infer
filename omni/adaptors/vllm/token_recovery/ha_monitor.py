@@ -56,7 +56,7 @@ def report_fault(fault_info):
     response = requests.post(
         FAULT_URL_FORMAT.format(_get_server_address()),
         json=fault_info.model_dump(),
-        timeout=2
+        timeout=60
     )
     if response and response.ok:
         logger.info(f"success report fault info: {fault_info}")
@@ -69,7 +69,7 @@ def report_status(worker_status):
     response = requests.post(
         WORKER_STATUS_URL_FORMAT.format(_get_server_address()),
         json=worker_status.model_dump(),
-        timeout=2
+        timeout=60
     )
     if response and response.ok:
         logger.info(f"success report worker status: {worker_status}")
@@ -175,13 +175,13 @@ def token_recover_wrapper(func):
                 logger.info(f"{_identity(self)} _waiting_do_recovery")
                 # 4. waiting recovery
                 global KEEP_RUN_EVENT
-                if KEEP_RUN_EVENT.wait(30):
+                if KEEP_RUN_EVENT.wait(100):
                     logger.info(f"{_identity(self)} _waiting_do_recovery end")
                     KEEP_RUN_EVENT.clear()
                 _waiting_do_recovery(self, origin_exp)
 
                 # 5. waiting keep_run
-                if KEEP_RUN_EVENT.wait(3):
+                if KEEP_RUN_EVENT.wait(10):
                     logger.info(f"{_identity(self)} keep_run_loop end")
                     KEEP_RUN_EVENT.clear()
                 return _waiting_keep_run(self, origin_exp, uce_blocks)
