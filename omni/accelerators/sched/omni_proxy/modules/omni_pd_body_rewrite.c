@@ -477,7 +477,6 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
         pos += ngx_snprintf(b_new->pos + pos, buf_len - pos, KV_ROOM_STR"\"%V\"", &ctx->bootstrap_room)
                - (b_new->pos + pos);
 
-        b_new->pos[pos++] = '}';
         b_new->pos[pos] = '\0';
         b_new->last = b_new->pos + pos;
         b_new->memory = 1;
@@ -499,6 +498,59 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
         chain_new->next = NULL;
         chain->next = chain_new;
         chain = chain_new;
+
+        const char *cluster_ip = ctx->bootstrap_host.data;
+        const char *request_id = ctx->req->request_id;
+
+        char cluster_info[512];
+        int info_len;
+        
+        info_len = snprintf(cluster_info, sizeof(cluster_info), 
+                  "\"kv_transfer_params\":{\"remote_cluster_id\":\"%s\",\"remote_request_id\":\"chatcmpl-%s\"}",
+                  cluster_ip, request_id);
+        
+        // create kv_transfer_params
+        b_new = ngx_create_temp_buf(r->pool, info_len + 32);
+        if (b_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, 
+                        "gen decode request: failed to create temp buf for cluster info");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        pos = 0;
+        b_new->pos[pos++] = ',';
+        ngx_memcpy(b_new->pos + pos, cluster_info, info_len);
+        pos += info_len;
+        b_new->pos[pos++] = '}';
+        b_new->pos[pos] = '\0';
+        b_new->last = b_new->pos + pos;
+        b_new->memory = 1;
+
+        chain_new = ngx_alloc_chain_link(r->pool);
+        if (chain_new == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, 
+                        "gen decode request: failed to allocate chain link for cluster info");
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
+        chain->buf->last_buf = 0;
+        chain->buf->last_in_chain = 0;
+        b_new->last_buf = 1;
+        b_new->last_in_chain = 1;
+
+        chain_new->buf = b_new;
+        chain_new->next = NULL;
+        chain->next = chain_new;
+        chain = chain_new;
+        b = b_new;
+        
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                        "gen decode request: created new kv_transfer_params with cluster info: ip=%s, request_id=%s",
+                        cluster_ip, request_id);
     }
 
     if (chain->buf != NULL)

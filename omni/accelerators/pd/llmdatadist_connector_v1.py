@@ -950,3 +950,12 @@ def dump_thread_to_file(thread, thread_name: str, folder_path: str):
             f.write(str(thread.native_id))
     except Exception as e:
         logger.error(f"Failed to write thread info to {file_path}: {e}")
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
+    return ip
