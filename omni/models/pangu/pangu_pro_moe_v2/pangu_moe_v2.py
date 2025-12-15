@@ -38,7 +38,13 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group, get_world_group
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_dp_group,
+    get_tp_group,
+    get_world_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -79,6 +85,7 @@ logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 MAX_PREFETCH_SIZE = 56
+STREAM_SHARED_EXPERT = 'stream_shared_expert'
 
 class CustomQKVRearrangeColumnParallelLinear(ColumnParallelFlashCommLinear):
     def __init__(
@@ -549,28 +556,258 @@ class PanguProMoEV2Attention(nn.Module):
         output, _ = self.o_proj(attn_output, reduce_type="RS")
         return output
 
+class PanguProMoEV2MoEBlock(DeepseekMoE):
 
-def DeepseekMoE_forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None, is_hybrid_chunked_prefill_graph_mode=False) -> torch.Tensor:
+    def __init__(
+        self,
+        *args,
+        **kwargs    
+    ) -> None:
+        super().__init__(*args, **kwargs)
+    
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None, is_hybrid_chunked_prefill_graph_mode=False) -> torch.Tensor:
+        if attn_metadata is None:
+            is_prefill = True
         # when is_hybrid_chunked_prefill_graph_mode is True, enable chunkprefill
-        if is_hybrid_chunked_prefill_graph_mode:
-            if attn_metadata is None or attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                is_prefill = True
-            else:
-                is_prefill = False
+        elif is_hybrid_chunked_prefill_graph_mode:
+            is_prefill = False
         else:
-            if attn_metadata is None or attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-                is_prefill = True
-            else:
-                is_prefill = False
+            is_prefill = attn_metadata.attn_state != AscendAttentionState.DecodeOnly
          
         if not self.is_init_gate:
             self.gate.weight.data = torch_npu.npu_format_cast(self.gate.weight.data, 2)
             self.is_init_gate = True
+
         if is_prefill:
             return self._forward_prefill_norm(hidden_states, residual, attn_metadata)
         else:
             return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
+    
 
+    def _forward_decode_dispatch_combine(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
+        # when hybrid DP>1, Prefill and Decode must take the same branch.
+        # when is prefill, must use eager mode.
+        should_use_eager_mode = attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+
+        hidden_states_float = hidden_states.float()
+        router_logits, _ = self.gate.forward(hidden_states_float)
+        # Here, we do a 2D to 3D conversion, and then convert back to 2D to trigger the fusion rule, fusing add rms and cast into AddRmsNormCast.
+        hidden_states_3d = hidden_states.unsqueeze(1)
+        hidden_states = hidden_states_3d.squeeze(1)
+
+        # when use eager mode, Unsupported tng.scope.npu_stream_switch
+        if should_use_eager_mode:
+            shared_output = self.shared_experts(hidden_states)
+        else:
+            if self.quant_symbol:
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    hidden_states = tng.scope.npu_wait_tensor(hidden_states, hidden_states_float)
+                    x_quant, x_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                    hidden_states_quant = {"x_int8": x_quant, "pertoken_scale": x_scale}
+
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    x_quant = tng.scope.npu_wait_tensor(x_quant, router_logits)
+                    # shared_experts w13
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states_quant)
+            else:
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    hidden_states = tng.scope.npu_wait_tensor(hidden_states, hidden_states_float)
+                    # shared_experts w13
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states)
+
+            wait_gate = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
+            
+            # expert weight prefetch
+            if self.w13_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w13_weight, wait_gate, self.w13_prefetch_size)
+            if self.w2_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w2_weight, wait_gate, self.w2_prefetch_size)
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            hidden_states, 
+            router_logits,
+            self.experts.top_k, 
+            self.experts.use_grouped_topk,
+            self.experts.renormalize,
+            self.experts.topk_group, 
+            self.experts.num_expert_group,
+            self.experts.custom_routing_function,
+            self.experts.scoring_func,
+            self.experts.e_score_correction_bias,
+            self.routed_scaling_factor,
+            layer=self.experts
+            )
+
+        topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=None)
+
+        layer = self.experts
+        max_num_deployed_expert = self.local_expert_num * get_ep_group().world_size
+
+        act_dtype = hidden_states.dtype
+        shared_expert_rank_num = 0
+        kwargs = {
+            "x": hidden_states,
+            "expert_ids": topk_ids, 
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": shared_expert_rank_num,
+            "moe_expert_num": max_num_deployed_expert,
+            "global_bs": 0,
+        }
+
+        experts_tp_size = layer.tp_size
+        world_size = get_ep_group().world_size
+        global_rank = get_ep_group().rank_in_group
+        all_to_all_group_size = world_size // experts_tp_size
+
+        kwargs.update({
+            "scales": None,
+            "quant_mode": layer.quant_mode,
+            "group_ep": layer.moe_all_to_all_group_name,
+            "ep_world_size": all_to_all_group_size,
+            "ep_rank_id": global_rank // experts_tp_size,
+            "group_tp": layer.moe_rs_group_name,
+            "tp_world_size": experts_tp_size,
+            "tp_rank_id": global_rank % experts_tp_size,
+            "x_active_mask": None,
+        })
+
+        output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs)
+        expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[0:5]
+
+        group_list = expert_token_nums.to(torch.int64)
+
+        # cal experts
+        weight1_3 = self.experts.w13_weight
+        weight2 = self.experts.w2_weight
+        if self.quant_symbol:
+            if self.experts.weight_num_bits == 8:
+                weight_scale1_3 = self.experts.w13_weight_scale
+                weight_scale2 = self.experts.w2_weight_scale
+            else:
+                raise NotImplementedError(f"Unsupported compress tensor type. num bits: {self.experts.weight_num_bits}")
+
+            if self.experts.quant_mode:  # 0: no quant 1: static quant 2: dynamic quant
+                pertoken_scale = dynamic_scale
+            else:
+                expand_x, pertoken_scale = torch_npu.npu_dynamic_quant(expand_x)
+
+        if not should_use_eager_mode:
+            with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                wait_gate = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
+                wait_gate = tng.scope.npu_wait_tensor(wait_gate, expand_x)
+                if not isinstance(gate_up_share, torch.Tensor):
+                    gate_up_share = (wait_gate, gate_up_share[1])
+                intermediate_hiddenstates_share = self.shared_experts.act_fn(gate_up_share, self.shared_experts.quant_symbol)
+
+        if self.quant_symbol:
+            # w8a8
+            if self.experts.weight_num_bits == 8:
+                gate_up_proj = torch_npu.npu_grouped_matmul(
+                    [expand_x], 
+                    [weight1_3], 
+                    bias=None, 
+                    group_list=group_list,
+                    split_item=3, 
+                    output_dtype=torch.int32, 
+                    group_type=0,
+                    group_list_type=1)[0]
+
+                gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+                    gate_up_proj, 
+                    weight_scale=weight_scale1_3, 
+                    activation_scale=pertoken_scale, 
+                    bias=None, 
+                    quant_scale=self.in_scale_2, 
+                    quant_offset=None,
+                    group_index=group_list, 
+                    activate_left=True, 
+                    quant_mode=1)
+
+                hidden_states_experts = torch_npu.npu_grouped_matmul(
+                    [gate_up_proj], 
+                    [weight2], 
+                    scale=[weight_scale2],
+                    per_token_scale=[pertoken_scale],
+                    bias=None,
+                    group_list=group_list, 
+                    split_item=3, 
+                    output_dtype=act_dtype,
+                    group_type=0,
+                    group_list_type=1)[0]
+            else:
+                raise NotImplementedError(f"Unsupported compress tensor type. num bits: {self.experts.weight_num_bits}")
+        else:
+            # bf16
+            gate_up_proj = torch_npu.npu_grouped_matmul(
+                [expand_x], 
+                [weight1_3], 
+                bias=None, 
+                group_list=group_list,
+                split_item=3, 
+                group_type=0, 
+                group_list_type=1)[0]
+        
+            gate_up_proj = torch_npu.npu_swiglu(gate_up_proj)
+
+            hidden_states_experts = torch_npu.npu_grouped_matmul(
+                [gate_up_proj], 
+                [weight2],
+                bias=None,
+                group_list=group_list, 
+                split_item=3, 
+                output_dtype=act_dtype,
+                group_type=0, 
+                group_list_type=1)[0]
+
+        # moeCombine
+        kwargs = {
+            "expand_x": hidden_states_experts,
+            "expert_ids": topk_ids,
+            "assist_info_for_combine": expand_idx,
+            "expert_scales": topk_weights.to(torch.float32),
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": shared_expert_rank_num,
+            "moe_expert_num":  max_num_deployed_expert,
+            "global_bs": 0,
+        }
+        tp_recv_counts = output[5]
+        stage3_kwargs = {
+            "ep_send_counts": ep_recv_counts,
+            "group_ep": layer.moe_all_to_all_group_name,
+            "ep_world_size": all_to_all_group_size,
+            "ep_rank_id": global_rank // experts_tp_size,
+            "tp_send_counts": tp_recv_counts,
+            "group_tp": layer.moe_rs_group_name,
+            "tp_world_size": experts_tp_size,
+            "tp_rank_id": global_rank % experts_tp_size,
+            "x_active_mask": None
+        }
+        kwargs.update(stage3_kwargs)
+
+        hidden_states_route = torch_npu.npu_moe_distribute_combine_v2(**kwargs)
+
+        if not should_use_eager_mode:
+            with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                if isinstance(intermediate_hiddenstates_share, dict):
+                    intermediate_hiddenstates_share['x_int8'] = tng.scope.npu_wait_tensor(intermediate_hiddenstates_share.get('x_int8'), hidden_states_experts)
+                else:
+                    intermediate_hiddenstates_share = tng.scope.npu_wait_tensor(intermediate_hiddenstates_share, hidden_states_experts)
+                shared_output, _ = self.shared_experts.down_proj.forward(intermediate_hiddenstates_share)
+
+        # prefetch weights for attention next layer
+        if model_extra_config.operator_opt_config.use_prefetch and next_attention_weights is not None:
+            attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
+            attn_prefetch_flag = shared_output
+            for name, weight in next_attention_weights.items():
+                if weight is None:
+                    break
+                torch_npu.npu_prefetch(weight, attn_prefetch_flag, attn_prefetch_size)
+
+        if shared_output is not None:
+            final_hidden_states = (hidden_states_route, shared_output)
+
+        return final_hidden_states, residual
+    
 class PanguProMoEDecoderLayer(nn.Module):
 
     def __init__(
@@ -608,8 +845,7 @@ class PanguProMoEDecoderLayer(nn.Module):
 
         mlp_only_layers = [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
-            DeepseekMoE.forward = DeepseekMoE_forward
-            self.mlp = DeepseekMoE(
+            self.mlp = PanguProMoEV2MoEBlock(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",

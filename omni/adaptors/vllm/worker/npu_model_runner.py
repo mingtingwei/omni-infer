@@ -503,16 +503,14 @@ class NPUModelRunner(GPUModelRunner):
         # calculate max_batch_size and padding size
         graph_pad_size = 0
         if self.enable_torchair_graph_mode and len(self.decode_gear_list) > 1:
-            if attn_state == AscendAttentionState.DecodeOnly:
+            if attn_state == AscendAttentionState.DecodeOnly or self.is_hybrid_chunked_prefill_graph_mode:
                 self.max_batch_size = self._get_max_token_num(self.vllm_config.parallel_config.data_parallel_size > 1, total_num_scheduled_tokens)
-            elif self.is_hybrid_chunked_prefill_graph_mode and attn_state ==  AscendAttentionState.ChunkedPrefill:
-                self.max_batch_size = self._get_closest_gear(num_input_tokens)
 
         if attn_state == AscendAttentionState.DecodeOnly:
             if total_num_scheduled_tokens > self.max_batch_size:
                 raise RuntimeError("num_reqs is bigger than max_batch_size")
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
-        elif self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill:
+        elif self.is_hybrid_chunked_prefill_graph_mode:
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens    
         else:
             # The reduce_scatter in the TP communication domain after embedding, P goes through this
