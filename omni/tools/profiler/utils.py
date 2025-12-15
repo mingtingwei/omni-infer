@@ -13,8 +13,12 @@ import requests
 
 PREFILL = "prefill"
 DECODE = "decode"
+disable_safe_print = os.getenv("DISABLE_SAFE_PRINT", "0") == "1"
 
 def safe_print(directory, message):
+    if disable_safe_print:
+        return
+
     process_id = multiprocessing.current_process().pid
     thread_id = threading.get_ident()
 

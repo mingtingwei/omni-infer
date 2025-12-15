@@ -105,7 +105,7 @@ docker compose up -d
 
 
 ### 1.2 服务器集群时钟同步
-分布式trace追踪需要确保机器时钟同步，详细步骤说明可以参考这篇wiki：https://codehub-g.huawei.com/DataScience/omni_infer/wiki?categoryId=221789&sn=WIKI202506247247579&title=6--%E9%98%B2%E7%81%AB%E5%A2%99%E6%94%BE%E8%A1%8C-NTP-UDP-123-  
+分布式trace追踪需要确保机器时钟同步，详细步骤说明可以参考这篇wiki：https://codehub-g.huawei.com/DataScience/omni_infer/wiki?categoryId=221789&sn=WIKI202506247247579&title=6--%E9%98%B2%E7%81%AB%E5%A2%99%E6%94%BE%E8%A1%8C-NTP-UDP-123-   
 这里我们使用chrony 配置时间同步：
 - 安装 chrony（如果未安装）
 ```bash
@@ -146,7 +146,7 @@ date -u +"%Y-%m-%d %H:%M:%S.%6N"
 开启vllm trace打点：在``pd_run.sh``里导入以下变量路径，打点log路径在``TRACE_OUTPUT_DIRECTORY``，并关闭overwrite request IDs
 ```bash
 export ENABLE_OVERWRITE_REQ_IDS = 0
-export PROFILING_NAMELIST = {project_root}/omni_infer/omni/tools/profiler/assets/omnilogger_namelist
+export PROFILING_NAMELIST = {project_root}/omni_infer/omni/tools/profiler/assets/omnilogger_namelist.yml
 export TRACE_OUTPUT_DIRECTORY=/your/custom/path
 ```
 
@@ -211,15 +211,16 @@ python log_to_jaeger.py /path/to/log_dir trace.json --skip-req_num num --filter-
 ```
 
 #### 将解析的JSON文件导入Jaeger UI 
-打开网页``http://localhost:16686``，显示Jaeger UI界面正常连接，就可以直接导入json文件到Jaeger UI进行可视化分析，查看请求完整的生命周期。这里如果您使用内网，可以直接使用已经搭建好的UI``http://7.150.8.141:16686 ``
+打开网页``http://localhost:16686``，显示Jaeger UI界面正常连接，就可以直接导入json文件到Jaeger UI进行可视化分析，查看请求完整的生命周期。这里如果您使用内网，可以直接使用已经搭建好的UI``http://7.150.12.133:16686  ``
 - **优点**：无需步骤1中Jaeger及OpenTelemetry相关环境部署，仅需本地处理和导入，适合离线分析和调试，并且支持trace的统计分析。
-- **缺点**：不能实时监控，流程相对繁琐，不适合生产环境的实时观测。
+- **缺点**：不能实时监控，流程相对繁琐，不适合生产环境的实时观测。并且日志的安全打印会给推理带来较大的性能劣化。
 
 ## 3 方案二：Jaeger自动抓取trace(目前支持v1/chat/completions)
-开启vllm trace打点：在``pd_run.sh``里导入以下变量路径（这里的``localhost``指的是拉起Jaeger和OTel Collector容器的服务器IP），并关闭overwrite request IDs：
+开启vllm trace打点：在``pd_run.sh``里导入以下变量路径（这里的``localhost``指的是拉起Jaeger和OTel Collector容器的服务器IP），并关闭overwrite request IDs和safe_print日志打印：
 ```bash
 export ENABLE_OVERWRITE_REQ_IDS = 0
-export PROFILING_NAMELIST = {project_root}/omni_infer/omni/tools/profiler/assets/omnilogger_namelist
+export DISABLE_SAFE_PRINT=1
+export PROFILING_NAMELIST = {project_root}/omni_infer/omni/tools/profiler/assets/omnilogger_namelist.yml
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost/v1/traces
 ```
 如果请求自带``Traceparent``http头，会自动打出trace在Jaeger UI显示。如果没有，可以在omni_proxy.sh中设置``set_trace_headers_force on``强制给所以请求设置trace_headers打出trace。
@@ -242,8 +243,8 @@ EOF
 
 - vLLM配置好OpenTelemetry SDK，通过非侵入式方式在vllm内部创建span，将OTLP trace通过OTLP协议自动发送至本地或远端的OTEL Collector（端口4317或4318）。Collector处理后，将trace转发至Jaeger服务（端口4317）。
 - 用户可通过Jaeger UI（http://localhost:16686）实时搜索、查看、分析vLLM的全链路追踪信息。
-- **优点**：支持实时监控和分析，适合生产环境，便于自动化运维与报警。
-- **缺点**：需额外维护Collector与Jaeger实例，会影响推理性能。
+- **优点**：支持实时监控和分析，适合生产环境，便于自动化运维与报警。可以关闭日志打印极大降低trace造成的性能力恶化。
+- **缺点**：需额外搭建维护Collector与Jaeger实例。
 
 #### 使用Jaeger的API进行span duration分析 
 Jaeger提供了一套完整的 HTTP API，Jaeger UI 本身就是通过调用这些 API 来获取和展示数据的。这里可以通一个python的脚本``analyze_jaeger_all_spans_to_csv.py``模拟 Jaeger UI 的行为，批量地把 Trace 数据拉取下来，然后自己计算平均值。脚本使用方法：
@@ -260,7 +261,7 @@ Usage:
 例如。收集最近120min的Jaeger trace（最多限制2000条），并统计所有的span的count,avg_ms,min_ms,max_ms,p50_ms,p90_ms,p95_ms,p99_ms输出到``spans_summary.csv``文件，并打印出"Prefill done execute_model"这个span的最大最小duration对应的请求信息：
 ```bash
   python analyze_jaeger_all_spans_to_csv.py \
-    --host http://7.150.8.141:16686  \
+    --host http://7.150.12.133:16686   \
     --service transformers \
     --lookback-minutes 120 \
     --limit 2000 \

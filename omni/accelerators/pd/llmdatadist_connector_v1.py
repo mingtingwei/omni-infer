@@ -511,7 +511,7 @@ class DecodeConnectorScheduler:
         if request.request_id in self.processed_request:
             self.processed_request.remove(request.request_id)
         if request.status == RequestStatus.FINISHED_ABORTED and request.kv_transfer_params is not None:
-            self._send_pulled_kv_req_list(request.kv_transfer_params.get("remote_host_ip"), [{'request_id': request.request_id, 'trace_headers': request.trace_headers or {}}])
+            self._send_pulled_kv_req_list(request.kv_transfer_params.get("remote_host_ip"), [{'request_id': request.request_id, 'trace_headers': getattr(request, 'trace_headers', None) or {}}])
         return False, None
 
 
@@ -821,7 +821,7 @@ class DecodeConnectorWorker:
                     remote_request_id=meta.remote_request_id,
                     remote_host_ip=meta.remote_host,
                     prefill_dp_rank=meta.remote_dp_rank,
-                    trace_headers=meta.trace_headers,
+                    trace_headers=meta.trace_headers or {},
                 )
                 futures.append(future)
 
