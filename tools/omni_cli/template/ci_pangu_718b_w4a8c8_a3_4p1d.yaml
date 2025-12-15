@@ -32,6 +32,11 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
@@ -166,6 +171,11 @@ all:
                 level: 1
                 use_ge_graph_cached: true
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: ''
@@ -299,6 +309,11 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
@@ -435,6 +450,11 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
@@ -571,6 +591,11 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
@@ -707,6 +732,11 @@ all:
           args:
             additional-config:
               enable_omni_attn: true
+              omni_attn_config:
+                sink: 2
+                recent: 6
+                beta: 0.4
+                pattern: [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0]
               enable_omni_placement: true
               omni_placement_config:
                 pattern_path: "../../omni/accelerators/placement/patterns/placement_pattern_20251128_58_rearrange_layers_58_layers_8_ranks_prefill.npy"
