@@ -568,6 +568,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 moe_expert_num=global_num_experts,
                 scales=None,
                 quant_mode=2,  # 0: 非量化; 1: 静态量化; 2: 动态量化
+                x_active_mask=layer.mc2_mask,
                 global_bs=0
             )
             group_list = expert_token_nums.to(torch.int64)
@@ -630,6 +631,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 expert_shard_type=0,
                 shared_expert_rank_num=0,
                 moe_expert_num=global_num_experts,
+                x_active_mask=layer.mc2_mask,
                 global_bs=0,
             )
 

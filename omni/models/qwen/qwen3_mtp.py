@@ -30,7 +30,8 @@ from .qwen3_moe import Qwen3MoeDecoderLayer
 from omni.layers.layernorm import RMSNorm  # zxp: not use
 from omni.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from omni.layers.moe.fused_moe.layer import FusedMoE
-
+from omni.adaptors.vllm.distributed import get_eh_proj_tp_group
+from omni.layers.linear import ColumnParallelFlashCommLinear
 
 def get_spec_layer_idx_from_weight_name(
     config: PretrainedConfig, weight_name: str
@@ -105,8 +106,16 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
         )
         self.enorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.hnorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.eh_proj = nn.Linear(
-            2 * self.config.hidden_size, self.config.hidden_size, bias=False
+        self.eh_tp_size=get_eh_proj_tp_group().world_size
+        self.eh_tp_rank=get_eh_proj_tp_group().rank_in_group
+        self.eh_proj= ColumnParallelFlashCommLinear(
+            input_size=2 * self.config.hidden_size,
+            output_size=self.config.hidden_size,
+            bias=False,
+            tp_size=self.eh_tp_size,
+            tp_rank=self.eh_tp_rank,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.eh_proj",
         )
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, logits_as_input=True
@@ -137,7 +146,11 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
 
         previous = self.hnorm(previous_hidden_states)
         cat_hidden_states = torch.cat([tok_embeds, previous], dim=-1)
-        hidden_states = self.eh_proj.forward(cat_hidden_states)
+        if self.eh_tp_size >1:
+            cat_hidden_states = get_eh_proj_tp_group().all_gather(cat_hidden_states, dim=0)
+        hidden_states,_= self.eh_proj.forward(cat_hidden_states)
+        if self.eh_tp_size >1:
+            hidden_states = get_eh_proj_tp_group().all_to_all(hidden_states)
 
         encoded_states, residual = Qwen3MoeDecoderLayer.forward(
             self,
