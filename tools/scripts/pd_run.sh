@@ -384,7 +384,10 @@ export HCCL_RDMA_TIMEOUT=20
 export TNG_HOST_COPY=1
 # 使能双页表 pd 分离
 export AUTO_USE_UC_MEMORY=1
-export TASK_QUEUE_ENABLE=2
+# 算子下发队列优化的等级，如果未设置默认设为2
+if [[ -z "$TASK_QUEUE_ENABLE" ]]; then
+    export TASK_QUEUE_ENABLE=2
+fi
 
 # enable to overwrite request IDs
 export ENABLE_OVERWRITE_REQ_IDS=0
@@ -461,6 +464,7 @@ echo "RAY_MIN_WORKER_PORT: $RAY_MIN_WORKER_PORT"
 echo "RAY_MAX_WORKER_PORT: $RAY_MAX_WORKER_PORT"
 echo "PRINT_SCREEN: $PRINT_SCREEN"
 echo "VLLM_LOGGING_CONFIG_PATH: $VLLM_LOGGING_CONFIG_PATH"
+echo "VALIDATORS_CONFIG_PATH: $VALIDATORS_CONFIG_PATH"
 echo "=================="
 
 # Execute Python script
