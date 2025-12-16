@@ -901,7 +901,8 @@ class UnquantizedFlashCommLinearMethod(FlashCommLinearMethodBase):
         super().process_weights_after_loading(layer)
         weight_data = torch_npu.npu_format_cast(layer.weight.data.t().contiguous(), 29)
         layer.weight.data = weight_data
-        set_weight_attrs(layer.weight, {"is_weight_transposed": True})
+        if not hasattr(layer.weight, "is_weight_transposed"):
+            set_weight_attrs(layer.weight, {"is_weight_transposed": True})
 
     def apply(self,
               layer: torch.nn.Module,

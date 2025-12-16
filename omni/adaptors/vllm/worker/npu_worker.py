@@ -43,6 +43,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.lora.request import LoRARequest
+from vllm.attention import AttentionType
 
 from omni.adaptors.vllm.platform import NPUPlatform
 from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
@@ -537,3 +538,91 @@ class NPUWorker(WorkerBase):
     def reinit_process_group(self):
         reinit_process_group(self)
         self.model_runner.omni_placement_resume()
+
+class RLNPUWorker(NPUWorker):
+
+    def sleep(self, level: int = 1) -> None:
+        free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        self.model_runner.model = self.model_runner.model.to("cpu")
+        if hasattr(self.model_runner, "drafter") and self.model_runner.drafter:
+            self.model_runner.drafter.model = self.model_runner.drafter.model.to("cpu")
+
+        ctx = self.model_runner.vllm_config.compilation_config.static_forward_context
+        layer_need_kv_cache = []
+        for layer_name in ctx:
+            if hasattr(ctx[layer_name], 'attn_type') and \
+                ctx[layer_name].attn_type in (AttentionType.DECODER, AttentionType.ENCODER_DECODER):
+                layer_need_kv_cache.append(layer_name)
+        pipeline_parallel_size = self.model_runner.vllm_config.parallel_config.pipeline_parallel_size
+        for layer_name in layer_need_kv_cache:
+            kv_cache = []
+            for _ in range(pipeline_parallel_size):
+                kv_cache.append(torch.tensor([]))
+            ctx[layer_name].kv_cache = kv_cache
+        
+        for _, kv_caches_i in enumerate(self.model_runner.kv_caches):
+            for _, kv_caches_i_j in enumerate(kv_caches_i):
+                kv_caches_i_j.untyped_storage().resize_(0)
+        self.model_runner.kv_caches = []
+
+        for i in range(self.model_runner.model.model.start_layer, self.model_runner.model.model.end_layer):
+            if hasattr(self.model_runner.model.model.layers[i].self_attn, "attn"):
+                attn_impl = self.model_runner.model.model.layers[i].self_attn.attn.impl
+                if hasattr(attn_impl, "key_cache"):
+                    attn_impl.key_cache = None
+                    attn_impl.value_cache = None
+        
+        gc.collect()
+        torch.npu.empty_cache()
+     
+        from vllm.distributed.parallel_state import get_tp_group
+        get_tp_group().all_reduce(torch.ones(1).npu())
+        torch.npu.synchronize()
+
+        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+                                                used_bytes / GiB_bytes)
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+
+        if (tags == ["weights"]):
+            self.model_runner.model = self.model_runner.model.to("npu")
+            if hasattr(self.model_runner, "drafter") and self.model_runner.drafter:
+                self.model_runner.drafter.model = self.model_runner.drafter.model.to("npu")
+        if (tags == ["kv_cache"]):
+            self.model_runner.initialize_kv_cache(self.kv_cache_config, True)
+            from vllm.distributed.parallel_state import get_tp_group, get_dp_group
+            get_tp_group().all_reduce(torch.ones(1).npu())
+            if get_dp_group().world_size > 1:
+                get_dp_group().all_reduce(torch.ones(1).npu())
+            torch.npu.synchronize()
+
+
+    def load_model(self) -> None:
+        from contextlib import nullcontext
+        context = nullcontext()
+        logger.info("load_model nullcontext kv_cache")
+        with context:
+            self.model_runner.load_model()
+
+        # Start token recover component: ha_worker_server
+        if self.enable_token_recover:
+            from omni.adaptors.vllm.token_recovery.ha_worker_server import start_server
+            start_server(self)
+
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate NPU KV cache with the specified kv_cache_config."""
+        from contextlib import nullcontext
+        context = nullcontext()
+        logger.info("initialize_from_config nullcontext kv_cache")
+        self.kv_cache_config = kv_cache_config
+        with context:
+            if model_extra_config.operator_opt_config.use_omni_cache:
+                self.model_runner.initialize_omni_kv_cache(kv_cache_config)
+            else:
+                self.model_runner.initialize_kv_cache(kv_cache_config)

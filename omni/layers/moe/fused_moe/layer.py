@@ -166,8 +166,10 @@ class UnquantizedFusedMoEMethod(GPUUnquantizedFusedMoEMethod):
             self.local_expert_indices_offset + i for i in range(self.n_routed_experts)
         ]
         self.initialized = True
-        set_weight_attrs(layer.w13_weight, {"is_weight_transposed": True})
-        set_weight_attrs(layer.w2_weight, {"is_weight_transposed": True})
+        if not hasattr(layer.w13_weight, "is_weight_transposed"):
+            set_weight_attrs(layer.w13_weight, {"is_weight_transposed": True})
+        if not hasattr(layer.w2_weight, "is_weight_transposed"):
+            set_weight_attrs(layer.w2_weight, {"is_weight_transposed": True})
 
 
 class FusedMoE(torch.nn.Module):

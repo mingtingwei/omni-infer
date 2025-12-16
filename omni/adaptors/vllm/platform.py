@@ -254,7 +254,10 @@ class ConfigUpdater:
     def _update_parallel_config(vllm_config: 'VllmConfig') -> None:
         """Update parallel configuration for NPU worker compatibility."""
         parallel_config = vllm_config.parallel_config
-        if parallel_config and parallel_config.worker_cls == "auto":
+        rl_service_mode = os.getenv("RL_SERVICE_MODE", "0") == "1"
+        if rl_service_mode:
+            parallel_config.worker_cls = "omni.adaptors.vllm.worker.npu_worker.RLNPUWorker"
+        elif parallel_config and parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "omni.adaptors.vllm.worker.npu_worker.NPUWorker"
 
     @staticmethod
