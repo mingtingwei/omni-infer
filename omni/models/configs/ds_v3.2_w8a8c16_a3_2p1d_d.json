@@ -21,6 +21,6 @@
         "expert_down_prefetch": 0,
         "attn_prefetch": 96,
         "enable_dsa": true,
-        "enable_indexer_quant": true
+        "enable_indexer_quant": false
     }
 }
