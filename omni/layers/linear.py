@@ -50,6 +50,14 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
             layer.weight = Parameter(weight, requires_grad=False)
         return
 
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None,
+              **kwargs):
+        return super().apply(layer, x, bias)
+
+
 class AscendMergedColumnParallelLinear(LinearBase):
     def __init__(self,
                  input_size: int,

@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 # By using quantization case, this file is called before worker patch achieve,
+import re
 from typing import Any, Dict, List, Optional, cast
 from pydantic import BaseModel
 import torch
@@ -262,6 +263,16 @@ class AscendCompressedTensorsConfig(CompressedTensorsConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        # This handles the case where the user has specified a layer to be
+        # ignored in the quantization config, e.g., ignore: ["visual.*"] 
+        # for ViT module in multimodal LLM.
+        if self.ignore is not None:
+            for ignore_name in self.ignore:
+                if re.search(ignore_name, prefix):
+                    if isinstance(layer, LinearBase):
+                        return AscendUnquantizedLinearMethod()
+                    return None
+
         from vllm.attention.layer import Attention
         if isinstance(layer, LinearBase):
             if self.get_weights_bits(layer=layer, layer_name=prefix) == 16:
