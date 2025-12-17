@@ -86,7 +86,6 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int,
                            head_size: int) -> tuple[int, ...]:
-        head_size = 512 + 64 + 128 + 1 if model_extra_config.operator_opt_config.enable_dsa else 512 + 64
         return (num_blocks, block_size, 1, head_size)
 
     @staticmethod

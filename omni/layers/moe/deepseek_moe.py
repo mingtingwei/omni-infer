@@ -154,10 +154,12 @@ class ParallelDeepseekMLP(nn.Module):
             quant_config: Optional[QuantizationConfig] = None,
             reduce_results: bool = True,
             prefix: str = "",
-            comm_group: Optional[GroupCoordinator] = get_mlp_tp_group()
+            comm_group: Optional[GroupCoordinator] = None
     ) -> None:
         super().__init__()
         self.prefix = prefix
+        if comm_group is None:
+            comm_group = get_mlp_tp_group()
         self.gate_up_proj = AscendMergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             tp_size=comm_group.world_size,
@@ -227,7 +229,7 @@ class DeepseekMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.device_count = torch.npu.device_count()
         self.node_rank = get_world_group().rank_in_group // self.device_count
-        self.which_half = get_world_group().rank_in_group // (get_world_group().world_size // 2)
+        self.which_half = get_world_group().rank_in_group // (get_world_group().world_size // 2) if get_world_group().world_size >= 2 else 0
 
         n_routed_experts_names = ['num_routed_experts', 'n_routed_experts', 'num_experts']
         self.n_routed_experts = get_attr_by_names(config, n_routed_experts_names, 256)

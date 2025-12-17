@@ -529,40 +529,41 @@ class NPUModelRunner(GPUModelRunner):
         # build attention metadata
         attn_metadata = {}
         self.full_attn_metadata = None
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
-                    kv_cache_group_spec.kv_cache_spec,
-                    self.attn_metadata_builders[kv_cache_group_id],
+        if not int(os.getenv("NO_NPU_MOCK", "0")):
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+                # Prepare for cascade attention if enabled & beneficial.
+                common_prefix_len = 0
+                if self.cascade_attn_enabled:
+                    common_prefix_len = self._compute_cascade_attn_prefix_len(
+                        num_scheduled_tokens,
+                        scheduler_output.
+                        num_common_prefix_blocks[kv_cache_group_id],
+                        kv_cache_group_spec.kv_cache_spec,
+                        self.attn_metadata_builders[kv_cache_group_id],
+                    )
+                attn_metadata_i = self.attn_metadata_builders[kv_cache_group_id].build(
+                    num_reqs=num_reqs,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    common_prefix_len=None,
+                    **extra_builder_kwargs,
                 )
-            attn_metadata_i = self.attn_metadata_builders[kv_cache_group_id].build(
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-            if kv_cache_group_id == 0:
-                self.full_attn_metadata = attn_metadata_i
+                if kv_cache_group_id == 0:
+                    self.full_attn_metadata = attn_metadata_i
 
-            if not isinstance(self.attn_metadata_builders[kv_cache_group_id], DummyAttentionMetadataBuilder):
-                raise ValueError(f"{self.attn_metadata_builders[kv_cache_group_id]} does not implement DummyAttentionMetadataBuilder")
-            if attn_state == AscendAttentionState.DecodeOnly and model_extra_config.operator_opt_config.mtp_remove_redundant_kv:
-                num_speculative_tokens = 0 if not self.speculative_config else self.speculative_config.num_speculative_tokens
-                mtp_idx = torch.arange(1, self.max_batch_size, 1 + num_speculative_tokens, dtype=torch.int64).npu()
-                new_block_table = torch.index_select(attn_metadata_i.decode.block_table, dim=0, index=mtp_idx)
-                new_seq_lens = torch.index_select(attn_metadata_i.decode.seq_lens, dim=0, index=mtp_idx)
-                attn_metadata_i.decode.block_table = new_block_table
-                attn_metadata_i.decode.seq_lens = new_seq_lens
-            if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly:
-                self.attn_metadata_builders[kv_cache_group_id].mark_static_for_attn_metadata(attn_metadata_i)
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata_i
+                if not isinstance(self.attn_metadata_builders[kv_cache_group_id], DummyAttentionMetadataBuilder):
+                    raise ValueError(f"{self.attn_metadata_builders[kv_cache_group_id]} does not implement DummyAttentionMetadataBuilder")
+                if attn_state == AscendAttentionState.DecodeOnly and model_extra_config.operator_opt_config.mtp_remove_redundant_kv:
+                    num_speculative_tokens = 0 if not self.speculative_config else self.speculative_config.num_speculative_tokens
+                    mtp_idx = torch.arange(1, self.max_batch_size, 1 + num_speculative_tokens, dtype=torch.int64).npu()
+                    new_block_table = torch.index_select(attn_metadata_i.decode.block_table, dim=0, index=mtp_idx)
+                    new_seq_lens = torch.index_select(attn_metadata_i.decode.seq_lens, dim=0, index=mtp_idx)
+                    attn_metadata_i.decode.block_table = new_block_table
+                    attn_metadata_i.decode.seq_lens = new_seq_lens
+                if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly:
+                    self.attn_metadata_builders[kv_cache_group_id].mark_static_for_attn_metadata(attn_metadata_i)
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
 
         # Prepare input_ids
         token_indices = (positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1])
@@ -852,7 +853,10 @@ class NPUModelRunner(GPUModelRunner):
 
         model_kwargs = {}
         raw_hidden_states = None
-        attn_state = next(iter(attn_metadata.values())).attn_state
+        if not int(os.getenv("NO_NPU_MOCK", "0")):
+            attn_state = next(iter(attn_metadata.values())).attn_state
+        else:
+            attn_state = 0
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order

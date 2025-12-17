@@ -114,6 +114,7 @@ def mock_model_class_factory(base_class: type) -> type:
             prefix: Optional prefix for model components (passed to base_class).
         """
         self.no_npu = int(os.getenv("NO_NPU_MOCK", default='0'))
+        logger.error(f"######## NO_NPU_MOCK {self.no_npu}")
         if self.no_npu:
             # If NO_NPU_MOCK is set, initialize as a standard nn.Module
             # and extract necessary config details.
@@ -1108,7 +1109,8 @@ def mock_model_class_factory(base_class: type) -> type:
             dtype=torch.bfloat16,
             device=input_ids.device,
         )
-        if self.prefill_process:
+
+        if not self.no_npu and self.prefill_process:
             # Fast random mock output for KV cache on prefill nodes,
             # except in dummy run when kv_cache is not allocated yet
             if attn_metadata is None:

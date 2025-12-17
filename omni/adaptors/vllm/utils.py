@@ -237,10 +237,10 @@ def clear_var(*need_clear_tensors):
     torch.npu.empty_cache()
 
 def get_attr_by_names(src_config, attrs, default_value):
-        for attr in attrs:
-            value = getattr(src_config, attr, 0)
-            if value is None:
-                continue
-            if value > 0:
-                return value
-        return default_value
+    for attr in attrs:
+        value = getattr(src_config, attr, 0)
+        if value is None:
+            continue
+        if value > 0:
+            return value
+    return default_value

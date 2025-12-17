@@ -73,7 +73,7 @@ def run_requests(
     )
 
     with Pool(max_concurrency) as pool:
-        results = list(tdqm(pool.imap(partial_call_one, dataset))))
+        results = list(tdqm(pool.imap(partial_call_one, dataset)))
     
     return results
 

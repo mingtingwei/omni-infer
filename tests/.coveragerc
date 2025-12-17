@@ -1,0 +1,33 @@
+[run]
+# 关键配置：指定要测量的所有模块
+source = 
+    omni
+    vllm
+# 需要忽略的文件
+omit =
+    */test_*.py
+    */tests/*
+    */__pycache__/*
+    */dist-packages/*
+    */site-packages/*
+    */torch/_*
+    */tmp/*
+    /usr/local/Ascend/ascend-toolkit/*  
+branch = True
+# 多进程支持
+parallel = True
+concurrency = multiprocessing
+
+[paths]
+omni =
+    omni
+    */omni
+vllm =
+    infer_engines
+    */infer_engines
+
+[html]
+directory = coverage_html
+
+[xml]
+output = coverage.xml

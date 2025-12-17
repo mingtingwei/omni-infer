@@ -25,7 +25,11 @@ from vllm import utils
 from vllm.utils import FlexibleArgumentParser, supports_dynamo, vllm_lib
 from typing import Callable, List, Optional, Tuple
 
-from omni.adaptors.vllm.utils import SUPPORTED_QUANTIZATION_METHODS
+# from omni.adaptors.vllm.utils import SUPPORTED_QUANTIZATION_METHODS
+ASCEND_COMPRESSED_TENSORS = "ascend_compressed_tensors"
+NPU_W8A8_DYNAMIC = 'npu_w8a8_dynamic'
+NPU_W8A8_STATIC = 'npu_w8a8_static'
+SUPPORTED_QUANTIZATION_METHODS = [ASCEND_COMPRESSED_TENSORS, NPU_W8A8_DYNAMIC, NPU_W8A8_STATIC]
 
 CUSTOM_OP_ENABLED = False  # Custom operations not enabled for Omni inference
 

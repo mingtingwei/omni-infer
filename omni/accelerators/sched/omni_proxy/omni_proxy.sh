@@ -24,7 +24,7 @@ prefill_pod_size="1"
 decode_pod_size="1"
 stream_ops="off"
 omni_proxy_max_tokens_weight=""
-
+no_reuseport=false
 dry_run=false
 stop=false
 reload=false
@@ -171,6 +171,10 @@ while [[ $# -gt 0 ]]; do
             fi
             omni_proxy_schedule_algo="$2"
             shift 2
+            ;;
+        --no-reuseport)
+            no_reuseport=true
+            shift 1
             ;;
         --dry-run)
             dry_run=true
@@ -389,7 +393,18 @@ $(gen_upstream_block "prefill_endpoints" "$prefill_endpoints")
 $(gen_upstream_block "decode_endpoints" "$decode_endpoints")
 
     server {
+EOF
+    if [ "$no_reuseport" = true ]; then
+        cat >> "$nginx_conf_file" <<EOF
+        listen $listen_port;
+EOF
+    else
+        cat >> "$nginx_conf_file" <<EOF
         listen $listen_port reuseport;
+EOF
+    fi
+
+    cat >> "$nginx_conf_file" <<EOF
         server_name localhost;
 
         location /v1 {

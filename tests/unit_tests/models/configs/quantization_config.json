@@ -1,0 +1,51 @@
+{"deepseek_v3": {
+  "config_groups": {
+    "group_0": {
+      "input_activations": {
+        "actorder": null,
+        "block_structure": null,
+        "dynamic": true,
+        "group_size": null,
+        "num_bits": 8,
+        "observer": "memoryless",
+        "observer_kwargs": {},
+        "strategy": "token",
+        "symmetric": true,
+        "type": "int"
+      },
+      "output_activations": null,
+      "targets": [
+        "Linear"
+      ],
+      "weights": {
+        "actorder": null,
+        "block_structure": null,
+        "dynamic": true,
+        "group_size": null,
+        "num_bits": {
+          "self_attn.kv_a_proj_with_mqa": 8,
+          "self_attn.q_a_proj": 8,
+          "self_attn.q_b_proj": 8,
+          "self_attn.o_proj": 8,
+          "mlp.down_proj": 8,
+          "mlp.gate_up_proj": 8,
+          "mlp.shared_experts": 8,
+          "mlp.experts": 8
+        },
+        "observer": "minmax",
+        "observer_kwargs": {},
+        "strategy": "token",
+        "symmetric": true,
+        "type": "int"
+      }
+    }
+  },
+  "format": "int-quantized",
+  "global_compression_ratio": 1.5943962512751308,
+  "ignore": [
+  ],
+  "kv_cache_scheme": null,
+  "quant_method": "compressed-tensors",
+  "quantization_status": "compressed"
+  }
+}

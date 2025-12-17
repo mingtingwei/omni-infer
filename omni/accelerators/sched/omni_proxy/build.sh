@@ -7,17 +7,23 @@ usage() {
 Usage: $0 [--skip-extras] [-h|--help]
 
   --skip-extras   Skip downloading and building msgpack-c and Python
+  -c, --coverage  Compile with flags to generate coverage for DT
   -h, --help      Show this help message and exit
 EOF
   exit 1
 }
 
 SKIP_EXTRAS=false
+COVERAGE_FLAGS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-extras)
       SKIP_EXTRAS=true
+      shift
+      ;;
+    -c|--coverage)
+      COVERAGE_FLAGS="-fprofile-arcs -ftest-coverage"
       shift
       ;;
     -h|--help)
@@ -97,10 +103,11 @@ else
 fi
 
 cd nginx-${NGINX_VERSION}
-CFLAGS="-O0 -g" ./configure --sbin-path=${NGINX_SBIN_PATH} \
+CFLAGS="-O0 -g $COVERAGE_FLAGS" ./configure --sbin-path=${NGINX_SBIN_PATH} \
     --add-dynamic-module=$WORKDIR/omni_proxy/modules \
     --add-dynamic-module=$WORKDIR/global_proxy/modules/ngx_http_set_request_id_module \
-    --without-http_gzip_module
+    --without-http_gzip_module \
+    --with-ld-opt="$COVERAGE_FLAGS"
 make -j16
 make install
 
