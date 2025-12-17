@@ -327,6 +327,7 @@
         src: "{{ item }}"
         dest: "{{ (item == fixed_file_src) | ternary(ranktable_save_path + '/collect_files_p/api/', ranktable_save_path + '/collect_files_p/') }}"
         flat: yes
+        validate_checksum: no
       loop: "{{ p_dynamic_files.files | map(attribute='path') | list + [fixed_file_src] }}"
       vars:
         fixed_file_src: '{{ ranktable_save_path }}/prefill_config/local_ranktable_{{ ansible_host }}_host.json'
