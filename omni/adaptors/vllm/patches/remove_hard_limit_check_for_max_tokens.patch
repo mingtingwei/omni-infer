@@ -1,21 +1,49 @@
 diff --git a/vllm/entrypoints/openai/serving_engine.py b/vllm/entrypoints/openai/serving_engine.py
-index d4e840ccc..3239f55b6 100644
+index d4e840ccc..1fe9df50c 100644
 --- a/vllm/entrypoints/openai/serving_engine.py
 +++ b/vllm/entrypoints/openai/serving_engine.py
-@@ -412,7 +412,7 @@ class OpenAIServing:
-                     f"{token_num} tokens in the messages, "
-                     f"Please reduce the length of the messages.")
-         elif token_num + max_tokens > max_model_len:
--            raise ValueError(
+@@ -404,15 +404,14 @@ class OpenAIServing:
+             max_tokens = request.max_completion_tokens or request.max_tokens
+         else:
+             max_tokens = request.max_tokens
+-        if max_tokens is None:
+-            if token_num >= max_model_len:
+-                raise ValueError(
+-                    f"This model's maximum context length is "
+-                    f"{max_model_len} tokens. However, you requested "
+-                    f"{token_num} tokens in the messages, "
+-                    f"Please reduce the length of the messages.")
+-        elif token_num + max_tokens > max_model_len:
++        if token_num >= max_model_len:
+             raise ValueError(
++                f"This model's maximum context length is "
++                f"{max_model_len} tokens. However, you requested "
++                f"{token_num} tokens in the messages, "
++                f"Please reduce the length of the messages.")
++        elif token_num + max_tokens > max_model_len:
 +            logger.warning(
                  f"This model's maximum context length is "
                  f"{max_model_len} tokens. However, you requested "
                  f"{max_tokens + token_num} tokens "
-@@ -798,7 +798,7 @@ class OpenAIServing:
-                     f"{token_num} tokens in the messages, "
-                     f"Please reduce the length of the messages.")
-         elif token_num + max_tokens > self.max_model_len:
--            raise ValueError(
+@@ -790,15 +789,14 @@ class OpenAIServing:
+             max_tokens = request.max_completion_tokens or request.max_tokens
+         else:
+             max_tokens = getattr(request, "max_tokens", None)
+-        if max_tokens is None:
+-            if token_num >= self.max_model_len:
+-                raise ValueError(
+-                    f"This model's maximum context length is "
+-                    f"{self.max_model_len} tokens. However, you requested "
+-                    f"{token_num} tokens in the messages, "
+-                    f"Please reduce the length of the messages.")
+-        elif token_num + max_tokens > self.max_model_len:
++        if token_num >= self.max_model_len:
+             raise ValueError(
++                f"This model's maximum context length is "
++                f"{self.max_model_len} tokens. However, you requested "
++                f"{token_num} tokens in the messages, "
++                f"Please reduce the length of the messages.")
++        elif token_num + max_tokens > self.max_model_len:
 +            logger.warning(
                  f"This model's maximum context length is "
                  f"{self.max_model_len} tokens. However, you requested "
