@@ -342,6 +342,23 @@ class Qwen3MTP(nn.Module):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
+            
+            # The weight_scale often has shape (n,1)
+            if 'weight_scale' in name:
+                loaded_weight = loaded_weight.view(-1)
+                
+            if (self.quant_config is not None and 
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                if scale_name not in params_dict:
+                    continue
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = loaded_weight.view(-1)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # skip non-stacked layers and experts (experts handled below)
