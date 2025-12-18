@@ -49,3 +49,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/enable_max_tokens_exclude_reasoning.pa
 git apply --whitespace=nowarn $PATCH_ROOT/remove_hard_limit_check_for_max_tokens.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_ems.patch
 git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_validation_error.patch
+git apply --whitespace=nowarn $PATCH_ROOT/patch_support_prefilled_token_skip_tokenize_completion.patch
