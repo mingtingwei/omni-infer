@@ -343,6 +343,14 @@ export TASK_QUEUE_ENABLE=2
 # enable to overwrite request IDs
 export ENABLE_OVERWRITE_REQ_IDS=1
 
+# enable middleware
+if [[ -n "$VALIDATORS_CONFIG_PATH" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --middleware omni.adaptors.vllm.entrypoints.middleware.param_check.ValidateSamplingParams"
+else
+    EXTRA_ARGS="$EXTRA_ARGS"
+fi
+
+
 # Print current configuration
 echo "==== Current Configuration ===="
 echo "GLOBAL_RANK_TABLE_FILE_PATH: $GLOBAL_RANK_TABLE_FILE_PATH"
