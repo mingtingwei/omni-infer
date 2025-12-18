@@ -55,6 +55,7 @@ lark==1.2.2
 llguidance==0.7.30
 llvmlite==0.44.0
 lm-format-enforcer==0.10.11
+librosa==0.11.0
 markdown-it-py==3.0.0
 matplotlib==3.10.3
 mdurl==0.1.2

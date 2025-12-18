@@ -12,52 +12,11 @@ export http_proxy=${HTTP_PROXY}
 export https_proxy=${HTTP_PROXY}
 # The incoming value is a branch name (e.g. 'release_v0.6.0' or 'master').
 # Use it directly if provided, otherwise default to 'master'.
-branch="${BRANCH}"
+branch="${BRANCH:-master}"
 
-# Determine OMNI_VERSION_NUM from the branch:
-# - If branch is 'master', keep OMNI_VERSION_NUM='master'
-# - If branch matches 'release_vMAJOR.MINOR(.PATCH)', parse into 'MAJOR.MINOR.PATCH'
-#   missing patch defaults to 0 (so 'release_v0.6' -> '0.6.0')
-if [ "${branch}" = "master" ]; then
-    OMNI_VERSION_NUM="master"
-else
-    if [[ "${branch}" =~ ^release_v([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
-        major="${BASH_REMATCH[1]}"
-        minor="${BASH_REMATCH[2]}"
-        patch="${BASH_REMATCH[4]:-0}"
-        OMNI_VERSION_NUM="${major}.${minor}.${patch}"
-    else
-        echo "ERROR: could not parse version from branch '${branch}'.  Please provide a valid branch." 
-        exit 1
-    fi
-fi
+# 新增：is_branch_after_050作为传入参数，默认为True
+is_branch_after_050="${IS_BRANCH_AFTER_050:-True}"
 
-version_ge() {
-    local ver1="$1"
-    local ver2="$2"
-    local -a arr1 arr2
-    
-    # 1. 拆分版本号为3段，空值补0（适配 0.5、1.0 等不完整格式）
-    IFS='.' read -r -a arr1 <<< "${ver1:-0.0.0}"  # 若ver1为空，默认0.0.0
-    IFS='.' read -r -a arr2 <<< "${ver2:-0.0.0}"  # 若ver2为空，默认0.0.0
-    
-    # 2. 逐段比较（主→次→修订），不足3段的补0
-    for i in 0 1 2; do
-        local num1=${arr1[$i]:-0}
-        local num2=${arr2[$i]:-0}
-        
-        num1=$((num1))
-        num2=$((num2))
-        
-        if [ "$num1" -gt "$num2" ]; then
-            return 0
-        elif [ "$num1" -lt "$num2" ]; then
-            return 1
-        fi
-    done
-    
-    return 0
-}
 
 # 需要预先准备 omniinfer 代码，可根据CI流程优化，在容器中下载会导致构建时间过长
 git config --global http.sslVerify false
@@ -104,7 +63,8 @@ cd ${BASE_DIR}/omniinfer
 chmod +x build/build.sh
 chmod +x infer_engines/bash_install_code.sh
 
-if [ "${OMNI_VERSION_NUM}" = "master" ] || version_ge "${OMNI_VERSION_NUM}" "0.5.0"; then
+# 根据 is_branch_after_050 参数的值决定构建方式
+if [ "${is_branch_after_050}" = "True" ] || [ "${is_branch_after_050}" = "true" ]; then
     # For 'master' branch or versions >= 0.5.0 we use the cached build path
     bash -xe build/build.sh --cache 1
     cd ${BASE_DIR}/omniinfer/tools/quant/python

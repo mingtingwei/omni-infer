@@ -1,0 +1,53 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG HTTP_PROXY
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+ARG ARCHITECTURE
+ARG CUSTOM_OPS
+ARG GO_VERSION=1.24.1
+
+
+WORKDIR /workspace
+copy codes /workspace/dist/codes
+copy ./copy_data/Mooncake /workspace/Mooncake
+copy build_mooncake.sh /workspace/build_mooncake.sh
+copy ./copy_data/go1.24.1.linux-arm64.tar.gz /workspace/go1.24.1.linux-arm64.tar.gz
+copy ./copy_data/omniinfer /workspace/omniinfer
+
+
+RUN export http_proxy=${HTTP_PROXY} && export https_proxy=${HTTP_PROXY} && \
+    echo "export HCCL_OP_RETRY_ENABLE=\"L0:0, L1:0, L2:0\"" >> ~/.bashrc; \
+    echo "export HCCL_IF_BASE_PORT=59000" >> ~/.bashrc; \
+    yum -y install pcre-devel && \
+    pip config set global.index-url ${PIP_INDEX_URL} && \
+    pip config set global.trusted-host ${PIP_TRUSTED_HOST} && \
+    sh /workspace/build_mooncake.sh -a ${ARCHITECTURE} -g ${GO_VERSION} && \
+    source ~/.bashrc && source /etc/profile && \
+    if [ -n "${CUSTOM_OPS}" ]; then \
+        pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
+            google==3.0.0 expecttest==0.1.6 hypothesis==6.82.0 psutil==7.0.0 PyYAML==6.0 decorator==5.2.1 scipy==1.15.3 \
+            attrs==25.3.0 numpy==2.2.6  protobuf==4.25.8 && \
+        echo "CUSTOM_OPS specified: ${CUSTOM_OPS}"; \
+        # Split on commas and iterate; trim whitespace from each entry.
+        echo "${CUSTOM_OPS}" | tr ',' '\n' | while IFS= read -r op; do \
+            # trim leading/trailing whitespace
+            op="$(echo "$op" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"; \
+            [ -z "$op" ] && continue; \
+            echo "Processing custom op: $op"; \
+            found=0; \
+            # Run any matching scripts in /workspace/dist/codes
+            for script in /workspace/dist/codes/"$op".sh; do \
+                    if [ -f "$script" ]; then \
+                    found=1; echo "Running $script"; chmod +x "$script" && /bin/bash "$script" --npu-platform "${NPU_PLATFORM}" || { echo "Error: failed to run $script"; exit 1; }; \
+                fi; \
+            done; \
+            # Final fallback: warn user
+            if [ $found -eq 0 ]; then \
+                echo "Error: no matching script found for custom op: $op"; exit 1; \
+            fi; \
+        done; \
+    fi && \
+    pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
+        transformers==4.57.1 openai==2.7.1 openai_harmony==0.0.8 xgrammar==0.1.23

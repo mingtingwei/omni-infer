@@ -17,6 +17,8 @@ CUSTOM_OPS=""
 NPU_PLATFORM="910C"
 ## Whether to start the apiserver at the end (True/False). Default True
 START_SERVER="True"
+## Python version to use during image build (e.g. 3.10, 3.11)
+PYTHON_VERSION="3.11.12"
 # base image tags
 BASE_IMAGE=test-infer-base:0.1
 # L1 image tags
@@ -28,6 +30,9 @@ BRANCH=master
 # - L2: only build Dockerfile.omniinfer
 # - both: build Dockerfile.base first, then Dockerfile.omniinfer (default)
 BUILD_TARGET="both"
+FRAMEWORK_TYPE="vllm"
+BUILD_FOR_ROMA="false"
+ROMA_IMAGE="test-infer-ROMA:0.1"
 
 
 # Print usage/help
@@ -48,9 +53,14 @@ Options:
     --base-image <image>              Tag for the base image build (default: ${BASE_IMAGE})
     --L1-image <image>               Tag for the dev image build (default: ${L1_IMAGE})
     --L2-image <image>              Tag for the apiserver/user image build (default: ${L2_IMAGE})
+    --custom-ops <ops>                Custom operator packages to include (default: ${CUSTOM_OPS})
+    --roma-image <image>          Tag for the Roma image build (default: ${ROMA_IMAGE})
     --branch <tag>                    Omni code version/branch to include (default: ${BRANCH})
-    --build-target <L1|L2|both> Select which builds to run (default: ${BUILD_TARGET})
+    --python-version <version>        Python version to use during build (default: ${PYTHON_VERSION})
+    --build-target <L1|L2|both|skip> Select which builds to run (default: ${BUILD_TARGET})
     --start-server <True|False>     Whether to start the apiserver after build (default: ${START_SERVER})
+    --build-for-roma <True|False>  Whether to build image for Roma environment (default: ${BUILD_FOR_ROMA})
+    --framework-type <type>          Framework type to build (default: ${FRAMEWORK_TYPE})
 
 Examples:
     $0 --arch aarch64 --L2-image my-image:latest --model-name "Qwen/Qwen2.5-0.5B"
@@ -88,6 +98,9 @@ parse_long_option() {
         --npu-platform)
             NPU_PLATFORM="$2"
             ;;
+        --python-version)
+            PYTHON_VERSION="$2"
+            ;;
         --model-name)
             MODEL_NAME="$2"
             ;;
@@ -103,6 +116,9 @@ parse_long_option() {
         --L2-image)
             L2_IMAGE="$2"
             ;;
+        --roma-image)
+            ROMA_IMAGE="$2"
+            ;;
         --branch)
             BRANCH="$2"
             ;;
@@ -111,6 +127,12 @@ parse_long_option() {
             ;;
         --build-target)
             BUILD_TARGET="$2"
+            ;;
+        --framework-type)
+            FRAMEWORK_TYPE="$2"
+            ;;
+        --build-for-roma)
+            BUILD_FOR_ROMA="$2"
             ;;
         --help)
             print_help
@@ -131,6 +153,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             print_help
+            exit 0
             ;;
         --*)
             parse_long_option "$1" "$2"
@@ -139,6 +162,7 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1" >&2
             print_help
+            exit 1
             ;;
     esac
 done
@@ -157,15 +181,19 @@ echo "NPU_PLATFORM: ${NPU_PLATFORM}"
 echo "BASE_IMAGE: ${BASE_IMAGE}"
 echo "L1_IMAGE: ${L1_IMAGE}"
 echo "L2_IMAGE: ${L2_IMAGE}"
+echo "ROMA_IMAGE: ${ROMA_IMAGE}"
 echo "BRANCH: ${BRANCH}"
 echo "CUSTOM_OPS: ${CUSTOM_OPS}"
 echo "BUILD_TARGET: ${BUILD_TARGET}"
 echo "START_SERVER: ${START_SERVER}"
+echo "PYTHON_VERSION: ${PYTHON_VERSION}"
+echo "FRAMEWORK_TYPE: ${FRAMEWORK_TYPE}"
+echo "BUILD_FOR_ROMA: ${BUILD_FOR_ROMA}"  
 echo "=================="
 
 # Validate BUILD_TARGET
-if [[ ! "${BUILD_TARGET}" =~ ^(L1|L2|both)$ ]]; then
-    echo "Unknown build target: ${BUILD_TARGET}. Use one of: L1, L2, both." >&2
+if [[ ! "${BUILD_TARGET}" =~ ^(L1|L2|both|skip)$ ]]; then
+    echo "Unknown build target: ${BUILD_TARGET}. Use one of: L1, L2, both, skip." >&2
     exit 2
 fi
 
@@ -190,9 +218,8 @@ if [[ "${BUILD_TARGET}" == "L1" || "${BUILD_TARGET}" == "both" ]]; then
         --build-arg CANN_INSTALL_MODE="${CANN_INSTALL_MODE}" \
         --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
         --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+        --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
         --build-arg BASE_IMAGE=${BASE_IMAGE} \
-        --build-context driver=/usr/local/Ascend \
-        --build-context etc=/etc \
         -t ${L1_IMAGE} .
     # If the user only wanted to build the base image, stop here
     if [[ "${BUILD_TARGET}" == "L1" ]]; then
@@ -210,19 +237,40 @@ fi
 
 ## L2_IMAGE user image with apiserver
 if [[ "${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both" ]]; then
-    echo "Building apiserver/user image (Dockerfile.omniinfer) -> ${L2_IMAGE}"
-    docker build --progress=plain --no-cache -f Dockerfile.omniinfer \
-        --build-arg HTTP_PROXY="${PROXY}" \
-        --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
-        --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
-        --build-arg BRANCH="${BRANCH}" \
-        --build-arg NPU_PLATFORM="${NPU_PLATFORM}" \
-        --build-arg BASE_IMAGE=${L1_IMAGE} \
-        --build-arg CUSTOM_OPS="${CUSTOM_OPS}" \
-        --target omininfer_openai \
-        -t ${L2_IMAGE} .
+    if [[ "${FRAMEWORK_TYPE}" == "VLLM" || "${FRAMEWORK_TYPE}" == "vllm" ]]; then
+        echo "Building omniinfer_vllm image (Dockerfile.omniinfer) -> ${L2_IMAGE}"
+        docker build --progress=plain --no-cache -f Dockerfile.omniinfer \
+            --build-arg HTTP_PROXY="${PROXY}" \
+            --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+            --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+            --build-arg BRANCH="${BRANCH}" \
+            --build-arg NPU_PLATFORM="${NPU_PLATFORM}" \
+            --build-arg BASE_IMAGE=${L1_IMAGE} \
+            --build-arg CUSTOM_OPS="${CUSTOM_OPS}" \
+            --target omininfer_openai \
+            -t ${L2_IMAGE} .
+    else
+        echo "Building omniinfer_vllm image (Dockerfile.sglang) -> ${L2_IMAGE}"
+        docker build --progress=plain --no-cache -f Dockerfile.sglang \
+            --build-arg HTTP_PROXY="${PROXY}" \
+            --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+            --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+            --build-arg BASE_IMAGE=${L1_IMAGE} \
+            --build-arg CUSTOM_OPS="${CUSTOM_OPS}" \
+            --build-arg ARCHITECTURE="${ARCH}" \
+            -t ${L2_IMAGE} .
+    fi
 else
-    echo "Skipping Dockerfile.omniinfer build (BUILD_TARGET=${BUILD_TARGET})"
+    echo "Skipping L2 image build (BUILD_TARGET=${BUILD_TARGET})"
+fi
+
+if [[ ("${BUILD_FOR_ROMA}" == "True" || "${BUILD_FOR_ROMA}" == "true" || "${BUILD_FOR_ROMA}" == "1")  && "${BUILD_TARGET}" != "L1" ]]; then
+    echo "Building Roma image (Dockerfile.roma) -> ${ROMA_IMAGE}"
+    docker build --progress=plain --no-cache -f Dockerfile.roma \
+        --build-arg BASE_IMAGE=${L2_IMAGE} \
+        -t ${ROMA_IMAGE} .
+else
+    echo "Skipping Roma image build (BUILD_FOR_ROMA=${BUILD_FOR_ROMA}, BUILD_TARGET=${BUILD_TARGET})"
 fi
 
 
@@ -230,12 +278,14 @@ fi
 # Create a temp container name that includes a sanitized L2 image identifier
 # so it's easy to distinguish artifacts when building different images.
 # Sanitize image tag to allowed Docker name characters (alphanumeric, . _ -)
-SAFE_L2_IMAGE=$(echo "${L2_IMAGE}" | sed 's/[:\/]/_/g; s/[^a-zA-Z0-9._-]/_/g')
-TEMP_CONTAINER="dist_${SAFE_L2_IMAGE}_$(date +"%Y-%m-%d_%H%M%S")"
-echo "Using temporary container: ${TEMP_CONTAINER}"
-docker run --name ${TEMP_CONTAINER} -d ${L2_IMAGE}
-docker cp ${TEMP_CONTAINER}:/workspace/dist ${TEMP_CONTAINER}/
-docker rm -f ${TEMP_CONTAINER}
+if [[ ("${FRAMEWORK_TYPE}" == "VLLM" || "${FRAMEWORK_TYPE}" == "vllm") && ("${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both") ]]; then
+    SAFE_L2_IMAGE=$(echo "${L2_IMAGE}" | sed 's/[:\/]/_/g; s/[^a-zA-Z0-9._-]/_/g')
+    TEMP_CONTAINER="dist_${SAFE_L2_IMAGE}_$(date +"%Y-%m-%d_%H%M%S")"
+    echo "Using temporary container: ${TEMP_CONTAINER}"
+    docker run --name ${TEMP_CONTAINER} -d ${L2_IMAGE}
+    docker cp ${TEMP_CONTAINER}:/workspace/dist ${TEMP_CONTAINER}/
+    docker rm -f ${TEMP_CONTAINER}
+fi
 
 
 ## start apiserver and download model (controlled by START_SERVER)
