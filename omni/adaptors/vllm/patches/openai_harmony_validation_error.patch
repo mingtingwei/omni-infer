@@ -1,0 +1,21 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 2358bdd80..06db90101 100755
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -13,6 +13,7 @@ import partial_json_parser
+ import regex as re
+ from fastapi import Request
+ from openai_harmony import Message as OpenAIMessage
++from openai_harmony import HarmonyError
+ from pydantic import TypeAdapter
+ 
+ from vllm.config import ModelConfig
+@@ -368,7 +369,7 @@ class OpenAIServingChat(OpenAIServing):
+                 request_id, # the internal vLLM request ID, pass it to D side in kv_transfer_params
+                 model_name,
+                 conversation, tokenizer, request_metadata)
+-        except ValueError as e:
++        except (ValueError, HarmonyError) as e:
+             # TODO: Use a vllm-specific Validation Error
+             return self.create_error_response(str(e))
+         
