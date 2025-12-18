@@ -148,6 +148,7 @@ class EmsAdapter:
                 res = self.zmq_comm.recv()
             except Exception as e:
                 logger.error(f"[EMS] ZMQ recv() failed, error: {e}.")
+                raise
             else:
                 if res is not None:
                     self.update_req_info(res)
@@ -339,6 +340,7 @@ class EmsAdapter:
                 self.zmq_comm.send(data)
             except Exception as e:
                 logger.error(f"[EMS] ZMQ send() failed, error: {e}.")
+                raise
             return finished_reqs
     
 
