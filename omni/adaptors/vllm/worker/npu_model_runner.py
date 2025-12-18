@@ -1514,7 +1514,7 @@ class NPUModelRunner(GPUModelRunner):
         if model_extra_config.task_config.enable_omni_placement:
             self.planner.placement_resume()
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, is_wakeup=False) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -1540,8 +1540,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=False,
         )
         self.input_batch.token_ids_cpu = self.input_batch.token_ids_cpu_tensor.numpy()
-        if not is_wakeup:
-            self.initialize_attn_backend(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config)
         preemption_mode = self.vllm_config.scheduler_config.preemption_mode
 
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):

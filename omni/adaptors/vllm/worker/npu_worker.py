@@ -547,30 +547,14 @@ class RLNPUWorker(NPUWorker):
         if hasattr(self.model_runner, "drafter") and self.model_runner.drafter:
             self.model_runner.drafter.model = self.model_runner.drafter.model.to("cpu")
 
-        ctx = self.model_runner.vllm_config.compilation_config.static_forward_context
-        layer_need_kv_cache = []
-        for layer_name in ctx:
-            if hasattr(ctx[layer_name], 'attn_type') and \
-                ctx[layer_name].attn_type in (AttentionType.DECODER, AttentionType.ENCODER_DECODER):
-                layer_need_kv_cache.append(layer_name)
-        pipeline_parallel_size = self.model_runner.vllm_config.parallel_config.pipeline_parallel_size
-        for layer_name in layer_need_kv_cache:
-            kv_cache = []
-            for _ in range(pipeline_parallel_size):
-                kv_cache.append(torch.tensor([]))
-            ctx[layer_name].kv_cache = kv_cache
+        self.kv_nbytes:List[List[int]] = [
+            [t.untyped_storage().nbytes() for t in row]
+            for row in self.model_runner.kv_caches
+        ]
         
         for _, kv_caches_i in enumerate(self.model_runner.kv_caches):
             for _, kv_caches_i_j in enumerate(kv_caches_i):
                 kv_caches_i_j.untyped_storage().resize_(0)
-        self.model_runner.kv_caches = []
-
-        for i in range(self.model_runner.model.model.start_layer, self.model_runner.model.model.end_layer):
-            if hasattr(self.model_runner.model.model.layers[i].self_attn, "attn"):
-                attn_impl = self.model_runner.model.model.layers[i].self_attn.attn.impl
-                if hasattr(attn_impl, "key_cache"):
-                    attn_impl.key_cache = None
-                    attn_impl.value_cache = None
         
         gc.collect()
         torch.npu.empty_cache()
@@ -595,7 +579,9 @@ class RLNPUWorker(NPUWorker):
             if hasattr(self.model_runner, "drafter") and self.model_runner.drafter:
                 self.model_runner.drafter.model = self.model_runner.drafter.model.to("npu")
         if (tags == ["kv_cache"]):
-            self.model_runner.initialize_kv_cache(self.kv_cache_config, True)
+            for i, kv_caches_i in enumerate(self.model_runner.kv_caches):
+                for j, kv_caches_i_j in enumerate(kv_caches_i):
+                    kv_caches_i_j.untyped_storage().resize_(self.kv_nbytes[i][j])
             from vllm.distributed.parallel_state import get_tp_group, get_dp_group
             get_tp_group().all_reduce(torch.ones(1).npu())
             if get_dp_group().world_size > 1:
