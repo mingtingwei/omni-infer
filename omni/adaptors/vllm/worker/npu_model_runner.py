@@ -1087,10 +1087,11 @@ class NPUModelRunner(GPUModelRunner):
         cost_drafter = 0
         cost_device_output = 0
 
+        self.enable_sleep_mode = bool(int(os.getenv("VLLM_ENABLE_SLEEP_MODE", '0')))
         for self.curr_step in range(self.total_step):
             start_1 = time.time()
             if not scheduler_output.total_num_scheduled_tokens:
-                if get_dp_group().world_size > 1:
+                if get_dp_group().world_size > 1 and (not self.enable_sleep_mode):
                    self._dummy_run(1)
                 else:
                     time.sleep(0.001) # release GIL
