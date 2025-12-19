@@ -20,7 +20,7 @@ index d4e840ccc..1fe9df50c 100644
 +                f"{max_model_len} tokens. However, you requested "
 +                f"{token_num} tokens in the messages, "
 +                f"Please reduce the length of the messages.")
-+        elif token_num + max_tokens > max_model_len:
++        if max_tokens is not None and token_num + max_tokens > max_model_len:
 +            logger.warning(
                  f"This model's maximum context length is "
                  f"{max_model_len} tokens. However, you requested "
@@ -43,7 +43,7 @@ index d4e840ccc..1fe9df50c 100644
 +                f"{self.max_model_len} tokens. However, you requested "
 +                f"{token_num} tokens in the messages, "
 +                f"Please reduce the length of the messages.")
-+        elif token_num + max_tokens > self.max_model_len:
++        if max_tokens is not None and token_num + max_tokens > self.max_model_len:
 +            logger.warning(
                  f"This model's maximum context length is "
                  f"{self.max_model_len} tokens. However, you requested "
