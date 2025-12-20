@@ -1,4 +1,4 @@
-all:
+2,31all:
   children:
     C:
       hosts:
@@ -85,7 +85,7 @@ all:
             DECODE_TENSOR_PARALLEL_SIZE: 2
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
-            GLOO_SOCKET_IFNAME: enp67s0f5
+            GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_BUFFSIZE: 1000
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
@@ -110,11 +110,11 @@ all:
             SERVER_IP_LIST: 127.0.0.1
             SERVER_OFFSET: 0
             SHLVL: 1
-            SOCKET_IFNAME: enp67s0f5
+            SOCKET_IFNAME: enp23s0f3
             TASK_QUEUE_ENABLE: 2
             TNG_HOST_COPY: 1
             TOOLCHAIN_HOME: /usr/local/Ascend/ascend-toolkit/latest/toolkit/
-            TP_SOCKET_IFNAME: enp67s0f5
+            TP_SOCKET_IFNAME: enp23s0f3
             USING_LCCL_COM: 0
             VLLM_ENABLE_MC2: 1
             VLLM_LLMDATADIST_ZMQ_PORT: 5668
@@ -182,7 +182,7 @@ all:
             DECODE_POD_NUM: 1
             GLOBAL_DECODE_SERVER_IP_LIST: ${SERVER_IP_LIST}
             GLOBAL_RANK_TABLE_FILE_PATH: ${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json
-            GLOO_SOCKET_IFNAME: enp67s0f5
+            GLOO_SOCKET_IFNAME: enp23s0f3
             HCCL_CONNECT_TIMEOUT: 1800
             HCCL_EXEC_TIMEOUT: 1800
             HCCL_INTRA_PCIE_ENABLE: 0
@@ -208,11 +208,11 @@ all:
             SERVER_IP_LIST: 127.0.0.1
             SERVER_OFFSET: 0
             SHLVL: 1
-            SOCKET_IFNAME: enp67s0f5
+            SOCKET_IFNAME: enp23s0f3
             TASK_QUEUE_ENABLE: 2
             TNG_HOST_COPY: 1
             TOOLCHAIN_HOME: /usr/local/Ascend/ascend-toolkit/latest/toolkit/
-            TP_SOCKET_IFNAME: enp67s0f5
+            TP_SOCKET_IFNAME: enp23s0f3
             USING_LCCL_COM: 0
             VLLM_LLMDATADIST_ZMQ_PORT: 5568
             VLLM_LOGGING_LEVEL: INFO
