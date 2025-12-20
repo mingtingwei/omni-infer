@@ -1,0 +1,79 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index 5b255e210..4d2c36b91 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -1720,7 +1720,7 @@ class ParallelConfig:
+     """ray distributed model workers placement group."""
+ 
+     distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
+-                                                 type["ExecutorBase"]]] = None
++                                                 type["ExecutorBase"], str]] = None
+     """Backend to use for distributed model
+     workers, either "ray" or "mp" (multiprocessing). If the product
+     of pipeline_parallel_size and tensor_parallel_size is less than
+@@ -1890,11 +1890,12 @@ class ParallelConfig:
+         # Lazy import to avoid circular import
+         from vllm.executor.executor_base import ExecutorBase
+         from vllm.platforms import current_platform
+-        if self.distributed_executor_backend not in (
+-                "ray", "mp", "uni",
+-                "external_launcher", None) and not (isinstance(
+-                    self.distributed_executor_backend, type) and issubclass(
+-                        self.distributed_executor_backend, ExecutorBase)):
++        if (self.distributed_executor_backend is not None
++            and not isinstance(self.distributed_executor_backend, str) 
++            and not (
++                isinstance(self.distributed_executor_backend, type) 
++                and issubclass(self.distributed_executor_backend, ExecutorBase))
++        ):
+             raise ValueError(
+                 "Unrecognized distributed executor backend "
+                 f"{self.distributed_executor_backend}. Supported "
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index b25aa9ab2..82bb75fc5 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -141,7 +141,8 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+         raise ValueError(
+             "All choices must be of the same type. "
+             f"Got {choices} with types {[type(c) for c in choices]}")
+-    return {"type": choice_type, "choices": sorted(choices)}
++    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
++    return {"type": choice_type, kwarg: sorted(choices)}
+ 
+ 
+ def is_not_builtin(type_hint: TypeHint) -> bool:
+@@ -282,7 +283,7 @@ class EngineArgs:
+     # notice.
+     distributed_executor_backend: Optional[Union[
+         DistributedExecutorBackend,
+-        Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
++        Type[ExecutorBase], str]] = ParallelConfig.distributed_executor_backend
+     # number of P/D disaggregation (or other disaggregation) workers
+     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+diff --git a/vllm/v1/executor/abstract.py b/vllm/v1/executor/abstract.py
+index 3b9feb0d3..10c725e29 100644
+--- a/vllm/v1/executor/abstract.py
++++ b/vllm/v1/executor/abstract.py
+@@ -12,6 +12,7 @@ from vllm.executor.uniproc_executor import (  # noqa
+     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
+ from vllm.executor.uniproc_executor import (  # noqa
+     UniProcExecutor as UniProcExecutorV0)
++from vllm.utils import resolve_obj_by_qualname
+ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+ from vllm.v1.outputs import ModelRunnerOutput
+ 
+@@ -49,6 +50,12 @@ class Executor(ExecutorBase):
+             # TODO: make v1 scheduling deterministic
+             # to support external launcher
+             executor_class = ExecutorWithExternalLauncher
++        elif isinstance(distributed_executor_backend, str):
++            executor_class = resolve_obj_by_qualname(distributed_executor_backend)
++            if not issubclass(executor_class, Executor):
++                raise TypeError(
++                    "distributed_executor_backend must be a subclass of "
++                    f"Executor. Got {executor_class}.")
+         else:
+             raise ValueError("Unknown distributed executor backend: "
+                              f"{distributed_executor_backend}")
