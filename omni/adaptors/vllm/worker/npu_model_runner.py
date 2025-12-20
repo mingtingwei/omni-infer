@@ -228,6 +228,9 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs, dtype=torch.int32, pin_memory=is_pin_memory_available(),
         )
 
+        if not self.is_multimodal_model:
+            self.inputs_embeds = None
+        
         self.attn_mask = None
         self.attn_state = None
 
