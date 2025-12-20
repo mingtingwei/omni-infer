@@ -37,7 +37,7 @@ all:
                 use_ge_graph_cached: true
             base-api-port: $API_PORT
             extra-args:
-              max-num-batched-tokens: 4096
+              max-num-batched-tokens: 32768
               disable-log-requests: ''
               enable-reasoning: ''
               reasoning-parser: deepseek_r1
@@ -100,7 +100,7 @@ all:
             LOG_PATH: /tmp/log_path
             ENABLE_ROUND_PIPELINE_COMM: 1
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_DECODE: 4096
+            MODEL_LEN_MAX_DECODE: 32768
             MODEL_PATH: /data/models/Qwen3-30B-A3B-Thinking-2507
             OMNI_USE_QWEN: 1
             OMNI_REUSE_PREFILLED_TOKENS: 1
@@ -150,7 +150,7 @@ all:
           args:
             base-api-port: $API_PORT
             extra-args:
-              max-num-batched-tokens: 4096
+              max-num-batched-tokens: 32768
               disable-log-requests: ''
               enforce-eager: ''
               max-num-seqs: 16
@@ -212,7 +212,7 @@ all:
             LCCL_PARALLEL: 0
             LOG_PATH: /tmp/log_path
             MASTER_PORT: 8000
-            MODEL_LEN_MAX_PREFILL: 4096
+            MODEL_LEN_MAX_PREFILL: 32768
             MODEL_PATH: /data/models/Qwen3-30B-A3B-Thinking-2507
             OMNI_USE_QWEN: 1
             OMNI_REUSE_PREFILLED_TOKENS: 1
