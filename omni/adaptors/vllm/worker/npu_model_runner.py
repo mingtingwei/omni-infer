@@ -84,6 +84,8 @@ COUNTER = 0
 PRE_COST = 0
 COST_THRESHOLD: float = float(os.environ.get("NPU_MODEL_RUNNER_COST_THRESHOLD", "0"))
 
+PROCESS_INVALID_TOKENS = os.environ.get("PROCESS_INVALID_TOKENS", "0") != "0"
+
 def _get_pad_size(num_seqs):
     tp_size = get_tensor_model_parallel_world_size()
     if model_extra_config.parall_config.attn_sp_size > 1:
@@ -265,6 +267,25 @@ class NPUModelRunner(GPUModelRunner):
         self.finished_sending = set()
         self.finished_recving = set()
         self.loading_kv_failure = set()
+        
+        if PROCESS_INVALID_TOKENS:
+            model_path = self.model_config.model
+            tokenizer_json = os.path.join(model_path, "tokenizer.json")
+            with open(tokenizer_json, encoding="utf-8") as f:
+                tokenizer_data = json.load(f)
+            added_tokens = tokenizer_data["added_tokens"]
+            self.max_valid_token_id = max(t["id"] for t in added_tokens if "id" in t)
+
+            vocab_size = self.model_config.get_vocab_size()
+            invalid_token_num = vocab_size - self.max_valid_token_id - 1
+            if invalid_token_num <= 0:
+                logger.warning(
+                    f"Logits tail masking disabled: invalid_token_start_id ({self.max_valid_token_id + 1}) "
+                    f">= vocab_size ({vocab_size}). No logits will be masked."
+                )
+                self.neg_inf_tail = None
+            else:
+                self.neg_inf_tail = torch.full((invalid_token_num,), float('-inf'), dtype=torch.int64, device=self.device)
 
     def _init_graph_options(self):
         from vllm.utils import supports_dynamo
@@ -1196,6 +1217,9 @@ class NPUModelRunner(GPUModelRunner):
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                     req_ids = self.input_batch.req_ids)
+                
+            if PROCESS_INVALID_TOKENS and self.neg_inf_tail is not None:
+                logits[:, self.max_valid_token_id + 1:] = self.neg_inf_tail
 
             # Sample the next token and get logprobs if needed.
             if not self.use_spec_decode:

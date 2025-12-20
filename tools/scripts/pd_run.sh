@@ -411,6 +411,10 @@ if [[ -z "$VLLM_LOGGING_CONFIG_PATH" ]]; then
     export VLLM_LOGGING_CONFIG_PATH=$SCRIPT_DIR"/logging_config_default.json"
 fi
 
+if [[ -n "$PROCESS_INVALID_TOKENS" ]]; then
+    echo "PROCESS_INVALID_TOKENS: $PROCESS_INVALID_TOKENS"
+fi
+
 # Print current configuration
 echo "==== Current Configuration ===="
 echo "GLOBAL_RANK_TABLE_FILE_PATH: $GLOBAL_RANK_TABLE_FILE_PATH"
