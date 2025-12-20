@@ -1325,6 +1325,22 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def recompute_fallback(self, scheduler_output: "SchedulerOutput"):
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            req_id = req_data.req_id
+            req_state = self.requests[req_id]
+
+            if not req_data.resumed_from_preemption:
+                for i in range(len(self.kv_cache_config.kv_cache_groups)):
+                    if i < len(req_state.block_ids):
+                        for _ in range(len(req_data.new_block_ids[i])):
+                            req_state.block_ids[i].pop()
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            for i, block_table in enumerate(self.input_batch.block_table.block_tables):
+                num_blocks = len(req_data.new_block_ids[i])
+                block_table.num_blocks_per_row[req_index] -= num_blocks
+
         remove_req_indices = []
         for new_req in scheduler_output.scheduled_new_reqs:
             req_index = self.input_batch.remove_request(new_req.req_id)
