@@ -18,11 +18,10 @@
 # limitations under the License.
 #
 
-from __future__ import annotations
 import torch
 import torch_npu
 import torch.nn as nn
-from typing import Optional, List, Dict, TYPE_CHECKING
+from typing import Optional, List, Dict
 
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -35,8 +34,6 @@ from omni.adaptors.vllm.forward_context import set_forward_context
 from omni.layers.sampler import random_choice
 from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.models.config_loader.loader import model_extra_config
-if TYPE_CHECKING:
-    from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
 
 def mark_static_for_graph_default(
         input_ids,
@@ -56,12 +53,12 @@ class PostDrafter(EagleProposer):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner: NPUModelRunner,
+        runner,
     ) -> None:
         super().__init__(vllm_config, device, runner)
         self.drafter_list = []
         self.method = self.vllm_config.speculative_config.method
-        self.enable_adaptive = self.speculative_config.enable_adaptive
+        self.enable_adaptive = self.vllm_config.speculative_config.enable_adaptive
         self.mark_static = False
         self.rejection_sampler = runner.rejection_sampler
         self.use_rejection_sampler = runner.use_rejection_sampler
@@ -74,6 +71,8 @@ class PostDrafter(EagleProposer):
         self.hidden_states = None
         self.arange = torch.arange(runner.decode_max_num_tokens, device=device)
         self.main_sampler = runner.sampler
+        self.dsa_stream = torch_npu.npu.Stream()
+
         # TODO check model type
         if self.method not in ('deepseek_mtp', 'eagle', 'eagle3', 'pangu_ultra_moe_mtp', 'qwen3_mtp', 'pangu_moe_v2_mtp'):
             raise ValueError(f"Speculative method should be one of ('deepseek_mtp', 'eagle', 'eagle3', 'pangu_ultra_moe_mtp', 'qwen3_mtp', 'pangu_moe_v2_mtp'), while get {self.method}.")

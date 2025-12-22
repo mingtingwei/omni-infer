@@ -18,10 +18,9 @@
 # limitations under the License.
 #
 
-from __future__ import annotations
 import torch
 import torch_npu
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import SamplerOutput
@@ -32,21 +31,16 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from omni.layers.sampler import random_choice
 from omni.models.config_loader.loader import model_extra_config
 
-if TYPE_CHECKING:
-    from omni.adaptors.vllm.worker.npu_model_runner import NPUModelRunner
-
 class SimpleValidator(RejectionSamplerV1):
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner: NPUModelRunner,
+        runner,
         *args, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.vllm_config = vllm_config
-        self.device = device
         self.previous_frequency_penalties = []
         self.previous_repetition_penalties = []
         self.previous_presence_penalties = []
@@ -69,11 +63,11 @@ class SimpleValidator(RejectionSamplerV1):
             raise ("Logprobs gathered is not supported in current version")
         if self.minus_one is None:
             # prepare const on npu
-            self.minus_one = -torch.ones(1, 1, device=self.device, dtype=input_ids.dtype)
+            self.minus_one = -torch.ones(1, 1, device=input_ids.device, dtype=input_ids.dtype)
             self.minus_ones = -torch.ones(
                 (self.runner.max_num_reqs, self.runner.num_tokens_per_reqs_decode),
                 dtype=input_ids.dtype,
-                device=self.device,
+                device=input_ids.device,
             )
 
         batch_size = len(metadata.num_draft_tokens)
@@ -136,7 +130,7 @@ class SparseRejectionSamplerValidator(RejectionSamplerV1):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner: NPUModelRunner,
+        runner,
         *args, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
