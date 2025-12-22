@@ -29,3 +29,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/longcat.patch
 git apply --whitespace=nowarn $PATCH_ROOT/release_kv_early.patch
 git apply --whitespace=nowarn $PATCH_ROOT/enable_retract_decode.patch
 git apply --whitespace=nowarn $PATCH_ROOT/sglang_noninvasive_trace.patch
+git apply --whitespace=nowarn $PATCH_ROOT/longcat_mtp.patch

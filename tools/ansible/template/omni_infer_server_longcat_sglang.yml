@@ -117,6 +117,10 @@
         --disable-radix-cache \
         --max-prefill-tokens 25600 \
         --max-total-tokens 61440 \
+        --speculative-algorithm MTP \
+        --speculative-num-steps 1 \
+        --speculative-num-draft-tokens 1 \
+        --speculative-eagle-topk 1 \
         --chunked-prefill-size -128 \
         --max-running-requests 21 > ${LOG_PATH}/run_prefill_sglang.log 2>&1 &
 
@@ -173,9 +177,13 @@
         --skip-server-warmup \
         --max-prefill-tokens 30000 \
         --max-total-tokens 204800 \
+        --speculative-algorithm MTP \
+        --speculative-num-steps 1 \
+        --speculative-num-draft-tokens 1 \
+        --speculative-eagle-topk 1 \
         --enable-torch-compile \
-        --cuda-graph-bs 8 \
-        --torch-compile-max-bs 8 \
+        --cuda-graph-bs 16 \
+        --torch-compile-max-bs 16 \
         --ep-size ${dp} \
         --pp-size 1 \
         --enable-multi-api-server \
