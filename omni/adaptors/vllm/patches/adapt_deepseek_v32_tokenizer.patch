@@ -1,0 +1,112 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index c14e3c0..a6e3720 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -218,7 +218,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
+     return next(f for f in fields(cls) if f.name == name).init
+ 
+ 
+-TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
++TokenizerMode = Literal["auto", "slow", "mistral", "custom", "deepseek_v32"]
+ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+ 
+ 
+@@ -244,6 +244,7 @@ class ModelConfig:
+     - "auto" will use the fast tokenizer if available.\n
+     - "slow" will always use the slow tokenizer.\n
+     - "mistral" will always use the tokenizer from `mistral_common`.\n
++    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+     - "custom" will use --tokenizer to select the preregistered tokenizer."""
+     trust_remote_code: bool = False
+     """Trust remote code (e.g., from HuggingFace) when downloading the model
+diff --git a/vllm/entrypoints/openai/serving_engine.py b/vllm/entrypoints/openai/serving_engine.py
+index 3239f55..3c78e3f 100644
+--- a/vllm/entrypoints/openai/serving_engine.py
++++ b/vllm/entrypoints/openai/serving_engine.py
+@@ -75,6 +75,7 @@ from vllm.sequence import Logprob, PromptLogprobs
+ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                           log_tracing_disabled_warning)
+ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer, get_tokenizer
++from vllm.transformers_utils.tokenizers import DeepseekV32Tokenizer
+ from vllm.utils import (is_list_of, make_async, merge_async_iterators,
+                         random_uuid, P, T)
+ from multiprocessing import Manager
+@@ -1092,6 +1093,13 @@ class OpenAIServing:
+                 messages=messages,
+                 **_chat_template_kwargs,
+             )
++        elif isinstance(tokenizer, DeepseekV32Tokenizer):
++            request_prompt = tokenizer.apply_chat_template(
++                conversation=conversation,
++                messages=messages,
++                model_config=model_config,
++                **_chat_template_kwargs,
++            )
+         else:
+             request_prompt = apply_hf_chat_template(
+                 tokenizer=tokenizer,
+diff --git a/vllm/transformers_utils/tokenizer.py b/vllm/transformers_utils/tokenizer.py
+index fa7a208..95a3681 100644
+--- a/vllm/transformers_utils/tokenizer.py
++++ b/vllm/transformers_utils/tokenizer.py
+@@ -2,23 +2,21 @@
+ 
+ import contextlib
+ import copy
++import huggingface_hub
+ import os
+ import warnings
+ from functools import lru_cache
+ from pathlib import Path
+-from types import MethodType
+-from typing import TYPE_CHECKING, Any, Optional, Union
+-
+-import huggingface_hub
+ from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                           PreTrainedTokenizerFast)
+-
++from types import MethodType
++from typing import TYPE_CHECKING, Any, Optional, Union
+ from vllm import envs
+ from vllm.logger import init_logger
+ from vllm.lora.request import LoRARequest
+ from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
+                                                     TokenizerRegistry)
+-from vllm.transformers_utils.tokenizers import MistralTokenizer
++from vllm.transformers_utils.tokenizers import MistralTokenizer, DeepseekV32Tokenizer
+ from vllm.transformers_utils.utils import check_gguf_file
+ from vllm.utils import make_async
+
+@@ -226,6 +224,13 @@ def get_tokenizer(
+                                                     revision=revision,
+                                                     download_dir=download_dir,
+                                                     **kwargs)
++    elif tokenizer_mode == "deepseek_v32":
++        tokenizer = DeepseekV32Tokenizer.from_pretrained(str(tokenizer_name),
++                                                        *args,
++                                                        revision=revision,
++                                                        download_dir=download_dir,
++                                                        **kwargs)
++        tokenizer = get_cached_tokenizer(tokenizer)
+     else:
+         try:
+             tokenizer = AutoTokenizer.from_pretrained(
+
+diff --git a/vllm/transformers_utils/tokenizers/__init__.py b/vllm/transformers_utils/tokenizers/__init__.py
+index 7aac29a..6414643 100644
+--- a/vllm/transformers_utils/tokenizers/__init__.py
++++ b/vllm/transformers_utils/tokenizers/__init__.py
+@@ -1,9 +1,9 @@
+ # SPDX-License-Identifier: Apache-2.0
+-
++from omni.adaptors.vllm.tokenizer.deepseekv32 import DeepseekV32Tokenizer
+ from .mistral import (MistralTokenizer, maybe_serialize_tool_calls,
+                       truncate_tool_call_ids, validate_request_params)
+ 
+ __all__ = [
+     "MistralTokenizer", "maybe_serialize_tool_calls", "truncate_tool_call_ids",
+-    "validate_request_params"
++    "validate_request_params", "DeepseekV32Tokenizer",
+ ]
+-- 
+
