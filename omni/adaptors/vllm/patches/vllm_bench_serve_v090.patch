@@ -1,0 +1,911 @@
+diff --git a/vllm/benchmarks/endpoint_request_func.py b/vllm/benchmarks/endpoint_request_func.py
+index 32767a896..3c39dcc0c 100644
+--- a/vllm/benchmarks/endpoint_request_func.py
++++ b/vllm/benchmarks/endpoint_request_func.py
+@@ -31,6 +31,18 @@ class RequestFuncInput:
+     ignore_eos: bool = False
+ 
+ 
++async def iter_chunks(response, encoding="utf-8"):
++    buffer = ""
++    async for chunk in response.content.iter_any():
++        text = chunk.decode(encoding, errors="ignore")
++        buffer += text
++        while "\n" in buffer:
++            line, buffer = buffer.split("\n", 1)
++            yield line
++    if buffer:
++        yield buffer
++
++
+ @dataclass
+ class RequestFuncOutput:
+     """The output of the request function including metrics."""
+@@ -44,6 +56,7 @@ class RequestFuncOutput:
+     tpot: float = 0.0  # avg next-token latencies
+     prompt_len: int = 0
+     error: str = ""
++    start_time: float = 0.0
+ 
+ 
+ async def async_request_openai_completions(
+@@ -92,18 +105,19 @@ async def async_request_openai_completions(
+ 
+         generated_text = ""
+         st = time.perf_counter()
++        output.start_time = st
+         most_recent_timestamp = st
+         try:
+             async with session.post(url=api_url, json=payload,
+                                     headers=headers) as response:
+                 if response.status == 200:
+                     first_chunk_received = False
+-                    async for chunk_bytes in response.content:
++                    async for chunk_bytes in iter_chunks(response):
+                         chunk_bytes = chunk_bytes.strip()
+                         if not chunk_bytes:
+                             continue
+ 
+-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
++                        chunk = chunk_bytes.removeprefix(
+                             "data: ")
+                         if chunk != "[DONE]":
+                             data = json.loads(chunk)
+@@ -154,7 +168,108 @@ async def async_request_openai_completions(
+     return output
+ 
+ 
++async def async_request_openai_chat_completions(
++    request_func_input: RequestFuncInput,
++    pbar: Optional[tqdm] = None,
++) -> RequestFuncOutput:
++    """The async request function for the OpenAI CHAT Completions API.
++
++    Args:
++        request_func_input: The input for the request function.
++        pbar: The progress bar to display the progress.
++
++    Returns:
++        The output of the request function.
++    """
++    api_url = request_func_input.api_url
++    assert api_url.endswith(("chat/completions", "profile")), (
++        "OpenAI Chat Completions API URL must end with 'chat/completions'.")
++    
++    async with aiohttp.ClientSession(trust_env=True,
++                                     timeout=AIOHTTP_TIMEOUT) as session:
++        content = [{"type": "text", "text": request_func_input.prompt}]
++        payload = {
++            "model": request_func_input.model_name \
++                if request_func_input.model_name else request_func_input.model,
++            "messages": [
++                {
++                    "role": "user",
++                    "content": content
++                },
++            ],
++            "temperature": 0.0,
++            "max_completion_tokens": request_func_input.output_len,
++            "stream": True,
++            "stream_options": {
++                "include_usage": True,
++            },
++        }
++        if request_func_input.ignore_eos:
++            payload["ignore_eos"] = request_func_input.ignore_eos
++        if request_func_input.extra_body:
++            payload.update(request_func_input.extra_body)
++        headers = {
++            "Content-Type": "application/json",
++            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
++        }
++
++        output = RequestFuncOutput()
++        output.prompt_len = request_func_input.prompt_len
++
++        generated_text = ""
++        ttft = 0.0
++        st = time.perf_counter()
++        output.start_time = st
++        most_recent_timestamp = st
++        try:
++            async with session.post(url=api_url, json=payload,
++                                        headers=headers) as response:
++                if response.status == 200:
++                    async for chunk_bytes in iter_chunks(response):
++                        chunk_bytes = chunk_bytes.strip()
++                        if not chunk_bytes:
++                            continue
++
++                        chunk = chunk_bytes.removeprefix(
++                            "data: ")
++                        if chunk != "[DONE]":
++                            timestamp = time.perf_counter()
++                            data = json.loads(chunk)
++
++                            if choices := data.get("choices"):
++                                content = choices[0]["delta"].get("content")
++                                # First token
++                                if ttft == 0.0:
++                                    ttft = timestamp - st
++                                    output.ttft = ttft
++
++                                # Decoding phase
++                                else:
++                                    output.itl.append(timestamp - most_recent_timestamp)
++
++                                generated_text += content or ""
++                            elif usage := data.get("usage"):
++                                output.output_tokens = usage.get("completion_tokens")
++
++                            most_recent_timestamp = timestamp
++
++                    output.generated_text = generated_text
++                    output.success = True
++                    output.latency = most_recent_timestamp - st
++                else:
++                    output.error = response.reason or ""
++                    output.success = False
++        except Exception:
++            output.success = False
++            exec_info = sys.exc_info()
++            output.error = "".join(traceback.format_exception(*exec_info))
++    if pbar:
++        pbar.update(1)
++    return output
++
++
+ # TODO: Add more request functions for different API protocols.
+ ASYNC_REQUEST_FUNCS = {
+     "openai-comp": async_request_openai_completions,
++    "openai-chat": async_request_openai_chat_completions,
+ }
+diff --git a/vllm/benchmarks/serve.py b/vllm/benchmarks/serve.py
+index dc0ec3219..0fb1e43f2 100644
+--- a/vllm/benchmarks/serve.py
++++ b/vllm/benchmarks/serve.py
+@@ -12,7 +12,8 @@ On the client side, run:
+         --model <your_model> \
+         --dataset-name <dataset_name. Default 'random'> \
+         --request-rate <request_rate. Default inf> \
+-        --num-prompts <num_prompts. Default 1000>
++        --num-prompts <num_prompts. Default 1000> \
++        --num-processes <num_processes. Default 1>
+ """
+ import argparse
+ import asyncio
+@@ -20,6 +21,7 @@ import gc
+ import json
+ import os
+ import random
++import re
+ import time
+ import warnings
+ from collections.abc import AsyncGenerator
+@@ -28,6 +30,8 @@ from datetime import datetime
+ from typing import Any, Optional
+ 
+ import numpy as np
++import multiprocessing
++from multiprocessing import Manager, Queue
+ from tqdm.asyncio import tqdm
+ from transformers import PreTrainedTokenizerBase
+ 
+@@ -39,7 +43,7 @@ from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
+ from vllm.transformers_utils.tokenizer import get_tokenizer
+ 
+ MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+-
++os.environ["TOKENIZERS_PARALLELISM"] = "false"
+ 
+ @dataclass
+ class BenchmarkMetrics:
+@@ -106,6 +110,47 @@ def sample_random_requests(
+     return input_requests
+ 
+ 
++def sample_fixed_requests(
++    dataset_path: str,
++    num_prompts: int,
++    fixed_output_len: int,
++    tokenizer: PreTrainedTokenizerBase
++) -> list[tuple[str, int, int]]:
++    data = []
++
++    if dataset_path.endswith(".json"):
++        with open(dataset_path, "r", encoding="utf-8") as file:
++            json_data = json.load(file)
++
++            if not isinstance(json_data, list):
++                raise ValueError("JSON file must contain a list of dictionaries.")
++            for item in json_data:
++                item["prompt"] = item.get("input", item.get("prompt", None))
++                if item["prompt"] is None:
++                    raise ValueError("Each item in the JSON list must be a dictionary with a 'input' key or a 'prompt' key.")
++            # Append each dictionary to self.data
++            data.extend(json_data)
++    else:
++        raise NotImplementedError(
++            "Only JSON format is supported for CustomDataset.")
++
++    sampled_requests = []
++    # Sample data from self.data with replacement
++    for _ in range(num_prompts):
++            item = random.choice(data)
++            prompt = item["prompt"]
++            output_len = item.get("output_tokens", item.get("output_len", fixed_output_len))
++            if output_len is not None:
++                try:
++                    output_len = int(output_len)
++                except:
++                    raise ValueError(f"output_len of prompt: {prompt} must can be transfer to an integer.")
++            else:
++                raise ValueError(f"output_len of prompt: {prompt} is None, add output_len in json file or specify via --fixed-output-len.")
++            prompt_len = len(tokenizer(prompt).input_ids)
++            sampled_requests.append((prompt, prompt_len, output_len, None))
++    return sampled_requests
++
+ async def get_request(
+     input_requests: list[tuple[str, int, int]],
+     request_rate: float,
+@@ -270,152 +315,17 @@ def calculate_metrics(
+     return metrics, actual_output_lens
+ 
+ 
+-async def benchmark(
+-    endpoint_type: str,
+-    api_url: str,
+-    base_url: str,
+-    model_id: str,
+-    model_name: str,
+-    tokenizer: PreTrainedTokenizerBase,
++def process_benchmark_results(
++    outputs: list[RequestFuncOutput],
+     input_requests: list[tuple[str, int, int]],
+-    logprobs: Optional[int],
+-    best_of: int,
++    tokenizer: PreTrainedTokenizerBase,
++    benchmark_duration: float,
+     request_rate: float,
+-    burstiness: float,
+-    disable_tqdm: bool,
+-    profile: bool,
++    selected_percentiles: list[float],
+     selected_percentile_metrics: list[str],
+-    selected_percentiles: list[str],
+-    ignore_eos: bool,
+     goodput_config_dict: dict[str, float],
+     max_concurrency: Optional[int],
+-    lora_modules: Optional[list[str]],
+ ):
+-    if endpoint_type in ASYNC_REQUEST_FUNCS:
+-        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
+-    else:
+-        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
+-
+-    print("Starting initial single prompt test run...")
+-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+-        input_requests[0])
+-    if endpoint_type != "openai-chat" and test_mm_content is not None:
+-        # multi-modal benchmark is only available on OpenAI Chat endpoint.
+-        raise ValueError("Multi-modal content is only supported on "
+-                         "'openai-chat' endpoint_type.")
+-    test_input = RequestFuncInput(
+-        model=model_id,
+-        model_name=model_name,
+-        prompt=test_prompt,
+-        api_url=api_url,
+-        prompt_len=test_prompt_len,
+-        output_len=test_output_len,
+-        logprobs=logprobs,
+-        best_of=best_of,
+-        multi_modal_content=test_mm_content,
+-        ignore_eos=ignore_eos,
+-    )
+-
+-    test_output = await request_func(request_func_input=test_input)
+-    if not test_output.success:
+-        raise ValueError(
+-            "Initial test run failed - Please make sure benchmark arguments "
+-            f"are correctly specified. Error: {test_output.error}")
+-    else:
+-        print("Initial test run completed. Starting main benchmark run...")
+-
+-    if lora_modules:
+-        # For each input request, choose a LoRA module at random.
+-        lora_modules = iter(
+-            [random.choice(lora_modules) for _ in range(len(input_requests))])
+-
+-    if profile:
+-        print("Starting profiler...")
+-        profile_input = RequestFuncInput(model=model_id,
+-                                         model_name=model_name,
+-                                         prompt=test_prompt,
+-                                         api_url=base_url + "/start_profile",
+-                                         prompt_len=test_prompt_len,
+-                                         output_len=test_output_len,
+-                                         logprobs=logprobs,
+-                                         best_of=best_of,
+-                                         multi_modal_content=test_mm_content,
+-                                         ignore_eos=ignore_eos)
+-        profile_output = await request_func(request_func_input=profile_input)
+-        if profile_output.success:
+-            print("Profiler started")
+-
+-    if burstiness == 1.0:
+-        distribution = "Poisson process"
+-    else:
+-        distribution = "Gamma distribution"
+-
+-    print(f"Traffic request rate: {request_rate}")
+-    print(f"Burstiness factor: {burstiness} ({distribution})")
+-    print(f"Maximum request concurrency: {max_concurrency}")
+-
+-    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
+-
+-    # This can be used once the minimum Python version is 3.10 or higher,
+-    # and it will simplify the code in limited_request_func.
+-    #    semaphore = (asyncio.Semaphore(max_concurrency)
+-    #                 if max_concurrency else contextlib.nullcontext())
+-    semaphore = (asyncio.Semaphore(max_concurrency)
+-                 if max_concurrency else None)
+-
+-    async def limited_request_func(request_func_input, pbar):
+-        if semaphore is None:
+-            return await request_func(request_func_input=request_func_input,
+-                                      pbar=pbar)
+-        async with semaphore:
+-            return await request_func(request_func_input=request_func_input,
+-                                      pbar=pbar)
+-
+-    benchmark_start_time = time.perf_counter()
+-    tasks: list[asyncio.Task] = []
+-    async for request in get_request(input_requests, request_rate, burstiness):
+-        prompt, prompt_len, output_len, mm_content = request
+-        req_model_id, req_model_name = model_id, model_name
+-        if lora_modules:
+-            req_lora_module = next(lora_modules)
+-            req_model_id, req_model_name = req_lora_module, req_lora_module
+-
+-        request_func_input = RequestFuncInput(model=req_model_id,
+-                                              model_name=req_model_name,
+-                                              prompt=prompt,
+-                                              api_url=api_url,
+-                                              prompt_len=prompt_len,
+-                                              output_len=output_len,
+-                                              logprobs=logprobs,
+-                                              best_of=best_of,
+-                                              multi_modal_content=mm_content,
+-                                              ignore_eos=ignore_eos)
+-        tasks.append(
+-            asyncio.create_task(
+-                limited_request_func(request_func_input=request_func_input,
+-                                     pbar=pbar)))
+-    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+-
+-    if profile:
+-        print("Stopping profiler...")
+-        profile_input = RequestFuncInput(
+-            model=model_id,
+-            prompt=test_prompt,
+-            api_url=base_url + "/stop_profile",
+-            prompt_len=test_prompt_len,
+-            output_len=test_output_len,
+-            logprobs=logprobs,
+-            best_of=best_of,
+-        )
+-        profile_output = await request_func(request_func_input=profile_input)
+-        if profile_output.success:
+-            print("Profiler stopped")
+-
+-    if pbar is not None:
+-        pbar.close()
+-
+-    benchmark_duration = time.perf_counter() - benchmark_start_time
+-
+     metrics, actual_output_lens = calculate_metrics(
+         input_requests=input_requests,
+         outputs=outputs,
+@@ -427,6 +337,12 @@ async def benchmark(
+ 
+     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
+     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
++    if max_concurrency is not None:
++        print("{:<40} {:<10}".format("Maximum request concurrency:",
++                                     max_concurrency))
++    if request_rate != float('inf'):
++        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):",
++                                        request_rate))
+     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                     benchmark_duration))
+     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+@@ -448,7 +364,7 @@ async def benchmark(
+         "total_input_tokens": metrics.total_input,
+         "total_output_tokens": metrics.total_output,
+         "request_throughput": metrics.request_throughput,
+-        "request_goodput:":
++        "request_goodput":
+         metrics.request_goodput if goodput_config_dict else None,
+         "output_throughput": metrics.output_throughput,
+         "total_token_throughput": metrics.total_token_throughput,
+@@ -468,7 +384,7 @@ async def benchmark(
+         # E.g., "Time to First Token"
+         metric_header: str,
+     ):
+-        # This function prints and adds statistics of the specified
++        # This function prints and adds statistics of specified
+         # metric.
+         if metric_attribute_name not in selected_percentile_metrics:
+             return
+@@ -499,10 +415,138 @@ async def benchmark(
+     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+ 
+     print("=" * 50)
+-
+     return result
+ 
+ 
++async def benchmark(
++    request_func,
++    api_url: str,
++    model_id: str,
++    model_name: str,
++    input_requests: list[tuple[str, int, int]],
++    logprobs: Optional[int],
++    best_of: int,
++    request_rate: float,
++    burstiness: float,
++    sampling_params: Optional[dict],
++    disable_tqdm: bool,
++    ignore_eos: bool,
++    max_concurrency: Optional[int],
++    lora_modules: Optional[list[str]],
++    bench_start_barrier: Optional[asyncio.Barrier] = None,
++    process_id: int = -1,
++    tqdm_bar_q: Optional[Queue] = None,
++):
++    if lora_modules:
++        # For each input request, choose a LoRA module at random.
++        lora_modules = iter(
++            [random.choice(lora_modules) for _ in range(len(input_requests))])
++
++    if burstiness == 1.0:
++        distribution = "Poisson process"
++    else:
++        distribution = "Gamma distribution"
++
++    print(f"benchmark process <{process_id}>: Traffic request rate: {request_rate}")
++    print(f"benchmark process <{process_id}>: Burstiness factor: {burstiness} ({distribution})")
++    print(f"benchmark process <{process_id}>: Maximum request concurrency: {max_concurrency}")
++
++    pbar = None
++    # This can be used once the minimum Python version is 3.10 or higher,
++    # and it will simplify the code in limited_request_func.
++    #    semaphore = (asyncio.Semaphore(max_concurrency)
++    #                 if max_concurrency else contextlib.nullcontext())
++    semaphore = (asyncio.Semaphore(max_concurrency)
++                 if max_concurrency else None)
++
++    async def limited_request_func(request_func_input, pbar, process_id, tqdm_bar_q, disable_tqdm):
++        if semaphore is None:
++            res = await request_func(request_func_input=request_func_input,
++                                      pbar=pbar)
++        else:
++            async with semaphore:
++                res = await request_func(request_func_input=request_func_input,
++                                          pbar=pbar)
++        if not disable_tqdm:
++            tqdm_bar_q.put((process_id, 1))
++        return res
++
++    benchmark_start_time = time.perf_counter()
++    tasks: list[asyncio.Task] = []
++    bench_start_barrier.wait()
++    async for request in get_request(input_requests, request_rate, burstiness):
++        prompt, prompt_len, output_len, mm_content = request
++        req_model_id, req_model_name = model_id, model_name
++        if lora_modules:
++            req_lora_module = next(lora_modules)
++            req_model_id, req_model_name = req_lora_module, req_lora_module
++
++        request_func_input = RequestFuncInput(model=req_model_id,
++                                              model_name=req_model_name,
++                                              prompt=prompt,
++                                              api_url=api_url,
++                                              prompt_len=prompt_len,
++                                              output_len=output_len,
++                                              logprobs=logprobs,
++                                              best_of=best_of,
++                                              multi_modal_content=mm_content,
++                                              ignore_eos=ignore_eos,
++                                              extra_body=sampling_params)
++        tasks.append(
++            asyncio.create_task(
++                limited_request_func(request_func_input=request_func_input,
++                                     pbar=pbar,
++                                     process_id=process_id,
++                                     tqdm_bar_q=tqdm_bar_q,
++                                     disable_tqdm=disable_tqdm)))
++    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
++
++    if not disable_tqdm:
++        tqdm_bar_q.put((process_id, None))
++    benchmark_end_time = time.perf_counter()
++    return outputs, benchmark_start_time, benchmark_end_time
++
++
++def worker_process(
++    request_func,
++    args: argparse.Namespace,
++    api_url: str,
++    sub_requests,
++    sub_max_concurrency,
++    sub_request_rate,
++    benchmark_outputs,
++    sampling_params,
++    bench_start_barrier,
++    process_id,
++    tqdm_bar_q
++):
++    loop = asyncio.new_event_loop()
++    asyncio.set_event_loop(loop)
++
++    sub_result = loop.run_until_complete(
++        benchmark(
++            request_func=request_func,
++            api_url=api_url,
++            model_id=args.model,
++            model_name=args.served_model_name,
++            input_requests=sub_requests,
++            logprobs=args.logprobs,
++            best_of=args.best_of,
++            request_rate=sub_request_rate,
++            burstiness=args.burstiness,
++            sampling_params=sampling_params,
++            disable_tqdm=args.disable_tqdm,
++            ignore_eos=args.ignore_eos,
++            max_concurrency=sub_max_concurrency,
++            lora_modules=args.lora_modules,
++            bench_start_barrier=bench_start_barrier,
++            process_id=process_id,
++            tqdm_bar_q=tqdm_bar_q,
++        )
++    )
++    benchmark_outputs[process_id] = sub_result
++
++
+ def check_goodput_args(args):
+     # Check and parse goodput arguments
+     goodput_config_dict = {}
+@@ -596,9 +640,21 @@ def add_cli_args(parser: argparse.ArgumentParser):
+         "--dataset-name",
+         type=str,
+         default="random",
+-        choices=["random"],
++        choices=["random", "fixed"],
+         help="Name of the dataset to benchmark on.",
+     )
++    parser.add_argument(
++        "--dataset-path",
++        type=str,
++        default=None,
++        help="When --dataset-name is specified as fixed, --dataset-path must be specified.",
++    )
++    parser.add_argument(
++        "--fixed-output-len",
++        type=int,
++        default=None,
++        help="When --dataset-name is specified as fixed, you can specify --fixed-output-len to make every request have same max_tokens parameter.",
++    )
+     parser.add_argument(
+         "--max-concurrency",
+         type=int,
+@@ -802,6 +858,52 @@ def add_cli_args(parser: argparse.ArgumentParser):
+                         help="A subset of LoRA module names passed in when "
+                         "launching the server. For each request, the "
+                         "script chooses a LoRA module at random.")
++    parser.add_argument(
++        "--num-processes",
++        type=int,
++        default=1,
++        help="Number of processes to send requests.",
++    )
++    parser.add_argument(
++        "--range-metrics",
++        type=str,
++        default="0%,100%",
++        help="Calculate metrics for requests within a specified time range. The "
++        "parameter format is \"start%,end%\", where start and end must be integers <= 100 "
++        "with start < end. This indicates that only requests initiated between the first start% "
++        "and first end% of the benchmark will be considered for metric calculation. "
++        "The default values for start and end are 0 and 100, meaning that by default, "
++        "metrics are calculated for all requests throughout the entire benchmark duration."
++    )
++    parser.add_argument(
++        "--top-p",
++        type=float,
++        default=None,
++        help="Top-p sampling parameter. Only has effect on "
++        "openai-compatible backends.",
++    )
++    parser.add_argument(
++        "--top-k",
++        type=int,
++        default=None,
++        help="Top-k sampling parameter. Only has effect on "
++        "openai-compatible backends.",
++    )
++    parser.add_argument(
++        "--min-p",
++        type=float,
++        default=None,
++        help="Min-p sampling parameter. Only has effect on "
++        "openai-compatible backends.",
++    )
++    parser.add_argument(
++        "--temperature",
++        type=float,
++        default=None,
++        help="Temperature sampling parameter. Only has effect on "
++        "openai-compatible backends. If not specified, default to greedy "
++        "decoding (i.e. temperature==0.0).",
++    )
+ 
+ 
+ def main(args: argparse.Namespace):
+@@ -841,40 +943,223 @@ def main(args: argparse.Namespace):
+             range_ratio=args.random_range_ratio,
+             tokenizer=tokenizer,
+         )
+-
++    elif args.dataset_name == "fixed":
++        input_requests = sample_fixed_requests(
++            dataset_path=args.dataset_path,
++            num_prompts=args.num_prompts,
++            fixed_output_len=args.fixed_output_len,
++            tokenizer=tokenizer,
++        )
+     else:
+         raise ValueError(f"Unknown dataset: {args.dataset_name}")
+ 
+     goodput_config_dict = check_goodput_args(args)
+ 
++    # Validate range-metrics arguments
++    start_range, end_range = 0, 0
++    pattern = r'^(\d+)%,(\d+)%$'
++    match = re.match(pattern, args.range_metrics)
++    if not match:
++        raise ValueError(
++            "Invalid --range-metrics format. Expected format: 'start%,end%', start and end must be integers <= 100 "
++            "with start < end. This indicates that only requests initiated between the first start% "
++            "and first end% of the benchmark will be considered for metric calculation. "
++            "The default values for start and end are 0 and 100, meaning that by default, "
++            "metrics are calculated for all requests throughout the entire benchmark duration.")
++    else:
++        start_range = int(match.group(1))
++        end_range = int(match.group(2))
++        if not (0 <= start_range and start_range <= 100 and 0 <= end_range and end_range <= 100 and start_range < end_range):
++            raise ValueError(
++                "Invalid --range-metrics format. Expected format: 'start%,end%', start and end must be integers <= 100 "
++                "with start < end. This indicates that only requests initiated between the first start% "
++                "and first end% of the benchmark will be considered for metric calculation. "
++                "The default values for start and end are 0 and 100, meaning that by default, "
++                "metrics are calculated for all requests throughout the entire benchmark duration.")
++
++    # Collect the sampling parameters.
++    sampling_params = {
++        k: v
++        for k, v in {
++            "top_p": args.top_p,
++            "top_k": args.top_k,
++            "min_p": args.min_p,
++            "temperature": args.temperature,
++        }.items() if v is not None
++    }
++    if "temperature" not in sampling_params:
++        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
++
+     # Avoid GC processing "static" data - reduce pause times.
+     gc.collect()
+     gc.freeze()
+ 
+-    benchmark_result = asyncio.run(
+-        benchmark(
+-            endpoint_type=endpoint_type,
+-            api_url=api_url,
+-            base_url=base_url,
+-            model_id=model_id,
+-            model_name=model_name,
+-            tokenizer=tokenizer,
+-            input_requests=input_requests,
++    if endpoint_type in ASYNC_REQUEST_FUNCS:
++        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
++    else:
++        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
++
++    # Initial test run
++    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
++        input_requests[0])
++    if endpoint_type != "openai-chat" and test_mm_content is not None:
++        # multi-modal benchmark is only available on OpenAI Chat endpoint.
++        raise ValueError("Multi-modal content is only supported on "
++                            "'openai-chat' endpoint_type.")
++    test_input = RequestFuncInput(
++        model=model_id,
++        model_name=model_name,
++        prompt=test_prompt,
++        api_url=api_url,
++        prompt_len=test_prompt_len,
++        output_len=test_output_len,
++        logprobs=args.logprobs,
++        best_of=args.best_of,
++        multi_modal_content=test_mm_content,
++        ignore_eos=args.ignore_eos,
++        extra_body=sampling_params
++    )
++
++    test_output = asyncio.run(request_func(request_func_input=test_input))
++    if not test_output.success:
++        raise ValueError(
++            "Initial test run failed - Please make sure benchmark arguments "
++            f"are correctly specified. Error: {test_output.error}")
++    else:
++        print("Initial test run completed. Starting main benchmark run...")
++
++    if args.profile:
++        print("Starting profiler...")
++        profile_input = RequestFuncInput(model=model_id,
++                                         model_name=model_name,
++                                         prompt=test_prompt,
++                                         api_url=base_url + "/start_profile",
++                                         prompt_len=test_prompt_len,
++                                         output_len=test_output_len,
++                                         logprobs=args.logprobs,
++                                         best_of=args.best_of,
++                                         multi_modal_content=test_mm_content,
++                                         ignore_eos=args.ignore_eos,
++                                         extra_body=sampling_params)
++        profile_output = asyncio.run(request_func(request_func_input=profile_input))
++        if profile_output.success:
++            print("Profiler started")
++
++    print(f"Starting multi-process benchmark with {args.num_processes} processes.")
++    # Allocate the input_requests, max_concurrency, and request_rate that each benchmark process should have.
++    chunk_size = len(input_requests) // args.num_processes
++    sub_input_requests_list = [
++        input_requests[i*chunk_size : (i+1)*chunk_size]
++        for i in range(args.num_processes)
++    ]
++    if len(input_requests) % args.num_processes != 0:
++        sub_input_requests_list[-1].extend(input_requests[args.num_processes * chunk_size:])
++
++    if args.max_concurrency is None:
++        sub_max_concurrency_list = [None] * args.num_processes
++    else:
++        chunk_size = args.max_concurrency // args.num_processes
++        sub_max_concurrency_list = [chunk_size] * (args.num_processes - 1)
++        sub_max_concurrency_list.append(args.max_concurrency - chunk_size * (args.num_processes - 1))
++
++    if args.request_rate == float("inf"):
++        sub_request_rate_list = [float("inf")] * args.num_processes
++    else:
++        sub_request_rate_list = []
++        for x in sub_input_requests_list:
++            sub_request_rate_list.append(args.request_rate * len(x) / len(input_requests))
++
++    manager = Manager()
++    tqdm_bar_q = Queue()
++    bench_start_barrier = manager.Barrier(args.num_processes + 1)
++    benchmark_outputs = manager.dict()
++    processes = []
++
++    for i in range(args.num_processes):
++        p = multiprocessing.Process(
++            target=worker_process,
++            args=(request_func, args, api_url, sub_input_requests_list[i], sub_max_concurrency_list[i], sub_request_rate_list[i], benchmark_outputs, sampling_params, bench_start_barrier, i, tqdm_bar_q)
++        )
++        processes.append(p)
++        p.start()
++
++    # Create progress bars for each process
++    bench_start_barrier.wait()
++    finished_tasks = 0
++    progress_bars = []
++    if not args.disable_tqdm:
++        for i in range(args.num_processes):
++            bar = tqdm(
++                total=len(sub_input_requests_list[i]),
++                desc=f"benchmark process <{i}>",
++                position=i,
++                leave=True,
++                delay=1
++            )
++            progress_bars.append(bar)
++        while finished_tasks < args.num_processes:
++            if not tqdm_bar_q.empty():
++                process_id, delta = tqdm_bar_q.get()
++                if delta is None:
++                    finished_tasks += 1
++                    progress_bars[process_id].close()
++                else:
++                    progress_bars[process_id].update(delta)
++
++    for i, p in enumerate(processes):
++        p.join()
++
++    all_outputs = []
++    benchmark_start_time_list = []
++    benchmark_end_time_list = []
++    for i in range(args.num_processes):
++        res = benchmark_outputs[i]
++        all_outputs.extend(res[0])
++        benchmark_start_time_list.append(res[1])
++        benchmark_end_time_list.append(res[2])
++
++    benchmark_duration = max(benchmark_end_time_list) - min(benchmark_start_time_list)
++    benchmark_clip_start_time = (start_range / 100) * benchmark_duration + min(benchmark_start_time_list)
++    benchmark_clip_end_time = (end_range / 100) * benchmark_duration + min(benchmark_start_time_list)
++    benchmark_duration = benchmark_clip_end_time - benchmark_clip_start_time
++    tmp_all_outputs = []
++    tmp_input_request_idxs = []
++    tmp_input_requests = []
++    for idx, output in enumerate(all_outputs):
++        if output.start_time >= benchmark_clip_start_time and output.start_time <= benchmark_clip_end_time:
++            tmp_all_outputs.append(output)
++            tmp_input_request_idxs.append(idx)
++    for tmp_input_request_idx in tmp_input_request_idxs:
++        tmp_input_requests.append(input_requests[tmp_input_request_idx])
++    all_outputs = tmp_all_outputs
++    input_requests = tmp_input_requests
++
++    benchmark_result = process_benchmark_results(
++        outputs=all_outputs,
++        input_requests=input_requests,
++        tokenizer=tokenizer,
++        benchmark_duration=benchmark_duration,
++        request_rate=args.request_rate,
++        selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
++        selected_percentile_metrics=args.percentile_metrics.split(","),
++        goodput_config_dict=goodput_config_dict,
++        max_concurrency=args.max_concurrency,
++    )
++
++    if args.profile:
++        print("Stopping profiler...")
++        profile_input = RequestFuncInput(
++            model=model_id,
++            prompt=test_prompt,
++            api_url=base_url + "/stop_profile",
++            prompt_len=test_prompt_len,
++            output_len=test_output_len,
+             logprobs=args.logprobs,
+             best_of=args.best_of,
+-            request_rate=args.request_rate,
+-            burstiness=args.burstiness,
+-            disable_tqdm=args.disable_tqdm,
+-            profile=args.profile,
+-            selected_percentile_metrics=args.percentile_metrics.split(","),
+-            selected_percentiles=[
+-                float(p) for p in args.metric_percentiles.split(",")
+-            ],
+-            ignore_eos=args.ignore_eos,
+-            goodput_config_dict=goodput_config_dict,
+-            max_concurrency=args.max_concurrency,
+-            lora_modules=args.lora_modules,
+-        ))
++        )
++        profile_output = asyncio.run(request_func(request_func_input=profile_input))
++        if profile_output.success:
++            print("Profiler stopped")
+ 
+     # Save config and results to json
+     if args.save_result:
+@@ -889,6 +1174,8 @@ def main(args: argparse.Namespace):
+         result_json["tokenizer_id"] = tokenizer_id
+         result_json["best_of"] = args.best_of
+         result_json["num_prompts"] = args.num_prompts
++        result_json["num_processes"] = args.num_processes
++        result_json["range_metrics"] = args.range_metrics
+ 
+         # Metadata
+         if args.metadata:

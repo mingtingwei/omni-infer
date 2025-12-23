@@ -53,3 +53,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/patch_support_prefilled_token_skip_tok
 git apply --whitespace=nowarn $PATCH_ROOT/distributed_executor_backend_unconstrained.patch
 git apply --whitespace=nowarn $PATCH_ROOT/adapt_deepseek_v32_tokenizer.patch
 git apply --whitespace=nowarn $PATCH_ROOT/think_compression.patch
+git apply --whitespace=nowarn $PATCH_ROOT/vllm_bench_serve_v090.patch
