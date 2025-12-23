@@ -1,4 +1,4 @@
-2,31all:
+all:
   children:
     C:
       hosts:
