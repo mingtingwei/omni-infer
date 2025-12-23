@@ -100,6 +100,7 @@ class NpuHybridScheduler(Scheduler):
                          include_finished_set, log_stats)
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
+        self.speculative_config = vllm_config.speculative_config
 
         if self.vllm_config.kv_transfer_config is not None and \
             self.vllm_config.kv_transfer_config.is_kv_consumer:
@@ -254,7 +255,10 @@ class NpuHybridScheduler(Scheduler):
                     num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
-                assert num_new_tokens == 1
+                if not self.speculative_config:
+                    assert num_new_tokens == 1
+                else:
+                    assert num_new_tokens == self.speculative_config.num_speculative_tokens + 1
 
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
