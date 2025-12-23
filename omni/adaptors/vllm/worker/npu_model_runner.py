@@ -58,6 +58,8 @@ from omni.adaptors.vllm.platform import NPUPlatform
 from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
 from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.accelerators.reasoning_compression.apply import init_reasoner_compression_configs
+from omni.accelerators.reasoning_compression.config import ThinkCompressDict
 
 import json
 profiling_is_set = os.getenv("PROFILING_NAMELIST", None) is not None
@@ -128,6 +130,7 @@ def mark_static_for_graph_default(
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        init_reasoner_compression_configs(vllm_config)
         super().__init__(vllm_config, device)
         self.cache_engine = None
         self.head_size = self.model_config.get_head_size()
@@ -1230,6 +1233,8 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get the valid generated tokens.
             sampled_token_ids = sampler_output.sampled_token_ids
+            if self.use_spec_decode:
+                sampled_token_ids = self.sampler.update_sampled_token_ids(sampled_token_ids, sampling_metadata)
             sampled_token_ids_list.append(sampled_token_ids)
             sampled_tokens = sampled_token_ids
 
@@ -1297,6 +1302,13 @@ class NPUModelRunner(GPUModelRunner):
                     logprobs=hidden_states.cpu(),
                     selected_token_ranks=positions[:hidden_states.shape[0]].cpu()
                 )
+    
+        # Support thinking compression by updating the current sampled token ids and length status
+        if ThinkCompressDict.reasoner_early_think_stopping_enabled == 1:
+            for index, cur_sampled_token_ids in enumerate(cached_sampled_token_ids):
+                sampling_metadata.seq_data[index]._output_token_ids.extend(cur_sampled_token_ids)
+                sampling_metadata.seq_data[index].cur_seq_length += len(cur_sampled_token_ids)
+                
 
         output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

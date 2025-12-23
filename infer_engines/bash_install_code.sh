@@ -52,3 +52,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_validation_error.patch
 git apply --whitespace=nowarn $PATCH_ROOT/patch_support_prefilled_token_skip_tokenize_completion.patch
 git apply --whitespace=nowarn $PATCH_ROOT/distributed_executor_backend_unconstrained.patch
 git apply --whitespace=nowarn $PATCH_ROOT/adapt_deepseek_v32_tokenizer.patch
+git apply --whitespace=nowarn $PATCH_ROOT/think_compression.patch
