@@ -1,0 +1,40 @@
+diff --git a/vllm/v1/structured_output/backend_xgrammar.py b/vllm/v1/structured_output/backend_xgrammar.py
+index f257022..25eb0a6 100644
+--- a/vllm/v1/structured_output/backend_xgrammar.py
++++ b/vllm/v1/structured_output/backend_xgrammar.py
+@@ -19,6 +19,7 @@ from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
+ from vllm.v1.structured_output.utils import (choice_as_grammar,
+                                              convert_lark_to_ebnf,
+                                              grammar_is_likely_lark)
++from omni.adaptors.vllm.tokenizer.deepseekv32 import DeepseekV32Tokenizer
+ 
+ if TYPE_CHECKING:
+     import xgrammar as xgr
+@@ -68,6 +69,25 @@ class XgrammarBackend(StructuredOutputBackend):
+                 stop_token_ids=stop_token_ids,
+                 add_prefix_space=True,
+             )
++        elif isinstance(self.tokenizer, DeepseekV32Tokenizer):
++            vocab_dict = self.tokenizer.get_vocab()
++            tokenizer_vocab_size = max(len(vocab_dict), self.tokenizer.max_token_id + 1)
++            vocab_size = self.vocab_size or tokenizer_vocab_size
++            # maintain tokenizer's indexing
++            encoded_vocab = [""] * vocab_size
++            for token, idx in vocab_dict.items():
++                if idx < vocab_size:
++                    encoded_vocab[idx] = token
++            stop_token_ids = [self.tokenizer.eos_token_id]
++            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()
++            metadata = xgr.TokenizerInfo._detect_metadata_from_hf(backend_str)
++            tokenizer_info = xgr.TokenizerInfo(
++                encoded_vocab=encoded_vocab,
++                vocab_type=metadata["vocab_type"],
++                vocab_size=vocab_size,
++                stop_token_ids=stop_token_ids,
++                add_prefix_space=metadata["add_prefix_space"],
++            )
+         else:
+             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+                 self.tokenizer,
+-- 
+

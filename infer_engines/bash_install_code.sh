@@ -50,3 +50,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/remove_hard_limit_check_for_max_tokens
 git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_validation_error.patch
 git apply --whitespace=nowarn $PATCH_ROOT/detokenizer.patch
 git apply --whitespace=nowarn $PATCH_ROOT/adapt_deepseek_v32_tokenizer.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_deepseekv32_gd.patch
