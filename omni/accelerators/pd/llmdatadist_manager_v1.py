@@ -326,6 +326,13 @@ class LLMDataDistManager:
             self.registered_link_infos.pop((host_cluster_id, prefill_dp_rank, d_rank), None)
         logger.info(f"rank:{self.rank} unlinked with : {remote_host_ip}, {prompt_cluster_id_list=}")
 
+    def unregister_link(self):
+        if self.data_dist_config.is_prefill:
+            return
+        for host_cluster_id, dp_rank, d_rank in list(self.datadist_manager.registered_link_infos.keys()):
+            logger.info(f"{d_rank=}, unlink {host_cluster_id=}")
+            self.close_link(host_cluster_id, dp_rank, d_rank)
+
     async def _pull_blocks(self, src_cache_key, dst_cache, src_blocks, dst_blocks):
         """Pull kv from remote cache to local cache; return False on failure."""
         pull_sync = self.data_dist_engine.cache_manager.pull_blocks
@@ -521,6 +528,12 @@ class LLMDataDistManager:
                 cur_pp_stage_kv_caches.append(cache)
             self.registered_kv_caches.append(cur_pp_stage_kv_caches)
             cnt_layer_num += cur_pp_stage_layer_num
+
+    def unregister_memory(self):
+        for kv_cache in self.registered_kv_caches:
+            logger.info(f"unregister {kv_cache=}")
+            self.data_dist_engine.cache_manager.unregister_cache(kv_cache.cache_id)
+        self.registered_kv_caches = []
 
     def _run_coro_sync(self, coro_or_callable, timeout: float | None = None):
         # Normalize to coroutine or synchronous result

@@ -1637,6 +1637,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_caches)
 
         if has_kv_transfer_group():
+            self.kv_caches_dict = kv_caches
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def initialize_omni_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -1679,6 +1680,18 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.omni_cache = omni_cache
+
+    def unregister_kv_caches(self):
+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "AscendHcclConnectorV1":
+            if has_kv_transfer_group():
+                logger.info(f"unregister_kv_caches")
+                get_kv_transfer_group().unregister_kv_caches()
+
+    def reregister_kv_caches(self):
+        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "AscendHcclConnectorV1":
+            if has_kv_transfer_group():
+                logger.info(f"reregister_kv_caches")
+                get_kv_transfer_group().register_kv_caches(self.kv_caches_dict)
 
     def capture_model(self) -> None:
         if self.enable_torchair_graph_mode:

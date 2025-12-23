@@ -164,6 +164,9 @@ class LLMDataDistConnector(KVConnectorBase_V1):
             raise RuntimeError("self.connector_worker cannot be None")
         return self.connector_worker.register_kv_caches(kv_caches)
 
+    def unregister_kv_caches(self):
+        logger.info("not support")
+
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""

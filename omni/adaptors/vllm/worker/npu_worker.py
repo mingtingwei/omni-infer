@@ -131,10 +131,19 @@ class NPUWorker(WorkerBase):
             logger.error("Sleep mode is only supported on v0")
             return
 
+        logger.info(f"{level=}")
         from omni.adaptors.vllm.npu_mem_pool import NpuMemAllocator
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        if level == 2:
+            self.model_runner.unregister_kv_caches()
+
         allocator = NpuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        tags = (
+            ("weights",) if level == 1 else
+            ("weights", "kv_cache",) if level == 2 else
+            tuple()
+        )
+        allocator.sleep(offload_tags= tags)
         free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -149,9 +158,13 @@ class NPUWorker(WorkerBase):
             logger.error("Sleep mode is only supported on v0")
             return
 
+        logger.info(f"{tags=}")
         from omni.adaptors.vllm.npu_mem_pool import NpuMemAllocator
         allocator = NpuMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+        if tags is not None and "kv_cache" in tags:
+            logger.info(f"re-register kv caches now")
+            self.model_runner.reregister_kv_caches()
 
 
     def init_device(self):

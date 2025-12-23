@@ -199,6 +199,11 @@ class LLMDataDistConnector(KVConnectorBase_V1):
             raise RuntimeError("self.connector_worker cannot be None")
         return self.connector_worker.register_kv_caches(kv_caches)
 
+    def unregister_kv_caches(self):
+        if self.connector_worker is None:
+            raise RuntimeError("self.connector_worker cannot be None")
+        return self.connector_worker.unregister_kv_caches()
+
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -329,6 +334,10 @@ class PrefillConnectorWorker:
         self.datadist_manager.register_memory(kv_caches)
         if not FLAG_ENABLE_DYNAMIC_LLMDATADIST:
             self.datadist_manager.register_link()
+
+    def unregister_kv_caches(self):
+        self.datadist_manager.unregister_link()
+        self.datadist_manager.unregister_memory()
 
     def start_load_kv(self, metadata: DatadistConnectorMetadataPrefill):
         pass
@@ -524,6 +533,7 @@ class DecodeConnectorWorker:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.tp_rank = get_tensor_model_parallel_rank()
         additional_config = vllm_config.additional_config
+        self.is_threads_created = False
         if additional_config:
             self.async_pull_kv = additional_config.get("async_pull_kv", False)
             self.multi_thread_pull_kv = additional_config.get("multi_thread_pull_kv", False)
@@ -657,8 +667,9 @@ class DecodeConnectorWorker:
             self.datadist_manager.register_link()
         # put multi-thread_pull_kv and multi_rank_pull_kv related registered_link_infos into queues
         # TODO: currently only support multi-thread_pull_kv and multi_rank_pull_kv for old datadist api
-        if self.multi_rank_pull_kv or self.multi_thread_pull_kv and not FLAG_ENABLE_DYNAMIC_LLMDATADIST:
+        if (self.multi_rank_pull_kv or self.multi_thread_pull_kv) and not FLAG_ENABLE_DYNAMIC_LLMDATADIST and not self.is_threads_created:
             # In multi_rank_pull_kv mode, we create a thread for each P rank's cluster_id
+            self.is_threads_created = True
             logger.info(f" ***** registered_link_infos: {self.datadist_manager.registered_link_infos}")
             for (cluster_id_start, prefill_dp_rank, d_rank), cluster_ids in self.datadist_manager.registered_link_infos.items():
                 if d_rank != self.datadist_manager.rank:
@@ -684,6 +695,10 @@ class DecodeConnectorWorker:
             self.executor = ThreadPoolExecutor(max_workers=max_concurrents)
 
         logger.debug("Finish register_kv_caches.")
+
+    def unregister_kv_caches(self):
+        self.datadist_manager.unregister_link()
+        self.datadist_manager.unregister_memory()
 
     # Now go asynchronous pull_kv
     def start_load_kv(self, metadata: DatadistConnectorMetadata):

@@ -251,6 +251,12 @@ class LLMDataDistManager:
             cnt_layer_num += cur_pp_stage_layer_num
 
 
+    def unregister_memory(self):
+        for kv_cache in self.registered_kv_caches:
+            logger.info(f"unregister {kv_cache=}")
+            self.data_dist_engine.cache_manager.unregister_cache(kv_cache.cache_id)
+        self.registered_kv_caches = []
+
     def _pull_blocks(self, src_cache_key, dst_cache, src_blocks, dst_blocks):
         for i in range(KV_CACHE_RETRY_TIMES):
             try:
@@ -430,6 +436,11 @@ class LLMDataDistManager:
             self.rank_link_info_map[comm_name] = RankLinkInfo(comm_name, comm_id, cluster_rank_info)
             return True
         return False
+
+    def unregister_link(self):
+        for (comm_name, comm_id, cluster_rank_info) in self.rank_link_info_map.values():
+            logger.info(f"{self.rank=}, unlink {comm_id=}")
+            self.data_dist_engine.unlink(comm_id)
 
     def check_register_status(self):
         status = {comm_name: False for comm_name in self.rank_link_info_map.keys()}
