@@ -154,6 +154,10 @@ class NPUModelRunner(GPUModelRunner):
             self.combine_block = 1
             self.use_process_before_sample = False
         self.curr_step = 0
+        if self.total_step > 1:
+            self.prepare_inputs_event = torch.Event()
+        else:
+            self.prepare_inputs_event = None
         num_tokens_per_reqs_decode = 1 if not self.use_spec_decode else (1 + self.speculative_config.num_speculative_tokens)
         self.num_tokens_per_reqs_decode = num_tokens_per_reqs_decode
         self.decode_max_num_tokens = self.max_num_reqs * self.num_tokens_per_reqs_decode
@@ -1115,6 +1119,8 @@ class NPUModelRunner(GPUModelRunner):
                     logger.warning("==== omni_cache is None, cannot sync ascend_cl_stream ====")
             hidden_states, raw_hidden_states, input_ids, temp_finished_sending, temp_finished_recving = self._execute_model(scheduler_output,
                                                 attn_metadata, graph_pad_size, sample_indices, positions, intermediate_tensors)
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.synchronize()
             if temp_finished_sending is not None:
                 self.finished_sending.update(temp_finished_sending)
             if temp_finished_recving is not None:
@@ -1237,6 +1243,8 @@ class NPUModelRunner(GPUModelRunner):
                 sampled_token_ids = self.sampler.update_sampled_token_ids(sampled_token_ids, sampling_metadata)
             sampled_token_ids_list.append(sampled_token_ids)
             sampled_tokens = sampled_token_ids
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.record()
 
             # Clear KVConnector state after all KVs are generated.
             if has_kv_transfer_group():
@@ -1252,6 +1260,8 @@ class NPUModelRunner(GPUModelRunner):
             cost_device_output += start_8 - start_7
 
         start_9 = time.time()
+        if self.prepare_inputs_event is not None:
+            self.prepare_inputs_event.wait()
 
         spec_token_ids = None if spec_tokens_tensor is None else self.rejection_sampler.parse_output(
             spec_tokens_tensor,
