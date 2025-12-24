@@ -257,12 +257,19 @@ class DeepseekMoE(nn.Module):
                                      quant_config=None,
                                      params_dtype=params_dtype,
                                      prefix=f"{prefix}.gate")
+        
+        self.e_score_correction_bias = None
         if getattr(config, "moe_router_enable_expert_bias", False):
             self.gate.e_score_correction_bias = None
             self.gate.expert_bias = nn.Parameter(
                 torch.empty(self.n_routed_experts, dtype=torch.float), requires_grad=False)
         elif getattr(config, "topk_method", "topk") == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(self.n_routed_experts, dtype=torch.float), requires_grad=False)
+        # Adapt for Pangu72B
+        elif getattr(config, "router_enable_expert_bias", False):
+            self.gate.e_score_correction_bias = None
+            self.e_score_correction_bias = nn.Parameter(
                 torch.empty(self.n_routed_experts, dtype=torch.float), requires_grad=False)
         else:
             self.gate.e_score_correction_bias = None
@@ -332,6 +339,14 @@ class DeepseekMoE(nn.Module):
                                             num_redundancy_shared_expert_rank=self.redundancy_shared_expert_num)
                     self.moe_layer_idx = OmniPlanner.get_deepseek_v3_moe_layer_idx(moe_prefix, first_k_dense_replace=self.first_k_dense_replace)
                     self.expert_mapping = self.planner.expert_mapping_on_current_layer(self.moe_layer_idx)
+
+                if self.gate.e_score_correction_bias is not None:
+                    e_score_correction_bias = self.gate.e_score_correction_bias
+                elif self.e_score_correction_bias is not None:
+                    e_score_correction_bias = self.e_score_correction_bias
+                else:
+                    e_score_correction_bias = self.gate.expert_bias
+                
                 self.experts = FusedMoE(
                     num_experts=self.n_routed_experts,
                     top_k=self.top_k,
@@ -345,7 +360,7 @@ class DeepseekMoE(nn.Module):
                     topk_group=self.topk_group,
                     prefix=moe_prefix,
                     scoring_func=self.scoring_func,
-                    e_score_correction_bias=self.gate.e_score_correction_bias if self.gate.e_score_correction_bias is not None else self.gate.expert_bias,
+                    e_score_correction_bias=e_score_correction_bias,
                     planner=self.planner,
                     moe_layer_idx=self.moe_layer_idx,
                     expert_mapping=self.expert_mapping,
@@ -457,12 +472,21 @@ class DeepseekMoE(nn.Module):
             global_pertoken_scale = None
 
         router_logits, _ = self.gate.forward(hidden_states.float())
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(hidden_states, router_logits,
-                                                                    self.experts.top_k, self.experts.use_grouped_topk, self.experts.renormalize,
-                                                                    self.experts.topk_group, self.experts.num_expert_group, self.experts.custom_routing_function,
-                                                                    self.experts.scoring_func, self.experts.e_score_correction_bias, self.routed_scaling_factor,
-                                                                    layer=self.experts  # ENABLE_OMNI_PLANNER
-                                                                    )
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            hidden_states, 
+            router_logits,
+            self.experts.top_k, 
+            self.experts.use_grouped_topk, 
+            self.experts.renormalize,
+            self.experts.topk_group, 
+            self.experts.num_expert_group, 
+            self.experts.custom_routing_function,
+            self.experts.scoring_func,
+            self.experts.e_score_correction_bias, 
+            self.routed_scaling_factor,
+            layer=self.experts  # ENABLE_OMNI_PLANNER
+            )
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids)
 
         if self.experts_pruning:
@@ -540,16 +564,21 @@ class DeepseekMoE(nn.Module):
         # Here, we do a 2d-3d conversion and then convert back to 2d to trigger the fusion rule, fusing add rms and cast into AddRmsNormCast.
         hidden_states_3d = hidden_states.unsqueeze(1)
         hidden_states = hidden_states_3d.squeeze(1)
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(hidden_states, router_logits,
-                                                            self.experts.top_k, self.experts.use_grouped_topk,
-                                                            self.experts.renormalize,
-                                                            self.experts.topk_group, self.experts.num_expert_group,
-                                                            self.experts.custom_routing_function,
-                                                            self.experts.scoring_func,
-                                                            self.experts.e_score_correction_bias,
-                                                            self.routed_scaling_factor,
-                                                            layer=self.experts  # ENABLE_OMNI_PLANNER
-                                                            )
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            hidden_states, 
+            router_logits,
+            self.experts.top_k, 
+            self.experts.use_grouped_topk,
+            self.experts.renormalize,
+            self.experts.topk_group, 
+            self.experts.num_expert_group,
+            self.experts.custom_routing_function,
+            self.experts.scoring_func,
+            self.experts.e_score_correction_bias,
+            self.routed_scaling_factor,
+            layer=self.experts  # ENABLE_OMNI_PLANNER
+            )
         best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
         if not model_extra_config.operator_opt_config.decode_moe_dispatch_combine:

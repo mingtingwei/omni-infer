@@ -900,9 +900,10 @@ class PanguProMoEDecoderLayer(nn.Module):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        elif not enable_superkernel:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual, quant_symbol=self.quant_symbol)
+        else:
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -922,7 +923,9 @@ class PanguProMoEDecoderLayer(nn.Module):
                     torch_npu.npu_prefetch(self.mlp.gate_up_proj.weight, hidden_states, model_extra_config.operator_opt_config.dense_mlp_prefetch * 1024 * 1024)
 
             hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states, residual = self.pre_mlp_layernorm(hidden_states, residual)
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+            hidden_states = self.pre_mlp_layernorm(hidden_states)
             
             if self.is_moe == True:
                 # omni placement do not support super kernel
@@ -934,11 +937,8 @@ class PanguProMoEDecoderLayer(nn.Module):
                 hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata)
 
             hidden_states = self.post_mlp_layernorm(hidden_states)
-
-            if enable_superkernel and next_input_layernorm is not None:
-                hidden_states, residual = next_input_layernorm(
-                    hidden_states, residual, quant_symbol=self.quant_symbol
-                )
+            hidden_states = hidden_states + residual
+            residual = None
 
         return hidden_states, residual
 
@@ -1142,9 +1142,13 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
         if attn_metadata is None:
             logits = self.compute_lmhead(hidden_states[-1:, ...], None)
         else:
-            # when use ChunkedPrefill, selected_indices can cause GE graph recompilation, temporarily set to None
             if self.is_hybrid_chunked_prefill_graph_mode:
-                logits = self.compute_lmhead(hidden_states, None)
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[next(iter(attn_metadata))]
+                if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+                    logits = self.compute_lmhead(hidden_states, selected_indices)
+                else:
+                    logits = self.compute_lmhead(hidden_states, None)
             else:
                 logits = self.compute_lmhead(hidden_states, selected_indices)
 
