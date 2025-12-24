@@ -9,6 +9,9 @@ source "${TOOL_DIR}"/basic/basic_shell_tools.sh
 source "${TOOL_DIR}"/health/npu_checker.sh
 
 function stop_all_processes_and_check_npus() {
+    rm -rf $PREFILL_RANKTABLE_SAVE_PATH
+    rm -rf $DECODE_RANKTABLE_SAVE_PATH
+
     device_size="${LOCAL_DEVICE_SIZE:-0}"
 
     echo_with_time "Received SIGTERM, shutting down..."

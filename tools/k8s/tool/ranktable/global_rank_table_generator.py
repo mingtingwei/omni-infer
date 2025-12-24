@@ -36,7 +36,7 @@ def save_rank_table_to(rank_table):
     if not file_path:
         raise ValueError("Environment variable {} is not set".format(
             TRANS_GLOBAL_RANK_TABLE_FILE_PATH_ENV))
-    
+
     # 创建父目录
     parent_dir = os.path.dirname(file_path)
     if parent_dir:
