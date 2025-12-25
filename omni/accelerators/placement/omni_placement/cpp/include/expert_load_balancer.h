@@ -69,10 +69,10 @@ class ExpertLoadBalancer {
     // Constructor, initialize optimizer parameters
     ExpertLoadBalancer(int num_layers, int num_ranks, int num_experts_per_rank,
                        int num_redundant_per_rank, int expert_redundant_limit,
-                       int rank = 0, double input_ratio_threshold = 1.1,
+                       int rank = 0, int num_ranks_per_host = 16,
+                       double input_ratio_threshold = 1.1,
                        double improvement_threshold = 0.05,
-                       int num_ranks_per_host = 16,
-                       double high_low_ratio_threshold = 300.0);
+                       double high_low_ratio_threshold = 500.0);
     // Main optimization function - now returns optimized placement instead of
     // instructions
     std::vector<int>

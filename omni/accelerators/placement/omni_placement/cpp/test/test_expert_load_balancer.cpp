@@ -43,7 +43,8 @@ class ExpertLoadBalancerTest : public ::testing::Test {
         // Use a low threshold to trigger optimization easily
         ExpertLoadBalancer balancer(
             num_layers_, num_ranks_, num_experts_per_rank_,
-            num_redundant_per_rank_, expert_redundant_limit_, 0, 1.05);
+            num_redundant_per_rank_, expert_redundant_limit_, 0, num_ranks_,
+            1.05, 0.05, 500.0);
 
         std::cout << "Test: " << test_name << "\n";
 
@@ -125,7 +126,7 @@ class ExpertLoadBalancerTest : public ::testing::Test {
 
 // Test case: Constructor with valid parameters (updated for new API)
 TEST_F(ExpertLoadBalancerTest, Constructor_ValidParameters) {
-    ExpertLoadBalancer balancer(2, 4, 2, 1, 1, 0, 1.1, 0.05, 8, 300.0);
+    ExpertLoadBalancer balancer(2, 4, 2, 1, 1, 0, 8, 1.1, 0.05, 300.0);
     EXPECT_EQ(balancer.ut_num_layers(), 2);
     EXPECT_EQ(balancer.ut_num_ranks(), 4);
     EXPECT_EQ(balancer.ut_num_experts_per_rank(), 2);
@@ -145,9 +146,9 @@ TEST_F(ExpertLoadBalancerTest, Constructor_InvalidParameters) {
     EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, -1, 1, 0), std::runtime_error);
     EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, 1, -1, 0), std::runtime_error);
     // New checks from the new constructor
-    EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, 1, 1, 0, 1.1, 0.05, 0),
+    EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, 1, 1, 0, 8, 1.1, 0.05, 0),
                  std::runtime_error);
-    EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, 1, 1, 0, 1.1, 0.05, 8, 0.0),
+    EXPECT_THROW(ExpertLoadBalancer(2, 4, 2, 1, 1, 0, 8, 1.1, 0.05, 0.0),
                  std::runtime_error);
 }
 
@@ -241,8 +242,7 @@ TEST_F(ExpertLoadBalancerTest, Optimize_ImbalancedTriggersChange) {
 
     ExpertLoadBalancer balancer(
         num_layers_, num_ranks_, num_experts_per_rank_, num_redundant_per_rank_,
-        expert_redundant_limit_, 0, 1.1 /* low threshold */);
-
+        expert_redundant_limit_, 0, num_ranks_, 1.1, 0.05, 500.0);
     // Extract layer 0 for ratio calculation
     std::vector<int> initial_layer_placement_L0(
         placement.begin(),
@@ -488,9 +488,9 @@ TEST_F(ExpertLoadBalancerTest, CompareLoadRatioBeforeAndAfterCustom) {
 
     // Create ExpertLoadBalancer with a low threshold to ensure optimization
     // runs
-    ExpertLoadBalancer balancer(num_layers_, num_ranks_, num_experts_per_rank_,
-                                num_redundant_per_rank_,
-                                expert_redundant_limit_, 0, 1.1);
+    ExpertLoadBalancer balancer(
+        num_layers_, num_ranks_, num_experts_per_rank_, num_redundant_per_rank_,
+        expert_redundant_limit_, 0, num_ranks_, 1.1, 0.05, 500.0);
 
     // Compute initial placement ratio
     double initial_ratio =
@@ -588,9 +588,9 @@ class ExpertLoadBalancerPlacementActivationTest : public ::testing::Test {
 // Test case: Sequential placement and activations (Rewritten)
 TEST_F(ExpertLoadBalancerPlacementActivationTest,
        SequentialPlacementAndActivations) {
-    ExpertLoadBalancer balancer(num_layers_, num_ranks_, num_experts_per_rank_,
-                                num_redundant_per_rank_,
-                                expert_redundant_limit_, 0, 1.1);
+    ExpertLoadBalancer balancer(
+        num_layers_, num_ranks_, num_experts_per_rank_, num_redundant_per_rank_,
+        expert_redundant_limit_, 0, num_ranks_, 1.1, 0.05, 500.0);
 
     auto placement = CreateSequentialPlacement();
     auto activations = CreateActivations();

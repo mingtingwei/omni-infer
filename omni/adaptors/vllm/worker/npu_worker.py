@@ -252,8 +252,12 @@ class NPUWorker(WorkerBase):
         if not self.vllm_config.additional_config.get("enable_omni_placement", False):
             return
         else:            
-            from omni.accelerators.placement.omni_placement.utils import apply_omni_placement_attributes
-            apply_omni_placement_attributes(additional_config=self.vllm_config.additional_config)
+            if self.local_rank == 0:
+                logger.info("Enable omni placement for vLLM NPUWorker in local rank 0")
+                from omni.accelerators.placement.omni_placement.utils import apply_omni_placement_attributes
+                apply_omni_placement_attributes(additional_config=self.vllm_config.additional_config)
+            else:
+                return
 
     def page_size_bytes(self) -> int:
         # For MLA we only store a single latent vector

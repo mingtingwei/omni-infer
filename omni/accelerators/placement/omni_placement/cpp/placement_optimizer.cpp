@@ -49,9 +49,10 @@ PlacementOptimizer::PlacementOptimizer(PlacementMapping *placement_mapping,
         throw std::runtime_error("Invalid number of experts per rank");
     }
 
-    load_balancer_ = new ExpertLoadBalancer(
-        num_layers_, world_size_, num_experts_per_rank_,
-        num_redundant_per_rank_, expert_redundant_limit_, rank_);
+    load_balancer_ =
+        new ExpertLoadBalancer(num_layers_, world_size_, num_experts_per_rank_,
+                               num_redundant_per_rank_, expert_redundant_limit_,
+                               rank_, num_devices_per_host_);
 
     greedy_load_balancer_ = new GreedyExpertLoadBalancer(
         num_layers_, world_size_, num_experts_,

@@ -20,12 +20,12 @@ using namespace std;
 ExpertLoadBalancer::ExpertLoadBalancer(
     int num_layers, int num_ranks, int num_experts_per_rank,
     int num_redundant_per_rank, int expert_redundant_limit, int rank,
-    double input_ratio_threshold, double improvement_threshold,
-    int num_ranks_per_host, double high_low_ratio_threshold)
-    : num_layers_(num_layers), num_ranks_(num_ranks),
+    int num_ranks_per_host, double input_ratio_threshold,
+    double improvement_threshold, double high_low_ratio_threshold)
+    : rank_(rank), num_layers_(num_layers), num_ranks_(num_ranks),
       num_experts_per_rank_(num_experts_per_rank),
       num_redundant_per_rank_(num_redundant_per_rank),
-      expert_redundant_limit_(expert_redundant_limit), rank_(rank),
+      expert_redundant_limit_(expert_redundant_limit),
       num_ranks_per_host_(num_ranks_per_host),
       input_ratio_threshold_(input_ratio_threshold),
       improvement_threshold_(improvement_threshold),
@@ -37,7 +37,6 @@ ExpertLoadBalancer::ExpertLoadBalancer(
     }
 }
 
-// Get expert sets for each rank
 vector<set<int>>
 ExpertLoadBalancer::compute_rank_sets(const vector<int> &placement,
                                       int num_ranks, int max_slots_per_rank) {
@@ -619,8 +618,9 @@ vector<int> ExpertLoadBalancer::select_best_layer_placement(
         input_layer_placement, input_layer_activations, layer_idx, num_ranks,
         max_slots_per_rank, num_experts, 1);
 
-    if (high_low_ratio > high_low_ratio_threshold_) {
-        return input_layer_placement;
+    if (high_low_ratio > high_low_ratio_threshold_ && rank_ == 0) {
+        cerr << "Warning: High load imbalance detected in layer " << layer_idx
+             << " (max/min ratio: " << high_low_ratio << ")" << endl;
     }
 
     // Collect candidate placements and their ratios (excluding input_placement)

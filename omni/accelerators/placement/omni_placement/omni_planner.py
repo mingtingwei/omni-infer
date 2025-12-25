@@ -151,7 +151,7 @@ class OmniPlanner(metaclass=OmniPlannerMeta):
     
     def __str__(self):
         exclude_keys = ["config", "expert_mapping", "cluster_status", "npu_activation_count", "placement_manager", "selector",
-                        "max_activation_count","num_redundant_per_expert", "redundant_enable_per_layer", "cluster_activation"]
+                        "max_activation_count","num_redundant_per_expert", "redundant_enable_per_layer", "cluster_activation", "plan_experts"]
         title = "************** Omni-Placement Info ************** \n \t"
         attr_value = "\n \t".join("{}: {}".format(k, getattr(self,k)) for k in self.__dict__.keys() if k not in exclude_keys)
         return title+attr_value+"\n"+title
