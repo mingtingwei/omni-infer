@@ -399,14 +399,14 @@ index c73575b48..2f35619ca 100644
 -             truncate_prompt_tokens=truncate_prompt_tokens,
 -             add_special_tokens=add_special_tokens,
 -         )
-+        if self.enable_tokenizer_proc_pool and len(input_or_inputs) >= self.process_pool_threshold:
-+            (request_prompts_text, request_prompts_embeds
-+             ) = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
++        if self.enable_tokenizer_proc_pool and len(input_or_inputs) >= self.process_pool_threshold and getattr(request, 'prompt_embeds', None) is None:
++            request_prompts_text, request_prompts_embeds \
++              = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
 +                request,
 +                input_or_inputs,
 +                truncate_prompt_tokens=truncate_prompt_tokens,
 +                add_special_tokens=add_special_tokens,
-+            )
++            ), [] # request_prompts_embeds is []
 +        else:
 +            (request_prompts_text, request_prompts_embeds
 +             ) = await self._tokenize_prompt_input_or_inputs_async(
