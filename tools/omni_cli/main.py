@@ -1095,6 +1095,8 @@ def run_docker_containers(
         env = hv.get("env", {})
         log_path = env.get("LOG_PATH")
         model_path = env.get("MODEL_PATH")
+        speculative_config = hv.get("args", {}).get("extra-args", {}).get("speculative-config", '{}')
+        spec_model_path = json.loads(speculative_config).get("model", None)
         docker_image_id = hv.get("DOCKER_IMAGE_ID")
         container_name = hv.get("container_name", f"omni_container_{host}")
         # In configs/generate_ranktable.yml, the ranktable save path defaults to "/tmp/ranktable_save_path" when not defined in the inventory
@@ -1147,6 +1149,10 @@ def run_docker_containers(
             # Add MODEL_PATH
             if model_path:
                 tf.write(f"docker_cmd+=\" -v {shlex.quote(model_path)}:{shlex.quote(model_path)}\"\n")
+
+            # Add SPEC_MODEL_PATH
+            if spec_model_path:
+                tf.write(f"docker_cmd+=\" -v {shlex.quote(spec_model_path)}:{shlex.quote(spec_model_path)}\"\n")
 
             for path in user_mount_path:
                 if path == '':
