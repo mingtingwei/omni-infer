@@ -909,3 +909,39 @@ index dc0ec3219..0fb1e43f2 100644
  
          # Metadata
          if args.metadata:
+diff --git a/vllm/reasoning/qwen3_reasoning_parser.py b/vllm/reasoning/qwen3_reasoning_parser.py
+index 7095034b1..8e06b27cc 100644
+--- a/vllm/reasoning/qwen3_reasoning_parser.py
++++ b/vllm/reasoning/qwen3_reasoning_parser.py
+@@ -63,6 +63,7 @@ class Qwen3ReasoningParser(ReasoningParser):
+         previous_token_ids: Sequence[int],
+         current_token_ids: Sequence[int],
+         delta_token_ids: Sequence[int],
++        request: ChatCompletionRequest = None,
+     ) -> Union[DeltaMessage, None]:
+         """
+         Extract reasoning content from a delta message.
+@@ -77,6 +78,9 @@ class Qwen3ReasoningParser(ReasoningParser):
+                 self.think_start_token_id, self.think_end_token_id
+         ]):
+             return None
++        
++        if request.chat_template_kwargs is None or request.chat_template_kwargs.get("thinking", False) is False:
++            return DeltaMessage(content=delta_text)
+ 
+         if self.think_start_token_id in previous_token_ids:
+             if self.think_end_token_id in delta_token_ids:
+@@ -88,6 +92,13 @@ class Qwen3ReasoningParser(ReasoningParser):
+                 return DeltaMessage(reasoning_content=reasoning_content,
+                                     content=content if content else None)
+             elif self.think_end_token_id in previous_token_ids:
++                if self.think_end_token_id in delta_token_ids:
++                    end_index = delta_text.find(self.think_end_token)
++                    normal_content = (delta_text[:end_index] + 
++                                    delta_text[end_index + 
++                                                    len(self.think_end_token):])
++                    delta_text_ref[0] = normal_content
++                    delta_token_ids.remove(self.think_end_token_id)
+                 # <think> in previous, </think> in previous,
+                 # reasoning content continues
+                 return DeltaMessage(content=delta_text)
