@@ -687,8 +687,11 @@ class PanguEmbeddedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, attn_metadata, intermediate_tensors,
-                                  inputs_embeds)
+        model_output = self.model(input_ids=input_ids, 
+                                  positions=positions, 
+                                  intermediate_tensors=intermediate_tensors,
+                                  attn_metadata=attn_metadata, 
+                                  inputs_embeds=inputs_embeds)
         return model_output
 
     def compute_logits(
