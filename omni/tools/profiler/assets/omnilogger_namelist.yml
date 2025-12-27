@@ -83,7 +83,75 @@ targets:
             args[0].trace_headers = carrier
         safe_print(trace_output_directory, f"<<<Action: Prefill add waiting queue; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
- # Prefill free kv blocks
+  # Decode send ip, rank. llmdatadist_connector_d2p
+  - module: "omni.accelerators.pd.llmdatadist_connector_d2p:DecodeConnectorScheduler"
+    function_name: _log_decode_send_info
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      safe_print(trace_output_directory, f"<<<Action: Decode send ip, rank; Timestamp:{time.time()}; RequestID:{args[0]}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill receive and record decode ip, rank. llmdatadist_connector_d2p
+  - module: "omni.accelerators.pd.llmdatadist_connector_d2p:PrefillConnectorScheduler"
+    function_name: _update_decode_request_dict
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      req_id = list(args[0].keys())[0]
+      safe_print(trace_output_directory, f"<<<Action: Prefill receive and record decode ip, rank; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill send metadata. llmdatadist_connector_d2p
+  - module: "omni.accelerators.pd.llmdatadist_connector_d2p:PrefillConnectorScheduler"
+    function_name: _log_prefill_send_metadata
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      safe_print(trace_output_directory, f"<<<Action: Prefill send metadata; Timestamp:{time.time()}; RequestID:{args[0]}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Decode receive metadata. llmdatadist_connector_d2p
+  - module: "omni.accelerators.pd.llmdatadist_connector_d2p:DecodeConnectorScheduler"
+    function_name: _update_prefill_info_dict
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      req_id = list(args[0].keys())[0]
+      safe_print(trace_output_directory, f"<<<Action: Decode receive metadata; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Decode send ip, rank. omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_d2p:DecodeConnectorScheduler"
+    function_name: _log_decode_send_info
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      safe_print(trace_output_directory, f"<<<Action: Decode send ip, rank; Timestamp:{time.time()}; RequestID:{args[0]}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill receive and record decode ip, rank. omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_d2p:PrefillConnectorScheduler"
+    function_name: _update_decode_request_dict
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      req_id = list(args[0].keys())[0]
+      safe_print(trace_output_directory, f"<<<Action: Prefill receive and record decode ip, rank; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill send metadata. omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_d2p:PrefillConnectorScheduler"
+    function_name: _log_prefill_send_metadata
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      safe_print(trace_output_directory, f"<<<Action: Prefill send metadata; Timestamp:{time.time()}; RequestID:{args[0]}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Decode receive metadata. omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_d2p:DecodeConnectorScheduler"
+    function_name: _update_prefill_info_dict
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      req_id = list(args[0].keys())[0]
+      safe_print(trace_output_directory, f"<<<Action: Decode receive metadata; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill free kv blocks
   - module: "vllm.v1.core.sched.scheduler:Scheduler"
     function_name: _update_from_kv_xfer_finished
     entry_operation: |
@@ -106,7 +174,7 @@ targets:
                       create_span(start_time_ns=start_time, end_time=timestamp, action_name="Prefill free kv blocks", request_id=req_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
               safe_print(trace_output_directory, f"<<<Action: Prefill free kv blocks; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
-  # start pull kv
+  # start pull kv. llmdatadist_connector_v1/llmdatadist_connector_d2p
   - module: "omni.accelerators.pd.llmdatadist_connector_v1:DecodeConnectorWorker"
     function_name: _read_blocks
     entry_operation: |
@@ -124,8 +192,47 @@ targets:
           ttft_trace_id.set(headers.get('ttft_traceparent'))
       safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
-  # finish pull kv
+  # finish pull kv. llmdatadist_connector_v1/llmdatadist_connector_d2p
   - module: "omni.accelerators.pd.llmdatadist_connector_v1:DecodeConnectorWorker"
+    function_name: _send_pulled_kv_req_list
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var, clean_ctx, ttft_start_time, ttft_trace_id
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      request_id = args[1][0]['remote_request_id']
+      if parent_ctx_var.get() is not None: 
+          timestamp = time.time_ns()
+          ctx = create_span(start_time_ns=0, end_time=timestamp, action_name="Finish pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=True, trace_headers=None,)
+          carrier = {}
+          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+          carrier['start_time_ns'] = str(timestamp)
+          carrier['ttft_start_time'] = ttft_start_time.get()
+          carrier['ttft_traceparent'] = ttft_trace_id.get()
+          args[1][0]['trace_headers'] = carrier
+      clean_ctx()
+      safe_print(trace_output_directory, f"<<<Action: Finish pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # start pull kv. omni_cache_connector_v1/omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_v1:DecodeConnectorWorker"
+    function_name: _read_blocks
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span, ttft_start_time, ttft_trace_id
+      request_id = kwargs['request_id']
+      headers = kwargs.get('trace_headers') or getattr(self, 'trace_headers', None)
+      if headers and headers.get('traceparent') is not None:
+          start_time = int(headers.get("start_time_ns"))
+          trace_headers = {"traceparent": headers["traceparent"]}
+          timestamp = time.time_ns()
+          create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          ttft_start_time.set(headers.get('ttft_start_time'))
+          ttft_trace_id.set(headers.get('ttft_traceparent'))
+      safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # finish pull kv. omni_cache_connector_v1/omni_cache_connector_d2p
+  - module: "omni.accelerators.pd.omni_cache_connector_v1:DecodeConnectorWorker"
     function_name: _send_pulled_kv_req_list
     entry_operation: |
       import os, time

@@ -10,6 +10,7 @@ import pandas as pd
 import openpyxl
 import traceback
 
+FILL_VALUE = "-"
 
 def parse_trace_logs(root_dir):
     pattern = (
@@ -55,7 +56,7 @@ def parse_trace_logs(root_dir):
                 df_summary.to_excel(writer, sheet_name="Summary", index=False)
 
             print(
-                f"Successfully parsed time analysis files. Check {time_analysis_path}."
+                f"Successfully parsed time analysis files."
             )
 
         else:
@@ -101,7 +102,8 @@ def _get_engine_step_headers():
 
 
 def _get_final_df(data_by_request, request_role):
-    action_map = _get_action_map()
+    origin_action_map = _get_action_map()
+    action_map = dict(map(lambda k, v: (k, v[0]), origin_action_map.keys(), origin_action_map.values()))
     fieldnames = ["RequestID", "P_NODE", "D_NODE"] + list(action_map.keys())
     data = []
     for request_id, actions in data_by_request.items():
@@ -113,9 +115,9 @@ def _get_final_df(data_by_request, request_role):
             )
             continue
         row = {"RequestID": request_id, "P_NODE": prefill, "D_NODE": decode}
-        # Add timestamps for each action, "-" for missing actions
+        # Add timestamps for each action, FILL_VALUE for missing actions
         for action in action_map.keys():
-            row[action] = actions.get(action, "-")
+            row[action] = actions.get(action, FILL_VALUE)
         data.append(row)
 
     df = pd.DataFrame(data, columns=fieldnames)
@@ -291,38 +293,54 @@ def _get_decode_die_load_columns():
 
 
 def _get_action_map() -> dict:
+    """
+        the tuple's number means different phase:
+        proxy -- 0
+        P side:
+            api server -- 1
+            engine core -- 2
+        D side:
+            api server -- 3
+            engine core -- 4
+            worker -- 5
+    """
     return {
-        "PD api server get request": "prefill api server收到请求",
-        "Get prefill engine request and start pickle": "触发engine处理请求",
-        "Finish process request in prefill engine": "engine结束tokennizer",
-        "Start process request in prefill engine": "engine准备开始处理输入请求",
-        "Prefill add waiting queue": "prefill 请求添加到waiting队列",
-        "try to schedule in waiting queue": "首次尝试加入running队列",
-        "fail to add result of kv insufficient": "首次kv不足加入失败",
-        "Prefill get new_blocks": "P侧申请完成KV",
-        "success add to seq groups": "成功加入running队列",
-        "Prefill start execute_model": "P开始execute model",
-        "Prefill start execute main model": "P开始execute main model",
-        "Prefill done execute main model": "P完成execute main model",
-        "Prefill start execute mtp model": "P开始execute mtp model",
-        "Prefill done execute mtp model": "P完成execute mtp model",
-        "Prefill done execute_model": "P完成execute model",
-        "Start to send output in prefill stage": "engine异步发送输出",
-        "Client get prefill output": "client收到输出并入队",
-        "Pop output queues": "client出队",
-        "Finish prefill pickle and start response": "api server收到请求准备返回",
-        "Enter decode to generate": "decode api server收到请求准备处理",
-        "Start to dispatch decode request": "进入engine分发请求",
-        "Add need pulling sequence": "添加到need pulling队列",
-        "Start pull kv": "开始pull kv",
-        "Finish pull kv": "结束pull kv",
-        "Prefill free kv blocks": "P侧释放KV(和前后列时间戳可能存在时钟误差)",
-        "Start append running sequece for decode": "pull kv结束添加到running队列",
-        "Start to send output": "触发首个decode token执行",
-        "First decode output token": "decoder返回第一个token",
-        "Second decode output token": "decoder返回第二个token",
-        "Third decode output token": "decoder返回第三个token",
-        "Finish decode pickle and start response": "api server收到推理结果",
+        "PD api server get request": ("P侧api server收到请求", 1),
+        "Get prefill engine request and start pickle": ("触发engine处理请求", 1),
+        "Finish process request in prefill engine": ("engine结束tokennizer", 1),
+        "Start process request in prefill engine": ("engine准备开始处理输入请求", 2),
+        "Prefill add waiting queue": ("P侧请求添加到waiting队列", 2),
+        "try to schedule in waiting queue": ("首次尝试加入running队列", 2),
+        "fail to add result of kv insufficient": ("首次kv不足加入失败", 2),
+        "Prefill get new_blocks": ("P侧申请完成KV", 2),
+        "success add to seq groups": ("P侧请求成功加入running队列", 2),
+        "Prefill start execute_model": ("P侧开始execute model", 2),
+        "Prefill start execute main model": ("P侧开始execute main model", 2),
+        "Prefill done execute main model": ("P侧完成execute main model", 2),
+        "Prefill start execute mtp model": ("P侧开始execute mtp model", 2),
+        "Prefill done execute mtp model": ("P侧完成execute mtp model", 2),
+        "Prefill done execute_model": ("P侧完成execute model", 2),
+        "Start to send output in prefill stage": ("P侧engine异步发送输出", 2),
+        "Client get prefill output": ("client收到输出并入队", 1),
+        # "Pop output queues": "client出队",
+        "Finish prefill pickle and start response": ("P侧api server收到请求准备返回", 0),
+        "Enter decode to generate": ("D侧api server收到请求", 3),
+        "Start to dispatch decode request": ("进入engine分发请求", 4),
+        "Add need pulling sequence": ("D侧请求添加到need pulling队列", 4),
+        "Start pull kv": ("开始pull kv", 5),
+        "Finish pull kv": ("结束pull kv", 5),
+        "Prefill free kv blocks": ("P侧释放KV(和前后列时间戳可能存在时钟误差)", 2),
+        "Start append running sequece for decode": ("pull kv结束添加到running队列", 4),
+        "Start to send output": ("触发首个decode token执行", 4),
+        "Decode done execute_model": ("D侧完成execute model", 4),
+        "First decode output token": ("返回第一个token", 3),
+        "Second decode output token": ("返回第二个token", 3),
+        "Third decode output token": ("返回第三个token", 3),
+        "Finish decode pickle and start response": ("D侧api server收到推理结果", 3),
+        "Decode send ip, rank": ("D侧发送ip, rank", 4),
+        "Prefill receive and record decode ip, rank": ("P侧收到ip, rank", 2),
+        "Prefill send metadata": ("P侧发送metadata", 2),
+        "Decode receive metadata": ("D侧收到metadata", 4),
     }
 
 
@@ -385,9 +403,147 @@ def _get_main_model_info(engine_core_info, line):
         )
 
 
+def _calculate_time_difference(df_time, connector_type):
+    # calculate time stream end to end of p2d/d2p connector
+    try:
+        time_record = pd.read_excel(df_time)
+        print("time_analysis.xlsx文件读取成功")
+    except Exception as e:
+        print(f"time_analysis.xlsx文件读取失败: {e}")
+        return
+
+    time_pairs = _get_time_pairs(connector_type)
+
+    time_difference = pd.DataFrame()
+    first_col_name = time_record.columns[0]
+    first_col_data = time_record.iloc[:, 0].copy()
+    time_difference[first_col_name] = first_col_data
+
+    for start_col, end_col, col_name in time_pairs:
+        time_difference[col_name] = time_record.apply(
+            lambda row: safe_subtract(row[start_col], row[end_col]), axis=1
+        )
+
+    # calculate the average time of all requests traced for each phase
+    averages = {}
+    for col in time_difference.columns[1:]:
+        column_data = time_difference[col].iloc[2:]
+
+        valid_values = []
+        for val in column_data:
+            if val != FILL_VALUE:
+                try:
+                    valid_values.append(float(val))
+                except:
+                    pass
+
+        if valid_values:
+            avg_value = sum(valid_values) / len(valid_values)
+            averages[col] = round(avg_value, 6)
+        else:
+            averages[col] = FILL_VALUE
+    
+    time_difference.iloc[0, 0] = "average_time_difference(s)"
+    for col in time_difference.columns[1:]:
+        time_difference.at[0, col] = averages.get(col, FILL_VALUE)
+
+    with pd.ExcelWriter(df_time, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+        time_difference.to_excel(writer, sheet_name="time_difference", index=False)
+
+    print(f"Successfully calculate time difference. Check {df_time} for details.")
+
+
+def safe_subtract(a, b):
+    if a == FILL_VALUE or b == FILL_VALUE:
+        return FILL_VALUE
+    try:
+        return float(b) - float(a)
+    except (ValueError, TypeError):
+        return FILL_VALUE
+
+
+def _get_time_pairs(connector_type):
+    commen_time_pairs = [
+        ("PD api server get request", "Get prefill engine request and start pickle", 
+         "PD api server get request -> Get prefill engine request and start pickle"),
+        ("Get prefill engine request and start pickle", "Finish process request in prefill engine", 
+         "Get prefill engine request and start pickle -> Finish process request in prefill engine"),
+        ("Finish process request in prefill engine", "Start process request in prefill engine", 
+         "Finish process request in prefill engine -> Start process request in prefill engine"),
+        ("Start process request in prefill engine", "Prefill add waiting queue", 
+         "Start process request in prefill engine -> Prefill add waiting queue"),
+        ("Prefill add waiting queue", "try to schedule in waiting queue", 
+         "Prefill add waiting queue -> try to schedule in waiting queue"),
+        ("try to schedule in waiting queue", "Prefill get new_blocks", 
+         "try to schedule in waiting queue -> Prefill get new_blocks"),
+        ("Prefill get new_blocks", "success add to seq groups", 
+         "Prefill get new_blocks -> success add to seq groups"),
+        ("success add to seq groups", "Prefill start execute_model", 
+         "success add to seq groups -> Prefill start execute_model"),
+        ("Prefill start execute_model", "Prefill done execute_model", 
+         "Prefill start execute_model -> Prefill done execute_model"),
+        ("Enter decode to generate", "Start to dispatch decode request", 
+         "Enter decode to generate -> Start to dispatch decode request"),
+        ("Start to dispatch decode request", "Add need pulling sequence", 
+         "Start to dispatch decode request -> Add need pulling sequence"),
+        ("Add need pulling sequence", "Start pull kv", 
+         "Add need pulling sequence -> Start pull kv"),
+        ("Start pull kv", "Finish pull kv", 
+         "Start pull kv -> Finish pull kv"),
+        ("Finish pull kv", "Start append running sequece for decode", 
+         "Finish pull kv -> Start append running sequece for decode"),
+        ("Finish pull kv", "Prefill free kv blocks", 
+         "Finish pull kv -> Prefill free kv blocks"),
+        ("Start append running sequece for decode", "Start to send output", 
+         "Start append running sequece for decode -> Start to send output"),
+        ("Start to send output", "First decode output token", 
+         "Start to send output -> First decode output token"),
+        ("First decode output token", "Second decode output token", 
+         "First decode output token -> Second decode output token"),
+        ("Second decode output token", "Third decode output token", 
+         "Second decode output token -> Third decode output token"),
+        ("Third decode output token", "Finish decode pickle and start response", 
+         "Third decode output token -> Finish decode pickle and start response"),    
+    ]
+
+    p2d_time_pairs = [
+        ("Prefill done execute_model", "Start to send output in prefill stage", 
+         "Prefill done execute_model -> Start to send output in prefill stage"),
+        ("Start to send output in prefill stage", "Finish prefill pickle and start response", 
+         "Start to send output in prefill stage -> Finish prefill pickle and start response"),
+        ("Finish prefill pickle and start response", "Client get prefill output", 
+         "Finish prefill pickle and start response -> Client get prefill output"),
+        ("Client get prefill output", "Enter decode to generate", 
+         "Client get prefill output -> Enter decode to generate"),
+    ]
+
+    d2p_time_pairs = [
+        ("Start to dispatch decode request", "Decode send ip, rank", 
+         "Start to dispatch decode request -> Decode send ip, rank"),
+        ("Decode send ip, rank", "Prefill receive and record decode ip, rank", 
+         "Decode send ip, rank -> Prefill receive and record decode ip, rank"),
+        ("Prefill done execute_model", "Prefill send metadata", 
+         "Prefill done execute_model -> Prefill send metadata"),
+        ("Prefill send metadata", "Decode receive metadata", 
+         "Prefill send metadata -> Decode receive metadata"),
+        ("Decode receive metadata", "Start pull kv", 
+         "Decode receive metadata -> Start pull kv"),
+    ]
+
+    if connector_type == "p2d":
+        return commen_time_pairs + p2d_time_pairs
+    return commen_time_pairs + d2p_time_pairs
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Please input log directory. e.g.: python parse_logs.py path/to/all_pd_logs_direcotry")
+        # connector type: "p2d" -- default, "d2p" -- when using feature "First D Then P"
+        print("Please input log directory. e.g.: python parse_logs.py path/to/all_pd_logs_direcotry p2d/d2p")
         exit()
     root_dir = sys.argv[1]
+    if len(sys.argv) == 3:
+        connector_type = sys.argv[2]
+    else:
+        connector_type = "p2d"
     parse_trace_logs(root_dir)
+    _calculate_time_difference(os.path.join(root_dir, "time_analysis.xlsx"), connector_type)

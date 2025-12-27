@@ -249,11 +249,14 @@ class PrefillConnectorScheduler(PrefillConnectorScheduler_V1):
                 if self.input_socket.poll(timeout=100) > 0:
                     msg = self.input_socket.recv_string()
                     decode_request = json.loads(msg)
-                    logger.debug("Received decode request: %s", decode_request)
-                    with self._decode_requests_lock:
-                        self.decode_requests_dict.update(decode_request)
+                    self._update_decode_request_dict(decode_request)
             except Exception as e:
                 logger.error("Failed to receive the decode request message: %s", e)
+    
+    def _update_decode_request_dict(self, request) -> None:
+        logger.debug("[d2p] Prefill received decode request: %s", request)
+        with self._decode_requests_lock:
+            self.decode_requests_dict.update(request)
 
     def _prefill_sender_loop(self) -> None:
         poll_interval = 1.0
@@ -299,7 +302,7 @@ class PrefillConnectorScheduler(PrefillConnectorScheduler_V1):
                     data_to_be_sent = {req_id: payload}
                     json_data = json.dumps(data_to_be_sent)
                     socket_.send_string(json_data)
-                    logger.info("Send required data for request %s to path: %s", req_id, path)
+                    self._log_prefill_send_metadata(req_id, path)
 
                     try:
                         if getattr(self, "metadata", None) is not None:
@@ -319,6 +322,13 @@ class PrefillConnectorScheduler(PrefillConnectorScheduler_V1):
                         "Failed to send required data for request %s to %s: %s",
                         req_id, path, e,
                     )
+
+    def _log_prefill_send_metadata(self, request_id, decode_path) -> None:
+        logger.info(
+                "[d2p] Prefill send required data for request %s to path:%s",
+                request_id,
+                decode_path,
+            )
 
     def request_finished(
             self,
@@ -394,12 +404,14 @@ class DecodeConnectorScheduler(DecodeConnectorScheduler_V1):
                 if self.input_socket.poll(timeout=100) > 0:
                     msg = self.input_socket.recv_string()
                     prefill_information = json.loads(msg)
-                    logger.debug("Received prefill information: %s", prefill_information)
-                    with self._prefill_info_dict_lock:
-                        self.prefill_info_dict.update(prefill_information)
+                    self._update_prefill_info_dict(prefill_information)
             except Exception as e:
                 logger.error("Failed to receive the prefill information: %s", e)
 
+    def _update_prefill_info_dict(self, prefill_info) -> None:
+        logger.debug("[d2p] Decode received prefill information: %s", prefill_info)
+        with self._prefill_info_dict_lock:
+            self.prefill_info_dict.update(prefill_info)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -426,7 +438,7 @@ class DecodeConnectorScheduler(DecodeConnectorScheduler_V1):
             socket_.send_string(json.dumps(decode_inf))
             with self._prefill_info_dict_lock:
                 self.prefill_info_dict.setdefault(req_id, {})
-            logger.info("Send request to prefill %s", path)
+            self._log_decode_send_info(req_id, path)
         except Exception as e:
             logger.error("Failed to send request to prefill %s: %s", path, e)
 
@@ -441,6 +453,9 @@ class DecodeConnectorScheduler(DecodeConnectorScheduler_V1):
             len(request.prompt_token_ids), self.block_size)
         count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
         return count, count > 0
+
+    def _log_decode_send_info(self, request_id, prefill_path) -> None:
+        logger.info("[d2p] Decode send request %s to prefill %s", request_id, prefill_path)
 
     def update_state_after_alloc(
         self,
