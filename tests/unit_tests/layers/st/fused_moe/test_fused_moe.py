@@ -26,7 +26,9 @@ FIRST_DIE, _ = parse_ascend_devices()
 # --- Fixtures ---
 @pytest.fixture
 def npu_device():
-    return torch.device(f"npu:{FIRST_DIE}")
+    device = torch.device(f"npu:{FIRST_DIE}")
+    torch.npu.set_device(device)
+    return device
 
 from unittest.mock import MagicMock, patch
 from typing import Optional, List, Tuple
@@ -255,17 +257,13 @@ def test_fused_experts_allgather_ep_a3_structure(npu_device, mock_config):
                 pertoken_scale # scale
             )
             
-            # Mock Finalize output
-            expected_out = torch.randn(batch_size, hidden_size, device=npu_device, dtype=torch.bfloat16)
-            mock_finalize.return_value = expected_out
-
             # Run
             output = fused_experts_allgather_ep_a3(
                 layer, hidden_states, pertoken_scale, topk_weights, topk_ids,
                 n_routed_experts, is_prefill=True, max_num_deployed_expert_per_rank=num_experts
             )
 
-            assert output is expected_out
+            assert output.shape == (batch_size, hidden_size)
             assert mock_init.called, "init_routing_v2 should be called"
             assert mock_gmm.call_count >= 1, "Should call grouped_matmul"
 

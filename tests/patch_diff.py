@@ -86,14 +86,14 @@ def generate_html_report(highlighted_code, file_name, output_dir):
 
 def main():
     # 读取 diff-cover 生成的 HTML
-    html_file = "coverage_html/patch_coverage.html"  # diff-cover 生成的报告文件
+    html_file = "coverage/patch_report/patch_coverage.html"  # diff-cover 生成的报告文件
     html_content = read_diffcover_html(html_file)
 
     # 提取未覆盖的行号
     missing_lines = extract_missing_lines(html_content)
 
     # 输出文件夹
-    output_dir = "coverage_html/highlighted_reports"
+    output_dir = "coverage/patch_report/patch_coverage_report"
     os.makedirs(output_dir, exist_ok=True)
 
     # 遍历 vllm 目录下的所有源代码文件

@@ -79,24 +79,25 @@ bash run_tests.sh --unit -n 2
 
 ---
 
-## 3. 覆盖率与报告输出
+## 3. 覆盖率报告与日志输出
 
-所有测试执行完成后，生成的覆盖率与相关报告统一输出至项目根目录：
+所有测试执行完成后，生成的覆盖率与相关报告统一输出tests/reports目录：
 
 ```text
-coverage_html/
+tests/reports/coverage
 ```
+相关日志输出tests/logs目录
 
 ---
 
 ## 4. 报告类型说明
 
-`coverage_html` 目录下共包含 **四类报告**：
+`coverage` 目录下共包含 **四类报告**：
 
 ### 4.1 vLLM 覆盖率报告
 
 ```text
-coverage_html/vllm/
+vllm_report/
 ```
 
 * 覆盖范围：`infer_engines/vllm`
@@ -107,7 +108,7 @@ coverage_html/vllm/
 ### 4.2 Omni 覆盖率报告
 
 ```text
-coverage_html/omni/
+omni_report/
 ```
 
 * 覆盖范围：`omni/` 相关代码
@@ -118,12 +119,12 @@ coverage_html/omni/
 ### 4.3 Patch 差异覆盖率报告（Diff Coverage）
 
 ```text
-coverage_html/diff.html
+patch_report
 ```
 
 * 基于以下输入生成：
 
-  * 合并后的 Patch 文件（`combined.patch`）
+  * 合并后的 Patch 文件（`combine.patch`）
   * 覆盖率数据（`coverage.xml`）
 * 使用 `diff-cover` 工具生成
 * 仅关注 **Patch 引入或修改代码的覆盖情况**
@@ -134,7 +135,7 @@ coverage_html/diff.html
 ### 4.4 Proxy 覆盖率报告
 
 ```text
-coverage_html/proxy_report/
+proxy_report/
 ```
 
 * 展示 Proxy 相关代码的覆盖率情况

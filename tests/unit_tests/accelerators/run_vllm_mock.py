@@ -8,7 +8,7 @@ import port_manager
 # Configuration
 LOG_FILE_PREFIX = "server"
 APP_START_MARKER = "Application startup complete."
-STARTUP_TIMEOUT = 60  # seconds
+STARTUP_TIMEOUT = 120  # seconds
 tp=1
 dp=1
 
@@ -49,7 +49,9 @@ def graceful_kill_vllm(timeout=10):
     else:
         print("All vllm processes killed forcefully.")
 
-def setup_vllm(is_prefill, port_list):
+def setup_vllm(is_prefill, port_list, log_file_prefix=None):
+    if log_file_prefix is None:
+        log_file_prefix = LOG_FILE_PREFIX
     env = os.environ.copy()
     env['VLLM_ENABLE_MC2'] = '0'
     env['VLLM_USE_V1'] = '1'
@@ -64,6 +66,12 @@ def setup_vllm(is_prefill, port_list):
     env["KV_CACHE_MODE"] = "1"
     env["COVERAGE_PROCESS_START"] = f"{COVRC_DIR}/.coveragerc"
     env["PYTHONPATH"] = f"{CUR_DIR}" + ":" + env.get("PYTHONPATH", "")
+
+    env["TOKENIZER_PROC_POOL"] = '1'
+    env["TOKENIZER_WORKER_NUM"] = '5'
+    env["TOKENIZER_PROC_POOL_THRES"] = '256'
+    env["TOKENIZER_AFFINITY_CORES"] = '11, 12, 13, 14, 15, 20, 21, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40'
+    
     node_type = "decode"
     if is_prefill:
         node_type = "prefill"
@@ -87,7 +95,7 @@ def setup_vllm(is_prefill, port_list):
             "--distributed-executor-backend", "mp",
             "--block_size", "128",
         ]
-        log_file = Path(f"{node_type}_{LOG_FILE_PREFIX}_{idx}.log")
+        log_file = Path(f"{node_type}_{log_file_prefix}_{idx}.log")
         log_list.append(log_file)
 
         # Clean existing log

@@ -874,7 +874,7 @@ def determine_expert_range(
     """
     assert ep_size > 0
     if ep_size == 1:
-        return (0, global_num_experts)
+        return global_num_experts, [0, global_num_experts]
     
     local_num_experts = global_num_experts // ep_size
     start_expert_id = ep_rank * local_num_experts

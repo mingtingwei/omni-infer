@@ -1,0 +1,37 @@
+<<<Action: Start to schedule; Timestamp:1735000000.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Time received; Timestamp:1735000001.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Enter state tokenization; Timestamp:1735000002.0; RequestID:chatcmpl-testreq1; Role:tokenizer_192.168.1.2
+<<<Action: Enter state APC matching; Timestamp:1735000003.0; RequestID:chatcmpl-testreq1; Role:apc_192.168.1.3
+<<<Action: Enter state P waiting; Timestamp:1735000004.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Enter state P scheduled; Timestamp:1735000005.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Enter state P running; Timestamp:1735000006.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: PD api server get request; Timestamp:1735000007.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Start process request in prefill engine; Timestamp:1735000008.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Prefill add waiting queue; Timestamp:1735000009.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: try to schedule in waiting queue; Timestamp:1735000010.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Prefill get new_blocks; Timestamp:1735000011.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: success add to seq groups; Timestamp:1735000012.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Prefill start execute_model; Timestamp:1735000013.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Prefill done execute_model; Timestamp:1735000014.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Start to send output in prefill stage; Timestamp:1735000015.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Finish prefill pickle and start response; Timestamp:1735000016.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Finish P running; Timestamp:1735000017.0; RequestID:chatcmpl-testreq1; Role:pnode_192.168.1.4
+<<<Action: Enter state D waiting; Timestamp:1735000018.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Enter state D scheduled; Timestamp:1735000019.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Enter state D running; Timestamp:1735000020.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Enter decode to generate; Timestamp:1735000021.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Start to dispatch decode request; Timestamp:1735000022.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Add need pulling sequence; Timestamp:1735000023.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Start pull kv; Timestamp:1735000024.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Finish pull kv; Timestamp:1735000025.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Start append running sequece for decode; Timestamp:1735000026.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Start to send output; Timestamp:1735000027.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: First decode output token; Timestamp:1735000028.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Second decode output token; Timestamp:1735000029.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Third decode output token; Timestamp:1735000030.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Finish decode pickle and start response; Timestamp:1735000031.0; RequestID:chatcmpl-testreq1; Role:dnode_192.168.1.5
+<<<Action: Proxy got first token; Timestamp:1735000032.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Prefill free kv blocks; Timestamp:1735000033.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Proxy got second token; Timestamp:1735000034.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Proxy got third token; Timestamp:1735000035.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1
+<<<Action: Received all tokens; Timestamp:1735000036.0; RequestID:chatcmpl-testreq1; Role:proxy_192.168.1.1

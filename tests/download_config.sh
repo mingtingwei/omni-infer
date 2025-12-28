@@ -22,4 +22,7 @@ wget -q --show-progress --no-check-certificate "${BASE_URL}/tokenizer_config.jso
 wget -q --show-progress --no-check-certificate "${BASE_URL}/vocab.json" \
   -O "${MOCK_DIR}/vocab.json"
 
+wget -q --show-progress --no-check-certificate "${BASE_URL}/merges.txt" \
+  -O "${MOCK_DIR}/merges.txt"
+
 echo "[INFO] Mock model files downloaded successfully."

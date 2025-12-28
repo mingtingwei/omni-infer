@@ -29,6 +29,7 @@ dry_run=false
 stop=false
 reload=false
 rollback=false
+keepalive_nginx=false
 
 print_help() {
     echo "Usage:"
@@ -59,6 +60,7 @@ print_help() {
     echo "  --stop                          Stop nginx"
     echo "  --reload                        Reload nginx config without restarting"
     echo "  --rollback                      Rollback nginx config if backup exists (must be used with --stop)"
+    echo "  --keepalive-nginx               Start new nginx without killing existing nginx"
     echo "  --help                          Show this help message"
     echo ""
     echo "EXAMPLE:"
@@ -190,6 +192,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rollback)
             rollback=true
+            shift 1
+            ;;
+        --keepalive-nginx)
+            keepalive_nginx=true
             shift 1
             ;;
         --help|-h)
@@ -476,7 +482,9 @@ function do_start() {
         exit 0
     fi
 
-    stop_nginx
+    if [ "$keepalive_nginx" = false ]; then
+        stop_nginx
+    fi
     start_nginx "$nginx_conf_file"
 }
 

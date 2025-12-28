@@ -46,32 +46,35 @@ TARGET_DIR="${SCRIPT_DIR}/unit_tests/accelerators/mock_model"
 if [[ -n "${CONFIG_PATH}" ]]; then
     mkdir -p "${TARGET_DIR}"
     cp "${CONFIG_PATH}"/*.json "${TARGET_DIR}/"
+    cp "${CONFIG_PATH}"/*.txt "${TARGET_DIR}/"
 else
     bash "${SCRIPT_DIR}/download_config.sh"
 fi
 
 cd ${ROOT_DIR}/omni/accelerators/sched/omni_proxy/
+pkill -9 nginx || true
 bash build.sh --skip-extras -c
 unset http_proxy
 unset https_proxy
 
-marker_args=()
 target_path="${SCRIPT_DIR}"
 report_name="pytest-all.xml"
 
+unit_path="${SCRIPT_DIR}/unit_tests"
+integrated_path="${SCRIPT_DIR}/integrated_tests"
+
 case "${target}" in
   unit)
-    target_path="${SCRIPT_DIR}/unit_tests"
+    target_path="${unit_path}"
     report_name="pytest-unit.xml"
     ;;
   integrated)
-    marker_args=(-m "integrated and not gpu")
-    target_path="${SCRIPT_DIR}/integrated_tests"
+    target_path="${integrated_path}"
     report_name="pytest-integrated.xml"
     ;;
   all)
-    marker_args=(-m "not gpu")
-    ;; # run everything except GPU-tagged cases
+    target_path="${unit_path} ${integrated_path}"
+    ;;
   *)
     log_warn "Unknown target '${target}', defaulting to all tests."
     ;;
@@ -79,7 +82,6 @@ esac
 
 cmd=(
   pytest 
-  "${marker_args[@]}" 
   --tb=no -v
   "${target_path}"
   --cov
@@ -93,34 +95,59 @@ if [[ -n "${reports_dir}" ]]; then
   log_info "JUnit report will be written to ${report_file}"
 fi
 
-# 1. 执行 pytest
+mkdir -p tests/logs
 set +e
-(cd "${ROOT_DIR}" && "${cmd[@]}")
+( cd "${ROOT_DIR}" && stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee tests/logs/run_tests.log
 set -e
 
-cd "${ROOT_DIR}"
-coverage xml
+collect_coverage_reports() {
+  local root_dir="$1"
 
-# 2.omni 报告
-coverage html --include="*/omni/*" -d coverage_html/omni
-coverage xml --include="*/omni/*" -o coverage.xml.omni
+  echo "[INFO] Collecting coverage reports..."
 
-# 3.vllm 报告
-coverage html --include="*/infer_engines/vllm/*" -d coverage_html/vllm
-coverage xml --include="*/infer_engines/vllm/*" -o coverage.xml.vllm
+  cd "${root_dir}"
 
-# 4. 替换 coverage.xml 中的路径
-sed -i 's|infer_engines/vllm/vllm|vllm|g' "coverage.xml"
+  # 1. 生成基础 coverage.xml
+  coverage xml
 
-# 5.生成diff报告
-cd infer_engines/vllm
-git diff > ${ROOT_DIR}/combine.patch
-cd ${ROOT_DIR}
-diff-cover coverage.xml --diff-file combine.patch --format html:coverage_html/patch_coverage.html
-python tests/patch_diff.py
+  # 2. omni 覆盖率报告
+  mkdir -p coverage/omni_report
+  coverage html --include="*/omni/*" -d coverage/omni_report
+  coverage xml --include="*/omni/*" -o coverage/omni_report/coverage_omni.xml
 
-# 6.生成proxy报告
-bash "tests/unit_tests/accelerators/gen_proxy_cov.sh"
-rm -rf coverage_html/proxy_report/*
-mv proxy_report/ coverage_html/proxy_report
-mv *.log coverage_html/proxy_report
+  # 3. vllm 覆盖率报告
+  mkdir -p coverage/vllm_report
+  coverage html --include="*/infer_engines/vllm/*" -d coverage/vllm_report
+  coverage xml --include="*/infer_engines/vllm/*" -o coverage/vllm_report/coverage_vllm.xml
+
+  # 4. 修正 vllm 路径（diff-cover 使用）
+  sed -i 's|infer_engines/vllm/vllm|vllm|g' coverage/vllm_report/coverage_vllm.xml
+
+  # 5. patch 覆盖率报告
+  mkdir -p coverage/patch_report
+  (cd infer_engines/vllm && git diff > "${root_dir}/combine.patch")
+
+  diff-cover coverage/vllm_report/coverage_vllm.xml \
+    --diff-file combine.patch \
+    --format html:coverage/patch_report/patch_coverage.html
+
+  python tests/patch_diff.py
+
+  # 6. proxy 覆盖率报告
+  mkdir -p coverage/proxy_report
+  bash "tests/unit_tests/accelerators/gen_proxy_cov.sh"
+
+  rm -rf coverage/proxy_report/*
+  mv proxy_report/* coverage/proxy_report/
+
+  # 7. 收集日志和最终结果
+  mkdir -p tests/logs/proxy_logs
+  mkdir -p tests/reports
+
+  mv *.log tests/logs/proxy_logs 2>/dev/null || true
+  mv coverage tests/reports/
+
+  echo "[INFO] Coverage reports collected successfully."
+}
+
+collect_coverage_reports "${ROOT_DIR}"

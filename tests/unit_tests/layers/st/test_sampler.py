@@ -337,6 +337,8 @@ def test_ascend_topk_topp_sampler_v1_python_fallback_matches_reference(npu_devic
 
 
 def test_ascend_sampler_v1_apply_penalties_passthrough(npu_device):
+    from omni.accelerators.reasoning_compression.config import ThinkCompressDict
+    ThinkCompressDict.reasoner_early_think_stopping_enabled = 0
     sampler = AscendSamplerV1()
     sampler.penalty_cache = None
     logits = torch.randn(2, 4, device=npu_device, dtype=torch.float32)
@@ -359,6 +361,7 @@ def test_ascend_sampler_v1_apply_penalties_passthrough(npu_device):
         logit_bias=[None, None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        seq_data=[]
     )
 
     out = sampler.apply_penalties(logits.clone(), sampling_metadata)
@@ -394,6 +397,7 @@ def test_simple_sampler_prefill_returns_argmax(npu_device):
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        seq_data=[]
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(
@@ -476,6 +480,7 @@ def test_sparse_rejection_sampler_resample_when_uncomputed(npu_device, monkeypat
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        seq_data=[]
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(
@@ -683,6 +688,7 @@ def test_simple_sampler_decode_accepts_tokens(npu_device):
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        seq_data=[]
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(

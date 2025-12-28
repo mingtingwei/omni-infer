@@ -5,14 +5,13 @@ import torch.nn.functional as F
 
 from omni.layers.activation import SiluAndMul
 from .distributed_test_common import parse_ascend_devices
-FIRST_DIE, _ = parse_ascend_devices()
+FIRST_DEVICE, _ = parse_ascend_devices()
 
 @pytest.fixture(scope="module")
 def npu_device():
-    device = torch.device(f"npu:{FIRST_DIE}")
+    device = torch.device(f"npu:{FIRST_DEVICE}")
     torch.npu.set_device(device)
     return device
-
 
 def _swiglu_ref(x: torch.Tensor) -> torch.Tensor:
     gate, up = x.chunk(2, dim=-1)

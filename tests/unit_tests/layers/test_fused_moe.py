@@ -291,10 +291,10 @@ class test_DeepseekMoE(TestCase):
         mock_model_extra_config.operator_opt_config.shared_expert_down_prefetch = 14
 
         mock_vllm_ep.world_size = self.mock_ep_size
-        mock_vllm_ep.rank_in_group = MagicMock()
+        mock_vllm_ep.rank_in_group = self.mock_rank_in_group
         mock_vllm_ep.device_group = MagicMock()
         mock_vllm_pp.world_size = self.mock_ep_size
-        mock_vllm_pp.rank_in_group = MagicMock()
+        mock_vllm_pp.rank_in_group = self.mock_rank_in_group
         mock_vllm_pp.device_group = MagicMock()    
         mock_vllm_world.world_size = self.mock_world_size
         mock_vllm_world.rank_in_group = self.mock_rank_in_group
@@ -583,6 +583,7 @@ class test_DeepseekMoE(TestCase):
         mock_model_extra_config.operator_opt_config.attn_prefetch = 0
 
         mock_vllm_ep.world_size = self.mock_ep_size
+        mock_vllm_ep.rank_in_group = self.mock_rank_in_group
         mock_vllm_world.world_size = self.mock_world_size
         mock_vllm_world.rank_in_group = self.mock_rank_in_group
 

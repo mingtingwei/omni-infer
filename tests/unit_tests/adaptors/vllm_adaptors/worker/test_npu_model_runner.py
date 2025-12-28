@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import os
+import numpy as np
 
 torch_npu = pytest.importorskip("torch_npu")
 
@@ -23,7 +25,6 @@ from omni.layers.attention.backend.attention_dummy_builder import (
 
 
 def parse_ascend_devices():
-    import os
     # Get the environment variable, default to empty string if not found
     env_val = os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '')
     
@@ -33,12 +34,13 @@ def parse_ascend_devices():
     try:
         # Split by comma and convert to integers
         visible_die_list = [int(x.strip()) for x in env_val.split(',') if x.strip()]
-        first_die_no = visible_die_list[0] if visible_die_list else None
+        device_no_list = sorted(list(set(x // 2 for x in visible_die_list)))
+        first_device_no = device_no_list[0]
     except ValueError as e:
         print(f"Error parsing ASCEND_RT_VISIBLE_DEVICES: {e}, using default values.")
         return 0, [0, 1]
 
-    return first_die_no, visible_die_list
+    return first_device_no, device_no_list
 
 # ---- Lightweight test doubles -------------------------------------------------
 
@@ -263,6 +265,19 @@ class FakeModel(torch.nn.Module):
     __call__ = forward
 
 
+class FakeLogitModel(FakeModel):
+    def compute_logits(self, hidden_states, _):
+        return torch.zeros((hidden_states.shape[0], 5), device=hidden_states.device, dtype=hidden_states.dtype)
+
+
+class FakeTupleModel(FakeModel):
+    def forward(self, input_ids=None, positions=None, intermediate_tensors=None, inputs_embeds=None, **kwargs):
+        token_shape = inputs_embeds.shape[0] if inputs_embeds is not None else input_ids.shape[0]
+        raw = torch.ones((token_shape, self.hidden_size), device=positions.device, dtype=torch.float16)
+        hidden = torch.zeros((token_shape, self.hidden_size), device=positions.device, dtype=torch.float16)
+        return raw, hidden
+
+
 class RecordingDummyBuilder(DummyAttentionMetadataBuilder):
     def __init__(self, device):
         self.device = device
@@ -354,7 +369,6 @@ def patch_gpu_runner_dependencies(monkeypatch):
         lambda device: dummy_props,
     )
     monkeypatch.setattr("vllm.utils.supports_dynamo", lambda: True)
-    monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.decode_h2d_trigger", lambda: None)
     monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.set_forward_context", lambda *_, **__: nullcontext())
     monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.has_kv_transfer_group", lambda: False)
 
@@ -373,6 +387,7 @@ def parallel_state(monkeypatch):
     class PPGroup:
         def __init__(self, is_last_rank=True):
             self.is_last_rank = is_last_rank
+            self.is_first_rank = True
 
     pp_group = PPGroup(is_last_rank=True)
     dp_group = SimpleNamespace(world_size=1, cpu_group="cpu")
@@ -805,6 +820,646 @@ def test_get_pad_size_respects_tp(monkeypatch):
     # _get_pad_size accounts for tensor parallel world size.
     monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.get_tensor_model_parallel_world_size", lambda: 2)
     assert _get_pad_size(3) == 1
+
+
+def test_calc_spec_decode_metadata_same_num_zero(parallel_state, sampler_and_drafter, npu_device):
+    # Zero draft tokens should collapse logits indices to last scheduled token.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig(max_num_seqs=3)
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=2)
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    num_draft_tokens = np.array([0, 0, 0], dtype=np.int32)
+    cu_num_scheduled_tokens = np.array([2, 4, 6], dtype=np.int32)
+    metadata = runner._calc_spec_decode_metadata(num_draft_tokens, cu_num_scheduled_tokens)
+
+    expected_logits_indices = torch.tensor([1, 3, 5], dtype=torch.int32, device=npu_device)
+    assert torch.equal(metadata.logits_indices, expected_logits_indices)
+    assert torch.equal(metadata.target_logits_indices, expected_logits_indices)
+    assert torch.equal(metadata.bonus_logits_indices, expected_logits_indices)
+    assert metadata.draft_token_ids.numel() == 0
+
+
+def test_calc_spec_decode_metadata_varied(parallel_state, sampler_and_drafter, npu_device):
+    # Mixed draft sizes should compute per-request sampled/target indices.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig(max_num_seqs=3)
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=2)
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    runner.input_ids[:8] = torch.arange(8, device=npu_device, dtype=runner.input_ids.dtype)
+    num_draft_tokens = np.array([2, 0, 1], dtype=np.int32)
+    cu_num_scheduled_tokens = np.array([3, 5, 8], dtype=np.int32)
+
+    metadata = runner._calc_spec_decode_metadata(num_draft_tokens, cu_num_scheduled_tokens)
+
+    expected_logits_indices = torch.tensor([0, 1, 2, 4, 6, 7], device=npu_device, dtype=torch.int32)
+    expected_target_logits_indices = torch.tensor([0, 1, 4], device=npu_device, dtype=torch.int32)
+    expected_bonus_logits_indices = torch.tensor([2, 3, 5], device=npu_device, dtype=torch.int32)
+    expected_cu_num_draft_tokens = torch.tensor([2, 2, 3], device=npu_device, dtype=torch.int32)
+    expected_draft_token_ids = torch.tensor([1, 2, 7], device=npu_device, dtype=runner.input_ids.dtype)
+
+    assert torch.equal(metadata.logits_indices, expected_logits_indices)
+    assert torch.equal(metadata.target_logits_indices, expected_target_logits_indices)
+    assert torch.equal(metadata.bonus_logits_indices, expected_bonus_logits_indices)
+    assert torch.equal(metadata.cu_num_draft_tokens, expected_cu_num_draft_tokens)
+    assert torch.equal(metadata.draft_token_ids, expected_draft_token_ids)
+
+
+def test_calc_spec_decode_metadata_same_num_nonzero(parallel_state, sampler_and_drafter, npu_device):
+    # Uniform non-zero draft tokens should use the fast-path indices.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig(max_num_seqs=2)
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=2)
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    runner.input_ids[:6] = torch.arange(6, device=npu_device, dtype=runner.input_ids.dtype)
+    num_draft_tokens = np.array([2, 2], dtype=np.int32)
+    cu_num_scheduled_tokens = np.array([3, 6], dtype=np.int32)
+
+    metadata = runner._calc_spec_decode_metadata(num_draft_tokens, cu_num_scheduled_tokens)
+
+    expected_logits_indices = torch.tensor([0, 1, 2, 3, 4, 5], device=npu_device, dtype=torch.int32)
+    expected_target_logits_indices = torch.tensor([0, 1, 3, 4], device=npu_device, dtype=torch.int32)
+    expected_bonus_logits_indices = torch.tensor([2, 5], device=npu_device, dtype=torch.int32)
+    expected_cu_num_draft_tokens = torch.tensor([2, 4], device=npu_device, dtype=torch.int32)
+    expected_draft_token_ids = torch.tensor([1, 2, 4, 5], device=npu_device, dtype=runner.input_ids.dtype)
+
+    assert torch.equal(metadata.logits_indices, expected_logits_indices)
+    assert torch.equal(metadata.target_logits_indices, expected_target_logits_indices)
+    assert torch.equal(metadata.bonus_logits_indices, expected_bonus_logits_indices)
+    assert torch.equal(metadata.cu_num_draft_tokens, expected_cu_num_draft_tokens)
+    assert torch.equal(metadata.draft_token_ids, expected_draft_token_ids)
+
+
+def test_prepare_inputs_spec_decode(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
+    # _prepare_inputs should build spec_decode_metadata and use logits_indices.
+    model_cfg = DummyModelConfig(max_model_len=8)
+    cache_cfg = DummyCacheConfig(block_size=2)
+    sched_cfg = DummySchedulerConfig(max_num_batched_tokens=8, max_num_seqs=2)
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=1)
+    npu_comp_cfg = DummyNPUCompilationConfig(level=CompilationLevel.NO_COMPILATION, decode_gear_list=None)
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    runner.cascade_attn_enabled = False
+
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks, block_size, num_kv_heads, head_size, *args: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        ),
+        init_kv_cache_each_layer=lambda shape, dtype, device, model_config, enable_graph: torch.zeros(
+            shape, dtype=dtype, device="cpu"
+        ),
+    )
+    runner.attn_backends = [backend]
+    runner.attn_metadata_builders = [SimpleNamespace()]
+    monkeypatch.setattr(runner, "initialize_attn_backend", lambda cfg: None)
+
+    layer_name = "layers.0.attn"
+    spec = AttentionSpec(
+        block_size=cache_cfg.block_size,
+        num_kv_heads=1,
+        head_size=model_cfg.head_size,
+        dtype=torch.float16,
+        use_mla=model_cfg.use_mla,
+    )
+    kv_cfg = KVCacheConfig(
+        num_blocks=2,
+        tensors={layer_name: KVCacheTensor(size=spec.page_size_bytes)},
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    runner.initialize_kv_cache(kv_cfg)
+
+    builder = RecordingDummyBuilder(npu_device)
+    builder.runner = runner
+    runner.attn_metadata_builders = [builder]
+
+    req_ids = ["req0", "req1"]
+    runner.input_batch._req_ids = req_ids
+    runner.input_batch.req_id_to_index = {rid: idx for idx, rid in enumerate(req_ids)}
+    runner.input_batch.num_computed_tokens_cpu[:2] = [0, 0]
+    for idx, rid in enumerate(req_ids):
+        total_for_req = 3
+        runner.input_batch.token_ids_cpu[idx, :total_for_req] = (
+            torch.arange(total_for_req, dtype=torch.int64).numpy() + (idx + 1) * 10
+        )
+
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=3,
+        num_scheduled_tokens={"req0": 2, "req1": 1},
+        scheduled_spec_decode_tokens={"req0": [99]},
+        num_common_prefix_blocks=[0],
+    )
+
+    attn_metadata, graph_pad_size, sample_indices, positions, spec_decode_metadata = runner._prepare_inputs(
+        scheduler_output
+    )
+
+    assert runner.attn_state == AscendAttentionState.DecodeOnly
+    assert graph_pad_size == runner.max_batch_size - scheduler_output.total_num_scheduled_tokens
+    assert spec_decode_metadata is not None
+    assert spec_decode_metadata.num_draft_tokens == [1, 0]
+    assert torch.equal(sample_indices, spec_decode_metadata.logits_indices)
+    assert attn_metadata[layer_name].attn_state == AscendAttentionState.DecodeOnly
+
+
+def test_simple_prepare_inputs_advance_step_spec(
+    monkeypatch, parallel_state, sampler_and_drafter, npu_device
+):
+    # _simple_prepare_inputs should use advance_step_spec when accepted_num is None.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig(block_size=2)
+    sched_cfg = DummySchedulerConfig(max_num_seqs=1)
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks, block_size, num_kv_heads, head_size, *args: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        ),
+        init_kv_cache_each_layer=lambda shape, dtype, device, model_config, enable_graph: torch.zeros(
+            shape, dtype=dtype, device="cpu"
+        ),
+    )
+    runner.attn_backends = [backend]
+    runner.attn_metadata_builders = [SimpleNamespace(mark_static_for_attn_metadata=lambda *_: None)]
+    monkeypatch.setattr(runner, "initialize_attn_backend", lambda cfg: None)
+
+    layer_name = "layers.0.attn"
+    spec = AttentionSpec(
+        block_size=cache_cfg.block_size,
+        num_kv_heads=1,
+        head_size=model_cfg.head_size,
+        dtype=torch.float16,
+        use_mla=False,
+    )
+    kv_cfg = KVCacheConfig(
+        num_blocks=1,
+        tensors={layer_name: KVCacheTensor(size=spec.page_size_bytes)},
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    runner.initialize_kv_cache(kv_cfg)
+    runner.model = FakeModel(hidden_size=runner.hidden_size).to(npu_device)
+    runner.input_batch._req_ids = ["req0"]
+    runner.input_batch.req_id_to_index = {"req0": 0}
+
+    total_tokens = 3
+    attn_metadata = {
+        layer_name: SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            seq_lens=torch.zeros(total_tokens, dtype=torch.int64, device=npu_device),
+            slot_mapping=torch.zeros(runner.max_num_tokens, dtype=torch.int64, device=npu_device),
+            slot_indices=torch.zeros((runner.max_num_tokens, 2), dtype=torch.int64, device=npu_device),
+        )
+    }
+
+    positions = torch.zeros(total_tokens, dtype=torch.int64, device=npu_device)
+    cached_token = torch.tensor([[10, -1]], dtype=torch.int64, device=npu_device)
+    cached_spec = torch.tensor([[11, 12]], dtype=torch.int64, device=npu_device)
+
+    runner._simple_prepare_inputs(attn_metadata, positions, cached_token, cached_spec, 0)
+
+    assert runner.input_ids[:total_tokens].tolist() == [10, 11, 12]
+
+
+def test_kv_connector_no_forward_returns_output(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
+    # kv_connector_no_forward should return non-empty output when transfers complete.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig()
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    monkeypatch.setattr(runner, "maybe_setup_kv_connector", lambda *_: None)
+    monkeypatch.setattr(runner, "get_finished_kv_transfers", lambda *_: ({"req0"}, {"req1"}))
+    monkeypatch.setattr(runner, "get_loading_kv_failure_req_ids", lambda: None)
+
+    output = runner.kv_connector_no_forward(SimpleNamespace())
+    assert output.finished_sending == {"req0"}
+    assert output.finished_recving == {"req1"}
+
+
+def test_execute_model_basic_flow(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
+    # execute_model should run sampling and return ModelRunnerOutput for basic decode.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig(num_step=1)
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    runner.model = FakeLogitModel(hidden_size=runner.hidden_size).to(npu_device)
+    runner.sampler = FakeSampler()
+    runner.attn_metadata_builders = [SimpleNamespace(_num_decodes=1, _num_prefills=0)]
+    runner.use_spec_decode = False
+
+    req_ids = ["req0"]
+    runner.input_batch = SimpleNamespace(
+        req_ids=req_ids,
+        req_id_to_index={"req0": 0},
+        sampling_metadata=SimpleNamespace(batch_size=1),
+        generators={},
+        vocab_size=32,
+        num_prompt_logprobs={"req0": 1},
+    )
+    runner.requests = {"req0": SimpleNamespace(num_computed_tokens=0, num_tokens=1)}
+
+    positions = torch.zeros(1, dtype=torch.int64, device=npu_device)
+    attn_metadata = {"layers.0.attn": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)}
+    sample_indices = torch.tensor([0], dtype=torch.int64, device=npu_device)
+
+    monkeypatch.setattr(runner, "_update_states", lambda *_: None)
+    monkeypatch.setattr(runner, "_prepare_kv_cache", lambda *_: None)
+    monkeypatch.setattr(
+        runner,
+        "_prepare_inputs",
+        lambda *_: (attn_metadata, 0, sample_indices, positions, None),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_execute_model",
+        lambda *_: (
+            torch.zeros((1, runner.hidden_size), device=npu_device, dtype=torch.float16),
+            torch.zeros((1, runner.hidden_size), device=npu_device, dtype=torch.float16),
+            torch.zeros((1,), device=npu_device, dtype=torch.int64),
+            {"req0"},
+            {"req1"},
+        ),
+    )
+
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={"req0": 1},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[0],
+        scheduled_new_reqs=[SimpleNamespace(sampling_params=SimpleNamespace(prompt_logprobs=True))],
+        finished_req_ids=[],
+        grammar_bitmask=None,
+        num_step=1,
+    )
+
+    output = runner.execute_model(scheduler_output)
+    assert output.sampled_token_ids == [[0]]
+    assert output.prompt_logprobs_dict.get("req0") is not None
+    assert output.finished_sending == {"req0"}
+    assert output.finished_recving == {"req1"}
+
+
+def test_execute_model_returns_empty_when_no_work(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
+    # execute_model should return EMPTY_MODEL_RUNNER_OUTPUT when no tokens scheduled and no KV transfer.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig()
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    monkeypatch.setattr(runner, "_update_states", lambda *_: None)
+    monkeypatch.setattr(runner, "_prepare_kv_cache", lambda *_: None)
+    monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.has_kv_transfer_group", lambda: False)
+
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[0],
+        scheduled_new_reqs=[],
+        finished_req_ids=[],
+        grammar_bitmask=None,
+        num_step=1,
+    )
+
+    output = runner.execute_model(scheduler_output)
+    assert output is not None
+
+
+def test_execute_model_internal_execute(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
+    # _execute_model should return padded input ids and propagate finished transfer sets.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig()
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    runner.model = FakeTupleModel(hidden_size=runner.hidden_size).to(npu_device)
+    runner.kv_caches = []
+    runner.enable_torchair_graph_mode = False
+
+    attn_metadata = {"layers.0.attn": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)}
+    positions = runner.positions[:1]
+    sample_indices = torch.tensor([0], dtype=torch.int64, device=npu_device)
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1)
+
+    monkeypatch.setattr(runner, "maybe_setup_kv_connector", lambda *_: None)
+    monkeypatch.setattr(runner, "maybe_wait_for_kv_save", lambda *_: None)
+    monkeypatch.setattr(runner, "get_finished_kv_transfers", lambda *_: ({"req0"}, {"req1"}))
+
+    hidden_states, raw_hidden_states, input_ids, finished_sending, finished_recving = runner._execute_model(
+        scheduler_output,
+        attn_metadata,
+        graph_pad_size=1,
+        sample_indices=sample_indices,
+        positions=positions,
+        intermediate_tensors=None,
+    )
+
+    assert hidden_states.shape[0] == 2
+    assert raw_hidden_states.shape[0] == 2
+    assert input_ids.shape[0] == 2
+    assert finished_sending == {"req0"}
+    assert finished_recving == {"req1"}
+def test_dummy_run_profile_no_kv_caches_spec_decode(parallel_state, sampler_and_drafter, npu_device):
+    # _dummy_run should run the model and invoke drafter when spec decode is enabled.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig()
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=1)
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    runner.model = FakeModel(hidden_size=runner.hidden_size).to(npu_device)
+    runner.kv_caches = []
+
+    propose_calls = []
+    original_propose = runner.drafter.propose
+
+    def record_propose(**kwargs):
+        propose_calls.append(kwargs)
+        return original_propose(**kwargs)
+
+    runner.drafter.propose = record_propose
+
+    hidden_states = runner._dummy_run(3)
+    assert hidden_states.shape[0] == 3
+    assert propose_calls and propose_calls[0]["num_tokens"] == 3
+
+
+def test_dummy_run_with_kv_caches_builds_dummy_metadata(
+    monkeypatch, parallel_state, sampler_and_drafter, npu_device
+):
+    # _dummy_run should build dummy attention metadata when kv caches exist.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig(block_size=2)
+    sched_cfg = DummySchedulerConfig(max_num_seqs=2)
+    parallel_cfg = DummyParallelConfig()
+    spec_cfg = DummySpeculativeConfig(num_speculative_tokens=1)
+    npu_comp_cfg = DummyNPUCompilationConfig(level=CompilationLevel.NO_COMPILATION)
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=spec_cfg,
+        kv_role=None,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+    runner.model = FakeModel(hidden_size=runner.hidden_size).to(npu_device)
+
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks, block_size, num_kv_heads, head_size, *args: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        ),
+        init_kv_cache_each_layer=lambda shape, dtype, device, model_config, enable_graph: torch.zeros(
+            shape, dtype=dtype, device="cpu"
+        ),
+    )
+    runner.attn_backends = [backend]
+    monkeypatch.setattr(runner, "initialize_attn_backend", lambda cfg: None)
+    monkeypatch.setattr(
+        "omni.adaptors.vllm.worker.npu_model_runner.model_extra_config.operator_opt_config.mtp_remove_redundant_kv",
+        False,
+        raising=False,
+    )
+
+    class TrackingBuilder(RecordingDummyBuilder):
+        def __init__(self, device):
+            super().__init__(device)
+            self.dummy_calls = 0
+
+        def build_dummy(self, *args, **kwargs):
+            self.dummy_calls += 1
+            return SimpleNamespace()
+
+    builder = TrackingBuilder(npu_device)
+    runner.attn_metadata_builders = [builder]
+
+    layer_name = "layers.0.attn"
+    spec = AttentionSpec(
+        block_size=cache_cfg.block_size,
+        num_kv_heads=1,
+        head_size=model_cfg.head_size,
+        dtype=torch.float16,
+        use_mla=model_cfg.use_mla,
+    )
+    kv_cfg = KVCacheConfig(
+        num_blocks=2,
+        tensors={layer_name: KVCacheTensor(size=spec.page_size_bytes)},
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    runner.initialize_kv_cache(kv_cfg)
+
+    hidden_states = runner._dummy_run(1)
+    assert builder.dummy_calls == 1
+    assert hidden_states.shape[0] == runner.max_batch_size
+
+
+@pytest.mark.parametrize(
+    "kv_role,enable_disagg,expected_attr,dp_world_size",
+    [
+        ("kv_consumer", False, "max_batch_size", 2),
+        (None, True, "max_num_reqs", 1),
+        (None, False, "max_num_tokens", 1),
+    ],
+)
+def test_profile_run_picks_dummy_size(
+    monkeypatch,
+    parallel_state,
+    sampler_and_drafter,
+    npu_device,
+    kv_role,
+    enable_disagg,
+    expected_attr,
+    dp_world_size,
+):
+    # profile_run should select the correct dummy token count per mode.
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig()
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig()
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role=kv_role,
+        additional_config={},
+    )
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    monkeypatch.setattr(
+        "omni.adaptors.vllm.worker.npu_model_runner.model_extra_config.task_config.enable_attn_ffn_disaggregation",
+        enable_disagg,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "omni.adaptors.vllm.worker.npu_model_runner.get_dp_group",
+        lambda: SimpleNamespace(world_size=dp_world_size),
+    )
+
+    called = {}
+
+    def fake_dummy_run(num_tokens, *_, **__):
+        called["num_tokens"] = num_tokens
+        return torch.zeros(1)
+
+    runner._dummy_run = fake_dummy_run
+    runner.encoder_cache = SimpleNamespace(clear=lambda: called.setdefault("cleared", True))
+
+    monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.NPUPlatform.synchronize",
+                        lambda: called.setdefault("sync", True))
+    monkeypatch.setattr("omni.adaptors.vllm.worker.npu_model_runner.gc.collect",
+                        lambda: called.setdefault("gc", True))
+
+    runner.profile_run()
+
+    expected = getattr(runner, expected_attr) * (dp_world_size if expected_attr == "max_batch_size" else 1)
+    assert called["num_tokens"] == expected
+    assert called.get("sync") and called.get("cleared") and called.get("gc")
 
 
 @pytest.mark.parametrize(

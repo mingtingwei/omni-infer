@@ -10,6 +10,7 @@ wget https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/config.json -O ./m
 wget https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/tokenizer.json -O ./mock_model/tokenizer.json
 wget https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/tokenizer_config.json -O ./mock_model/tokenizer_config.json
 wget https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/vocab.json -O ./mock_model/vocab.json
+wget https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/merges.txt -O ./mock_model/merges.txt
 
 #install nginx
 pkill nginx

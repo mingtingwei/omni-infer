@@ -24,7 +24,6 @@ def npu_device():
 def rmsnorm_golden(x: torch.Tensor, 
                    residual: Optional[torch.Tensor], 
                    weight: torch.Tensor, 
-                   bias: Optional[torch.Tensor], 
                    eps: float):
     """
     reference rmsnorm
@@ -47,9 +46,6 @@ def rmsnorm_golden(x: torch.Tensor,
     # Apply Weight
     out = hidden_states * weight_f32
     
-    if bias is not None:
-        out = out + bias.float()
-        
     return out.to(x.dtype), (res_out.to(x.dtype) if res_out is not None else None)
 
 # @pytest.mark.parametrize("load_bias_env", ['0', '1'])
@@ -69,10 +65,6 @@ def test_rmsnorm_basic(npu_device, load_bias_env, with_residual, with_quant):
         
         norm = RMSNorm(hidden_size, eps=eps, dtype=dtype).to(npu_device)
         
-        if load_bias_env == "1":
-            # Initialize bias to non-zero to actually test the addition logic
-            torch.nn.init.normal_(norm.bias, mean=0.5, std=0.1)
-
         # Input
         x = torch.randn(1, 10, hidden_size, dtype=dtype, device=npu_device)
         
@@ -87,9 +79,7 @@ def test_rmsnorm_basic(npu_device, load_bias_env, with_residual, with_quant):
         
         output = norm(x, residual=residual, quant_symbol=with_quant)
 
-        ref_out, ref_residual = rmsnorm_golden(
-            x_ref, residual_ref, norm.weight, norm.bias, eps
-        )
+        ref_out, ref_residual = rmsnorm_golden(x_ref, residual_ref, norm.weight, eps)
 
         if with_residual:
             assert isinstance(output, tuple)
@@ -173,7 +163,7 @@ def _logic_rmsnorm_tp_random_input(device, local_rank, world_size, hidden_size, 
     out_gathered, _ = model(x, residual=residual, y_transform="AG")
         
     # 1. Compute local truth
-    local_norm_out_golden, _ = rmsnorm_golden(x, residual, model.weight, None, eps)
+    local_norm_out_golden, _ = rmsnorm_golden(x, residual, model.weight, eps)
     
     # 2. Verify part of the gathered output matches local output
     start_idx = local_rank * x.shape[0]

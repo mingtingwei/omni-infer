@@ -16,12 +16,19 @@ import omni.layers.linear as omni_linear_mod
 class TestRotaryEmbedding(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        # IMPORTANT: isolate the global rope cache per-test.
+        # Swapping in a fresh dict avoids mutating the shared module-level cache
+        # that other tests (in the same process) may rely on.
+        self._rope_dict_patcher = None
         if hasattr(rope_mod, "_ROPE_DICT"):
-            rope_mod._ROPE_DICT.clear()
+            self._rope_dict_patcher = patch.object(rope_mod, "_ROPE_DICT", {}, create=True)
+            self._rope_dict_patcher.start()
 
     def tearDown(self):
-        if hasattr(rope_mod, "_ROPE_DICT"):
-            rope_mod._ROPE_DICT.clear()
+        # Restore the original cache dict so we don't leak state across test modules.
+        if getattr(self, "_rope_dict_patcher", None) is not None:
+            self._rope_dict_patcher.stop()
+            self._rope_dict_patcher = None
         super().tearDown()
 
 # ==================== get_rope  ====================
@@ -146,9 +153,11 @@ class TestRotaryEmbedding(unittest.TestCase):
             patch.object(rope_mod, "get_pp_group", lambda: _FakePPGroup(), create=True),
         ]
 
-        for p in patches:
-            p.start()
+        started_patches = []
         try:
+            for p in patches:
+                p.start()
+                started_patches.append(p)
             cases = [
                 ({"rope_type": "linear", "factor": 2.0}, "LinearScalingRotaryEmbedding"),
                 ({"rope_type": "yarn", "factor": 2.0, "original_max_position_embeddings": 2048}, "YaRNScalingRotaryEmbedding"),
@@ -190,7 +199,7 @@ class TestRotaryEmbedding(unittest.TestCase):
                     dtype=torch.float16,
                 )
         finally:
-            for p in reversed(patches):
+            for p in reversed(started_patches):
                 p.stop()
 
 # ==================== RotaryEmbeddingTorchNpu  ====================
@@ -391,12 +400,17 @@ class TestRotaryEmbedding(unittest.TestCase):
         last_dim = max(2, int(layer_self.rotary_dim))  # 确保可 chunk(2, -1)
         if last_dim % 2 == 1:
             last_dim += 1
-        return torch.zeros((max_pos, last_dim), dtype=torch.float32)
+        t = torch.full((max_pos, last_dim), 0.5, dtype=torch.float32)
+        # provide a no-op .npu() so any NPU-only codepath won't touch a real device
+        t.npu = lambda: t
+        return t
 
     @staticmethod
     def _fake_inv_freq(self, _any_factor):
         n = max(1, int(self.rotary_dim) // 2)
-        return torch.ones((n,), dtype=torch.float32)
+        inv = torch.ones((n,), dtype=torch.float32)
+        inv.npu = lambda: inv
+        return inv
 
     def _make_yarn_layer(
         self,
@@ -416,8 +430,7 @@ class TestRotaryEmbedding(unittest.TestCase):
     ):
         yarn_get_mscale_mock = MagicMock(return_value=yarn_get_mscale_ret)
 
-        with patch.object(torch.Tensor, "npu", lambda t: t, create=True), \
-             patch.object(rope_mod.RotaryEmbeddingTorchNpu, "_compute_cos_sin_cache_alt", type(self)._fake_cos_sin_cache_alt_for_yarn), \
+        with patch.object(rope_mod.RotaryEmbeddingTorchNpu, "_compute_cos_sin_cache_alt", type(self)._fake_cos_sin_cache_alt_for_yarn), \
              patch.object(rope_mod, "_yarn_get_mscale", yarn_get_mscale_mock), \
              patch.object(rope_mod.YaRNScalingRotaryEmbedding, "_compute_inv_freq", autospec=True, side_effect=type(self)._fake_inv_freq) as inv_freq_mock:
             layer = rope_mod.YaRNScalingRotaryEmbedding(
@@ -478,23 +491,29 @@ class TestRotaryEmbedding(unittest.TestCase):
             self.assertEqual(layer.sin.shape, (expected_len, layer.rotary_dim))
 
     def test_yarn_compute_cos_sin_cache_applies_mscale_multiplier_without_checking_numerical_accuracy(self):
-        def _ones_like(x):
-            return torch.ones_like(x)
+        # Verify that YaRN applies mscale as a pure multiplicative factor on both cos and sin caches.
+        # We avoid patching global torch functions (cos/sin) to prevent cross-test interference.
+        layer1, _, _ = self._make_yarn_layer(
+            rotary_dim=8,
+            max_pos=8,
+            scaling_factor=2,
+            attn_factor=1.0,
+            yarn_get_mscale_ret=3.0,  # mscale=3.0
+            is_neox_style=True,
+        )
+        layer2, _, _ = self._make_yarn_layer(
+            rotary_dim=8,
+            max_pos=8,
+            scaling_factor=2,
+            attn_factor=2.0,
+            yarn_get_mscale_ret=3.0,  # mscale=6.0
+            is_neox_style=True,
+        )
 
-        with patch.object(rope_mod.torch, "cos", side_effect=_ones_like), \
-             patch.object(rope_mod.torch, "sin", side_effect=_ones_like):
-            layer, _, _ = self._make_yarn_layer(
-                rotary_dim=8,
-                max_pos=8,
-                scaling_factor=2,
-                attn_factor=2.0,
-                yarn_get_mscale_ret=3.0,  # mscale=6.0
-                is_neox_style=True,
-            )
+        scale = layer2.mscale / layer1.mscale
+        self.assertTrue(torch.allclose(layer2.cos, layer1.cos * scale))
+        self.assertTrue(torch.allclose(layer2.sin, layer1.sin * scale))
 
-        expected = torch.tensor(layer.mscale, dtype=layer.cos.dtype, device=layer.cos.device)
-        self.assertTrue(torch.allclose(layer.cos, expected))
-        self.assertTrue(torch.allclose(layer.sin, expected))
 
 # ==================== LinearScalingRotaryEmbedding  ====================
 
