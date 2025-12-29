@@ -20,7 +20,7 @@ bash run_tests.sh [OPTIONS]
 ### 1.1 运行全部测试
 
 ```bash
-bash run_tests.sh --all
+bash run_tests.sh
 ```
 
 * UT用例
@@ -146,7 +146,7 @@ proxy_report/
 
 ```bash
 # 运行全部测试，2 并发
-bash run_tests.sh --all -n 2
+bash run_tests.sh -n 2
 
 # 仅运行单元测试
 bash run_tests.sh --unit

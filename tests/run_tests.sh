@@ -57,7 +57,7 @@ bash build.sh --skip-extras -c
 unset http_proxy
 unset https_proxy
 
-target_path="${SCRIPT_DIR}"
+target_path=()
 report_name="pytest-all.xml"
 
 unit_path="${SCRIPT_DIR}/unit_tests"
@@ -73,7 +73,7 @@ case "${target}" in
     report_name="pytest-integrated.xml"
     ;;
   all)
-    target_path="${unit_path} ${integrated_path}"
+    target_path=("${unit_path}" "${integrated_path}")
     ;;
   *)
     log_warn "Unknown target '${target}', defaulting to all tests."
@@ -83,7 +83,7 @@ esac
 cmd=(
   pytest 
   --tb=no -v
-  "${target_path}"
+  "${target_path[@]}"
   --cov
   "${extra_args[@]}"
 )
@@ -95,9 +95,13 @@ if [[ -n "${reports_dir}" ]]; then
   log_info "JUnit report will be written to ${report_file}"
 fi
 
-mkdir -p tests/logs
+LOG_DIR="${ROOT_DIR}/tests/logs"
+LOG_FILE="${LOG_DIR}/run_tests.log"
+
+mkdir -p "${LOG_DIR}"
+
 set +e
-( cd "${ROOT_DIR}" && stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee tests/logs/run_tests.log
+( cd "${ROOT_DIR}" && stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "${LOG_FILE}"
 set -e
 
 collect_coverage_reports() {
@@ -111,9 +115,11 @@ collect_coverage_reports() {
   coverage xml
 
   # 2. omni 覆盖率报告
+  OMNI_INCLUDE="*/omni/layers/*,*/omni/adaptors/*,*/omni/models/*"
+
   mkdir -p coverage/omni_report
-  coverage html --include="*/omni/*" -d coverage/omni_report
-  coverage xml --include="*/omni/*" -o coverage/omni_report/coverage_omni.xml
+  coverage html --include="${OMNI_INCLUDE}" -d coverage/omni_report
+  coverage xml  --include="${OMNI_INCLUDE}" -o coverage/omni_report/coverage_omni.xml
 
   # 3. vllm 覆盖率报告
   mkdir -p coverage/vllm_report
