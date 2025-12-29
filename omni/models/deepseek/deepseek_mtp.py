@@ -207,7 +207,7 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
             hidden_states: torch.Tensor,
             sampling_metadata: SamplingMetadata
     ) -> torch.Tensor:
-        logits = self.logits_processor(self.shared_head["head"], hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.shared_head.head, hidden_states, sampling_metadata)
         return logits
 
     def should_use_eager_mode(self, *args, **kwargs):
