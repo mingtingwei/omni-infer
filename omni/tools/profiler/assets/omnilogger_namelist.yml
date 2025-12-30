@@ -219,37 +219,114 @@ targets:
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      from omni.tools.profiler.trace.tracing import create_span, ttft_start_time, ttft_trace_id
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator      
       request_id = kwargs['request_id']
       headers = kwargs.get('trace_headers') or getattr(self, 'trace_headers', None)
       if headers and headers.get('traceparent') is not None:
           start_time = int(headers.get("start_time_ns"))
           trace_headers = {"traceparent": headers["traceparent"]}
           timestamp = time.time_ns()
-          create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
-          ttft_start_time.set(headers.get('ttft_start_time'))
-          ttft_trace_id.set(headers.get('ttft_traceparent'))
+          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          carrier = {}
+          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+          carrier['start_time_ns'] = str(timestamp)
+          carrier['ttft_start_time'] = headers.get('ttft_start_time')
+          carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
+          kwargs['trace_headers'] = carrier
       safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
-  # finish pull kv. omni_cache_connector_v1/omni_cache_connector_d2p
+# finish pull kv (before H2D) and calculate H2D address --- omni_cache
+  - module: "omni.accelerators.cache.omni_cache:DecodeOmniCache"
+    function_name: build_h2d_ops
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      request_id = args[0].request_id
+      headers = args[0].trace_headers
+      if headers and headers.get('traceparent') is not None:
+          start_time = int(headers.get("start_time_ns"))
+          trace_headers = {"traceparent": headers["traceparent"]}
+          timestamp = time.time_ns()
+          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Finish pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          carrier = {}
+          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+          carrier['start_time_ns'] = str(timestamp)
+          carrier['ttft_start_time'] = headers.get('ttft_start_time')
+          carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
+          args[0].trace_headers = carrier
+      safe_print(trace_output_directory, f"<<<Action: Finish pull kv(before H2D); Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+    exit_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      request_id = args[0].request_id
+      trace_headers = args[0].trace_headers
+      headers = args[0].trace_headers
+      if headers and headers.get('traceparent') is not None:
+          start_time = int(headers.get("start_time_ns"))
+          trace_headers = {"traceparent": headers["traceparent"]}
+          timestamp = time.time_ns()
+          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Finish calculate address", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+          carrier = {}
+          TraceContextTextMapPropagator().inject(carrier, context=ctx)
+          carrier['start_time_ns'] = str(timestamp)
+          carrier['ttft_start_time'] = headers.get('ttft_start_time')
+          carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
+          args[0].trace_headers = carrier
+      safe_print(trace_output_directory, f"<<<Action: Finish calculate H2D address; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+
+# start h2d
+  - module: "omni.accelerators.pd.omni_cache_connector_v1:DecodeConnectorWorker"
+    function_name: _post_success
+    entry_operation: |
+      import os, time
+      from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
+      from omni.tools.profiler.trace.tracing import create_span
+      from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+      ctxs = args[4]
+      for ctx in ctxs:
+          request_id = ctx.request_id
+          headers = ctx.trace_headers
+          if headers and headers.get('traceparent') is not None:
+              start_time = int(headers.get("start_time_ns"))
+              trace_headers = {"traceparent": headers["traceparent"]}
+              timestamp = time.time_ns()
+              ctx_id = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Start H2D", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
+              carrier = {}
+              TraceContextTextMapPropagator().inject(carrier, context=ctx_id)
+              carrier['start_time_ns'] = str(timestamp)
+              carrier['ttft_start_time'] = headers.get('ttft_start_time')
+              carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
+              ctx.trace_headers = carrier
+          safe_print(trace_output_directory, f"<<<Action: Start H2D; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # finish pull kv (finish H2D) omni_cache_connector_v1/omni_cache_connector_d2p 
   - module: "omni.accelerators.pd.omni_cache_connector_v1:DecodeConnectorWorker"
     function_name: _send_pulled_kv_req_list
     entry_operation: |
       import os, time
       from omni.tools.profiler.utils import ip_str, safe_print, trace_output_directory
-      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var, clean_ctx, ttft_start_time, ttft_trace_id
+      from omni.tools.profiler.trace.tracing import create_span, parent_ctx_var, ttft_start_time, ttft_trace_id
       from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
       request_id = args[1][0]['remote_request_id']
-      if parent_ctx_var.get() is not None: 
+      headers = args[1][0]['trace_headers']
+      if headers and headers.get('traceparent') is not None:
+          start_time = int(headers.get("start_time_ns"))
+          trace_headers = {"traceparent": headers["traceparent"]}
           timestamp = time.time_ns()
-          ctx = create_span(start_time_ns=0, end_time=timestamp, action_name="Finish pull kv", request_id=request_id, ip_str=ip_str, ctx_flag=True, trace_headers=None,)
+          ctx = create_span(start_time_ns=start_time, end_time=timestamp, action_name="Finish H2D", request_id=request_id, ip_str=ip_str, ctx_flag=False, trace_headers=trace_headers,)
           carrier = {}
           TraceContextTextMapPropagator().inject(carrier, context=ctx)
           carrier['start_time_ns'] = str(timestamp)
-          carrier['ttft_start_time'] = ttft_start_time.get()
-          carrier['ttft_traceparent'] = ttft_trace_id.get()
+          carrier['ttft_start_time'] = headers.get('ttft_start_time')
+          carrier['ttft_traceparent'] = headers.get('ttft_traceparent')
           args[1][0]['trace_headers'] = carrier
-      clean_ctx()
       safe_print(trace_output_directory, f"<<<Action: Finish pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
 
   - module: "vllm.v1.serial_utils:MsgpackDecoder"

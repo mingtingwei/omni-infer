@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple, List, Dict
+from typing import TYPE_CHECKING, Any, Optional, Tuple, List, Dict, Union, Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -50,6 +50,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from omni.models.config_loader.loader import model_extra_config
 
 import multiprocessing
+profiling_is_set = os.getenv("PROFILING_NAMELIST", None) is not None
 
 GET_META_MSG = b"get_meta_msg"
 logger = init_logger(__name__)
@@ -90,6 +91,7 @@ class ReqMeta:
     spec_token_ids: Optional[List[int]]
     remote_dp_rank: Optional[int]
     remote_request_id: Optional[str]
+    trace_headers: Optional[Mapping[str, str]] = None
 
 
 @dataclass
@@ -108,6 +110,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
         request_id: str,
         local_block_ids: List[List[int]],
         kv_transfer_params: Dict[str, Any],
+        trace_headers: Optional[Mapping[str, str]] = None,
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -117,6 +120,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
             spec_token_ids=kv_transfer_params["spec_token_ids"],
             remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
             remote_request_id=kv_transfer_params.get("remote_request_id"),
+            trace_headers=trace_headers  or {},
         )
 
 
@@ -202,14 +206,15 @@ class RouterDealerClient:
         self.socket.connect(server_address)
         print(f"Connected to server at {server_address} with ID: {client_id.decode()}")
 
-    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int) -> bool:
+    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int, trace_headers: Optional[Mapping[str, str]] = {}) -> bool:
         try:
             request_data = {
                 'request_id': request_id,
                 'table_id': rank_id,
                 'src_block_ids': src_id_list,
                 'dst_block_ids': dst_id_list,
-                'cluster_id': cluster_id
+                'cluster_id': cluster_id,
+                'trace_headers': trace_headers
             }
             packed_data = msgpack.packb(request_data)
             self.socket.send(packed_data)
@@ -241,6 +246,7 @@ class _SendItem:
     src_ids: List[int]
     dst_ids: List[int]
     rank_id: int
+    trace_headers: Optional[Mapping[str, str]] = None
 
 
 @dataclass
@@ -255,19 +261,21 @@ class PendingReq:
     t_submit: float = field(default_factory=time.time)
     t_sent: float = 0.0
     t_resp: float = 0.0
+    trace_headers: Optional[Mapping[str, str]] = None
 
 
 class _ZMQSendProxy:
     def __init__(self, send_q: "multiprocessing.Queue[_SendItem]"):
         self._q = send_q
 
-    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int) -> bool:
+    def send_request(self, request_id: str, cluster_id: int, src_id_list: List[int], dst_id_list: List[int], rank_id: int, trace_headers: Optional[Mapping[str, str]] = None) -> bool:
         self._q.put(_SendItem(
             request_id=request_id,
             cluster_id=int(cluster_id),
             src_ids=list(src_id_list),
             dst_ids=list(dst_id_list),
             rank_id=int(rank_id),
+            trace_headers=trace_headers,
         ))
         return True
 
@@ -481,7 +489,7 @@ class PrefillConnectorWorker:
             self.input_socket.bind(f"tcp://{self.host_ip}:{self.host_port}")
             logger.info(f"ConnectWorker bind tcp://{self.host_ip}:{self.host_port}")
             self._transfer_lock = threading.Lock()
-            self.receive_req_list: List[str] = []
+            self.receive_req_list = []
             thread_name = "prefill_connector_get_pulled_kv_req_list"
             self.thread = threading.Thread(target=self.get_pulled_kv_req_list, daemon=True, name=thread_name)
             self.thread.start()
@@ -572,12 +580,17 @@ class PrefillConnectorWorker:
                 return all_done_sending, all_done_recving
 
             with self._transfer_lock:
-                for req_id in self.receive_req_list:
+                for item in self.receive_req_list:
+                    req_id = item.get('remote_request_id')
                     logger.debug(f"Get_finished: request {req_id}")
-                    all_done_sending.add(req_id)
                     # if the request's kv has been received, remove it from requests_finish_time
                     if req_id in self.requests_finish_time:
                         del self.requests_finish_time[req_id]
+                    if profiling_is_set:
+                        headers = item.get('trace_headers', {})
+                        headers_str = json.dumps(headers)
+                        req_id = req_id + '|' + headers_str
+                    all_done_sending.add(req_id)
                 self.receive_req_list.clear()
 
         return all_done_sending, all_done_recving
@@ -669,6 +682,7 @@ class DecodeConnectorScheduler:
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    trace_headers=getattr(req, 'trace_headers', None) or {},
                 )
             req.kv_transfer_params = None
         self._reqs_need_recv.clear()
@@ -894,6 +908,7 @@ class DecodeConnectorWorker:
                 request_id=req_id,
                 remote_request_id=meta.remote_request_id,
                 remote_host_ip=meta.remote_host,
+                trace_headers=meta.trace_headers,
             )
             futures.append(future)
 
@@ -907,7 +922,8 @@ class DecodeConnectorWorker:
         dst_cluster_id: str,
         request_id: str,
         remote_request_id: Optional[str],
-        remote_host_ip: str
+        remote_host_ip: str,
+        trace_headers: Optional[Mapping[str, str]] = None
     ):
         start = time.time()
 
@@ -920,6 +936,7 @@ class DecodeConnectorWorker:
             remote_host_ip=remote_host_ip,
             dp_rank=self.omni_cache.dp_local_rank,
             t_submit=start,
+            trace_headers=trace_headers,
         )
         req.t_sent = start
         self._pending[request_id] = req
@@ -930,6 +947,7 @@ class DecodeConnectorWorker:
             src_id_list=remote_block_ids,
             dst_id_list=local_block_ids[0],
             rank_id=self.omni_cache.dp_local_rank,
+            trace_headers=trace_headers,
         )
 
         logger.warning("Adding Sent Queue req_id=%s in %.6f s",
@@ -994,6 +1012,7 @@ class DecodeConnectorWorker:
                     src_id_list=item.src_ids,
                     dst_id_list=item.dst_ids,
                     rank_id=item.rank_id,
+                    trace_headers=item.trace_headers,
                 )
                 if not ok:
                     raise ValueError(f"Send failed for req_id={item.request_id}")
@@ -1047,7 +1066,7 @@ class DecodeConnectorWorker:
                 self._log_network_timing(ctx)
 
                 micro_batch_device_mem, micro_batch_device_max, micro_batch_host_mem, micro_batch_host_sizes = self.omni_cache.build_h2d_ops(
-                    ctx.local_block_ids,
+                    ctx,
                     CLUSTER_SIZE
                 )
                 batch_device_mem.extend(micro_batch_device_mem)
@@ -1105,12 +1124,22 @@ class DecodeConnectorWorker:
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             if tp_size == 1:
                 if ctx.remote_request_id is not None:
-                    self._send_pulled_kv_req_list(ctx.remote_host_ip, [ctx.remote_request_id])
+                    data = [{'remote_request_id': ctx.remote_request_id, 'trace_headers': ctx.trace_headers or {}}]
+                    self._send_pulled_kv_req_list(ctx.remote_host_ip, data)
+                if profiling_is_set:
+                    headers = data[0]['trace_headers'] or None
+                    headers_str = json.dumps(headers)
+                    ctx.request_id = ctx.request_id + '|' + headers_str
                 self._recving_transfers.put(ctx.request_id)
             else:
                 torch.distributed.barrier(group=get_tp_group().cpu_group)
                 if get_tensor_model_parallel_rank() == 0 and ctx.remote_request_id is not None:
-                    self._send_pulled_kv_req_list(ctx.remote_host_ip, [ctx.remote_request_id])
+                    data = [{'remote_request_id': ctx.remote_request_id, 'trace_headers': ctx.trace_headers or {}}]
+                    self._send_pulled_kv_req_list(ctx.remote_host_ip, data)
+                if profiling_is_set:
+                    headers = data[0]['trace_headers'] or None
+                    headers_str = json.dumps(headers)
+                    ctx.request_id = ctx.request_id + '|' + headers_str
                 self._recving_transfers.put(ctx.request_id)
 
     def stop_zmq_thread(self, wait: bool = True):
@@ -1135,7 +1164,7 @@ class DecodeConnectorWorker:
         self._process_monitor_thread = None
         self._mgr.shutdown()
 
-    def _send_pulled_kv_req_list(self, path: str, data: List[str]):
+    def _send_pulled_kv_req_list(self, path: str, data):
         if path in self.zmq_socket_map:
             socket_ = self.zmq_socket_map[path]
         else:

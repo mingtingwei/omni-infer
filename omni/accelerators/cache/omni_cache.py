@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import math
 import os
 from abc import ABC, abstractmethod
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Mapping
 import threading
 import numpy as np
 import torch
@@ -22,6 +22,7 @@ import ctypes
 from ctypes import pythonapi, py_object
 from omni.accelerators.cache.kv_mem_pool import KVCacheMemoryPool
 from concurrent.futures import ThreadPoolExecutor, Future
+from omni.accelerators.pd.omni_cache_connector_v1 import PendingReq
 
 
 logger = init_logger("vllm.v1.omni")
@@ -776,7 +777,8 @@ class DecodeOmniCache(BaseOmniCache):
                     raise ValueError("Unknown KV cache spec type.")
         return kv_caches
 
-    def build_h2d_ops(self, local_block_ids: List[List[int]], tp_nnodes: int = 1) -> None:
+    def build_h2d_ops(self, ctx: PendingReq, tp_nnodes: int = 1) -> None:
+        local_block_ids = ctx.local_block_ids
         if len(local_block_ids) > 1:
             batch_device_mem, batch_device_max, batch_host_mem, batch_host_sizes = self.build_h2d_ops_omni_attn(local_block_ids)
         else:
