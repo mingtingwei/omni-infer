@@ -59,7 +59,7 @@ def test_chat_completions(setup_teardown):
         "X-Request-Id": "12345"
     }
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "messages": [{"role": "user", "content": "What is the capital of France?"}],
@@ -79,7 +79,7 @@ def test_chat_completions_stream(setup_teardown):
         "X-Request-Id": "12345"
     }
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "messages": [{"role": "user", "content": "What is the capital of France?"}],
@@ -115,7 +115,7 @@ def test_chat_completions_invalid_server(setup_teardown):
         "X-Request-Id": "12345"
     }
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "messages": [{"role": "user", "content": "What is the capital of France?"}],
@@ -132,7 +132,7 @@ def test_chat_completions_with_proxy(setup_teardown):
         "X-Request-Id": "12345"
     }
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "messages": [{"role": "user", "content": "What is the capital of France?"}],

@@ -175,7 +175,7 @@ def rewrite_upstream_servers_only(conf_path, upstream_name, new_ports):
     with open(conf_path, "w") as f:
         f.writelines(new_lines)
 
-def wait_vllm_ready(processes, logs, timeout=60):
+def wait_vllm_ready(processes, logs, timeout=120):
     start = time.time()
     ready = [False] * len(processes)
 
@@ -331,7 +331,7 @@ def test_proxy_reload(reload_env):
         url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         payload = {
-            "model": "deepseek",
+            "model": "qwen",
             "temperature": 0,
             "max_tokens": 5,
             "messages": [{"role": "user", "content": "hi"}],
@@ -555,7 +555,7 @@ def test_proxy_reload_under_concurrent_traffic(reload_env):
         url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         data = {
-            "model": "deepseek",
+            "model": "qwen",
             "temperature": 0,
             "max_tokens": 5,
             "messages": [{"role": "user", "content": "hi"}],

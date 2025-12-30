@@ -1,13 +1,29 @@
 import json
 import os
 import socket
-
+import errno
 PORTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_ports.json")
 
 def find_free_port():
-    with socket.socket() as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+            s1.bind(("", 0))
+            port1 = s1.getsockname()[1]
+            port2 = port1 + 100
+            
+            if port2 > 65535:
+                continue
+            try:
+                # ensure free port for kv_event 
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                    s2.bind(("", port2))
+            except OSError as e:
+                if e.errno != errno.EADDRINUSE:
+                    raise
+                continue
+            return port1
+    raise RuntimeError(f"[WARNING] cannot find free port, please try again")
+
 
 def find_n_free_ports(num_ports):
     ports = []

@@ -64,6 +64,8 @@ def setup_vllm(is_prefill, port_list, log_file_prefix=None):
     env["NO_NPU_MOCK"] = "1"
     env["RANDOM_MODE"] = "1"
     env["KV_CACHE_MODE"] = "1"
+    env["ENABLE_APC_EVENT"] = "1"
+    env['PYTHONHASHSEED'] = '123'
     env["COVERAGE_PROCESS_START"] = f"{COVRC_DIR}/.coveragerc"
     env["PYTHONPATH"] = f"{CUR_DIR}" + ":" + env.get("PYTHONPATH", "")
 
@@ -81,6 +83,8 @@ def setup_vllm(is_prefill, port_list, log_file_prefix=None):
     log_list = []
     idx = 0
     for port in port_list:
+        KV_EVENTS_CONFIG='{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:' + str(port + 100) + '"}'
+
         cmd = [
             "vllm", "serve", model_path,
             "--port", f"{port}",
@@ -90,10 +94,11 @@ def setup_vllm(is_prefill, port_list, log_file_prefix=None):
             "--data_parallel_size", f"{dp}",
             "--gpu_memory_utilization", "0.9",
             "--trust_remote_code",
-            "--served-model-name", "deepseek",
+            "--served-model-name", "qwen",
             "--dtype", "bfloat16",
             "--distributed-executor-backend", "mp",
             "--block_size", "128",
+            "--kv-events-config", f"{KV_EVENTS_CONFIG}",
         ]
         log_file = Path(f"{node_type}_{log_file_prefix}_{idx}.log")
         log_list.append(log_file)

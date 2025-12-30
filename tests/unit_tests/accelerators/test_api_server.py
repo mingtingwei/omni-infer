@@ -185,7 +185,7 @@ def test_completions_using_process_pool(setup_teardown):
 
     # Contruct a long enough prompt that will enable process pool
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "prompt": list("""Act as an expert creative writing instructor and narrative analyst. 
@@ -212,7 +212,7 @@ def test_chat_completions_using_proc_pool(setup_teardown):
     
     # Contruct a long enough prompt that will enable process pool
     data = {
-        "model": "deepseek",
+        "model": "qwen",
         "temperature": 0,
         "max_tokens": 20,
         "messages": [{"role": "user", 
