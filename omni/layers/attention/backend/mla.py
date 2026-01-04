@@ -560,9 +560,6 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
                 tmp_input_position = input_positions[tokens_start:]
             else:
-                seq_qlen_group = [list(itertools.accumulate(query_lens_list))]
-                seq_kvlen_group = [list(itertools.accumulate(seq_lens_list))]
-                kv_index_list = None
 
                 prefix_meta = omni_cache.get_prefill_prefix_copy_meta(
                     block_size=self.block_size,
@@ -572,21 +569,42 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     attn_state=self.runner.attn_state,
                 )
 
-                omni_cache.synchronize_h2d(
-                    prefix_meta=prefix_meta,
-                    layer_idx=0,
-                )
-
                 volatile_block_table, volatile_slot_mapping = omni_cache.get_volatile_metadata(
                     query_lens_list,
                     seq_lens_list,
                     graph_pad_size,
                     PAD_SLOT_ID,
                     slot_mapping,
+                    prefix_meta,
                 )
+
+                omni_cache.synchronize(
+                    layer_idx = 0,
+                    kv_event = None
+                )
+                omni_cache.wait_h2d_event_and_d2h_trigger()
+
                 if volatile_block_table is not None:
                     block_table = volatile_block_table[:num_reqs]
                     slot_mapping = volatile_slot_mapping
+                
+                seq_kvlen_group, seq_qlen_group, block_groups = group_request_list(
+                    seq_lens_list,
+                    query_lens_list,
+                    block_table,
+                    self.runner.max_num_tokens)
+                
+                if self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
+                    kv_index_list = []
+                    if block_table is not None and block_table.numel() > 0:
+                        for seq_lens, block_tables in zip(seq_kvlen_group, block_groups):
+                            kv_index = self.get_kv_index(seq_lens, block_tables)
+                            kv_index_list.append(kv_index)
+                else:
+                    kv_index_list = None
+
+                seq_qlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_qlen_group]
+                seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
 
                 tmp_input_position = input_positions[tokens_start:]
 

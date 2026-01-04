@@ -194,52 +194,11 @@ class PrefillOmniCache(BaseOmniCache):
         self.d2h_thrp = ThreadPoolExecutor(max_workers=1, thread_name_prefix="D2H_Worker")
         self.copy_future: Future = None
 
-        # buffer for prefix/chunk
-        # layout: TND, where T is max possible total KV tokens for a batch
-        self.prefix_buffer_npu = torch.empty(
-            max_num_seqs * max_model_len,
-            1, # num of heads is 1
-            self.head_size,
-            dtype=self.dtype,
-            device=self.device,
-        )
         self.h2d_stream = torch.npu.Stream(device=self.device)
-        self.h2d_event = torch.npu.Event(blocking=False, enable_timing=False)
+        self.h2d_event = threading.Event()
+        self.d2h_event = threading.Event()
 
         self._nz_size = NZ_DIM
-
-    # def calc_cache_shape(self) -> Tuple[Tuple[int, ...], int]:
-    #     self.tp_node_id = self.tp_rank // NUM_DIE_PER_MACH
-    #     self.tp_nnodes = divide_or_raise(self.tp_world_size, NUM_DIE_PER_MACH)
-
-    #     # For prefill, each node only needs to store a segment of KV cache.
-    #     # For example, if head_size = 576, and TP is across 2 nodes, then
-    #     # node0 stores [0, 288) and node1 stores [288, 576).
-    #     self.local_head_size = divide_or_raise(self.head_size, self.tp_nnodes)
-    #     shape, num_blocks = PrefillOmniCache.calc_cache_shape_for_prefill(
-    #         num_layers=self.num_layers,
-    #         block_size=self.block_size,
-    #         num_kv_heads=self.num_kv_heads,
-    #         head_size=self.local_head_size,
-    #         dtype=self.dtype,
-    #     )
-    #     total_num_nz_heads = shape[-1]                              # e.g., 36
-    #     rank_num_nz_heads = total_num_nz_heads // NUM_DIE_PER_MACH  # 2
-    #     remainder = total_num_nz_heads % NUM_DIE_PER_MACH           # 4
-
-    #     # [3, 3, 3, 3, 2, 2, ...]
-    #     get_rank_heads = lambda rank: rank_num_nz_heads + 1 if rank < remainder else rank_num_nz_heads
-    #     starts = [0]
-    #     for i in range(NUM_DIE_PER_MACH):
-    #         starts.append(starts[-1] + get_rank_heads(i))
-    #     assert starts[-1] == total_num_nz_heads, f"{total_num_nz_heads=}, while {starts=}."
-
-    #     # how many nz heads the current rank is responsible to copy  // 512/64/128 --> // 32
-    #     self.nz_heads_slc = slice(starts[self.tp_local_rank], starts[self.tp_local_rank+1])
-    #     logger.warning(f"<<< {starts=}, {self.nz_heads_slc}")
-    #     self.num_nz_heads = self.nz_heads_slc.stop - self.nz_heads_slc.start
-
-    #     return shape, num_blocks
 
     def calc_cache_shape(self) -> Tuple[Tuple[int, ...], int]:
         self.tp_node_id = self.tp_rank // NUM_DIE_PER_MACH
@@ -379,6 +338,7 @@ class PrefillOmniCache(BaseOmniCache):
         graph_pad_size: int,
         pad_slot_id: int,
         orig_slot_mapping: torch.Tensor,
+        prefix_meta
     ):
         orig_shape = orig_slot_mapping.shape
         if model_extra_config.parall_config.attn_sp_size > 1:
@@ -394,16 +354,6 @@ class PrefillOmniCache(BaseOmniCache):
                 query_lens_list,
                 self.block_size
             )
-        query_lens_tensor = torch.tensor(query_lens_list)
-        padding_lens_tensor = (self.block_size - query_lens_tensor % self.block_size) % self.block_size
-        total_lens_list = (query_lens_tensor + padding_lens_tensor).tolist()
-        self.sum_total_len = sum(total_lens_list)
-        self.sum_query_len = sum(query_lens_list)
-        self.query_mask = torch.zeros(self.sum_total_len, dtype = torch.bool)
-        start = 0
-        for ql, tl in zip(query_lens_list, total_lens_list):
-            self.query_mask[start:start+ql] = 1
-            start += tl
 
         blocks, slots = orig_slot_mapping // self.block_size, orig_slot_mapping % self.block_size
         ranks, rank_slots = slots // self.rank_block_size, slots % self.node_block_size
@@ -412,10 +362,6 @@ class PrefillOmniCache(BaseOmniCache):
         num_tokens = token_idx.shape[0]
 
         self.batch_slots_cpu[:num_tokens].copy_(slot_mapping, non_blocking=True)
-        self.batch_token_indices = token_idx
-
-        if not model_extra_config.operator_opt_config.enable_dsa:
-            return None, None
 
         max_num_blocks_per_req = self.volatile_table.shape[1]
         slot_mapping = []
@@ -430,178 +376,165 @@ class PrefillOmniCache(BaseOmniCache):
             slot_mapping.append(padding)
         slot_mapping = torch.cat(slot_mapping, dim=0)
 
+        slot_mapping_padded = generate_full_block_slot(
+            slot_mapping,
+            query_lens_list,
+            self.block_size
+        )
+        self.batch_token_indices = slot_mapping_padded[torch.nonzero((ranks == self.tp_rank), as_tuple=True)[0]]
+
         if slot_mapping.shape != orig_shape:
             raise RuntimeError(f"Slot mapping shape mismatch! {slot_mapping.shape=}, {orig_shape=}.")
+        
+        # For APC
+        self.apc_host_index = self.get_apc_host_index(prefix_meta)
+        self.apc_device_index = self.get_apc_device_index(prefix_meta)
+
         return self.volatile_table, slot_mapping
 
-    def get_current_rank_host_data(self, layer_idx, prefix_meta):
+    def get_apc_host_index(self, prefix_meta):
+        if prefix_meta is None:
+            return None
         # flatten
         block_ids = []
         for block_ranges in prefix_meta.consecutive_blocks:
             for start_block_id, end_block_id in block_ranges:
                 block_ids.extend(range(start_block_id, end_block_id))
+        
+        index_this_rank = torch.chunk(torch.arange(self.node_block_size), chunks=NUM_DIE_PER_MACH)[self.tp_local_rank] + torch.tensor(block_ids)[:, np.newaxis] * self.node_block_size
 
-        num_heads_per_node = len(block_ids) * self.node_block_size
-        num_heads_per_rank = num_heads_per_node // NUM_DIE_PER_MACH
-
-        # Get block_ids of current rank
-        current_rank_block_ids_start_idx = self.tp_local_rank * num_heads_per_rank // self.node_block_size
-        current_rank_block_ids_end_idx = (self.tp_local_rank + 1) * num_heads_per_rank // self.node_block_size
-        block_ids_of_this_rank = block_ids[current_rank_block_ids_start_idx:current_rank_block_ids_end_idx + 1]
-
-        offset_in_block = self.tp_local_rank * num_heads_per_rank % self.node_block_size
-        block_id = block_ids_of_this_rank[0]
-        head_offset = block_id * self.node_block_size + offset_in_block
-
-        ## Dram.contiguous()
-        remain_heads = num_heads_per_rank
-        num_copyed_heads = min(remain_heads, self.node_block_size - offset_in_block)
-        remain_heads -= num_copyed_heads
-
-        kvi_tensors = []
+        return index_this_rank
+    
+    def get_apc_device_index(self, prefix_meta):
+        if prefix_meta is None:
+            return None
+        result = []
+        dst_start = 1 # start index
+        for block_ranges in prefix_meta.consecutive_blocks:
+            num_blocks = sum([end_block_id - start_block_id for start_block_id, end_block_id in block_ranges])
+            result.extend(range(dst_start, dst_start+num_blocks))
+            dst_start += self.volatile_table.shape[1]
+        result = torch.tensor(result)
+        return result
+    
+    def get_current_rank_host_data(self, layer_idx):
         host_data = []
-        for i, tensor in enumerate(self.host_cache.kvi_tensors):
-            host_data.append([])
-            kvi_tensors.append(tensor.view(self.num_layers, -1, tensor.shape[-1]))
 
-        for index, block_id in enumerate(block_ids_of_this_rank[:-1]):
-            if block_ids_of_this_rank[index+1] == block_id + 1:
-                num_copying_heads = min(remain_heads, self.node_block_size)
-                num_copyed_heads += num_copying_heads
-                remain_heads -= num_copying_heads
-            else:
-                for idx, tensor in enumerate(kvi_tensors):
-                    host_data[idx].append(tensor[layer_idx, head_offset:head_offset+num_copyed_heads])
+        last_dim_size = sum([tensor.size(-1) for tensor in self.host_cache.kvi_tensors])
+        for tensor in self.host_cache.kvi_tensors:
+            host_data.append(tensor.view(self.num_layers, -1, tensor.size(-1))[layer_idx, self.apc_host_index])
 
-                block_id = block_ids_of_this_rank[index+1]
-                head_offset = block_id * self.node_block_size
-                num_copyed_heads = min(remain_heads, self.node_block_size)
-                remain_heads -= num_copyed_heads
-
-        for idx, tensor in enumerate(kvi_tensors):
-            host_data[idx].append(tensor[layer_idx, head_offset:head_offset+num_copyed_heads])
-            host_data[idx] = torch.concat(host_data[idx])
-
-        host_data = torch.concat(host_data, dim=-1)
+        host_data = torch.concat(host_data, dim=-1).view(-1, self.rank_block_size, last_dim_size)
 
         return host_data
 
-    def update_device_cache(self, prefix_meta, global_device_data):
-        src_start = 0
-        for req_id, block_ranges in enumerate(prefix_meta.consecutive_blocks):
-            dst_start = req_id * self.volatile_table.shape[1] + 1
-            num_blocks = sum([end_block_id - start_block_id for start_block_id, end_block_id in block_ranges])
-            for i, tensor in enumerate(self.host_cache.kvi_tensors):
-                self.device_cache[i][dst_start:dst_start+num_blocks] = global_device_data[i][src_start: src_start + num_blocks]
-            src_start += num_blocks
+    def update_device_cache(self, global_device_data):
+        for i in range(len(self.device_cache)):
+            self.device_cache[i][self.apc_device_index] = global_device_data[i]
+    
+    def wait_h2d_event_and_d2h_trigger(self):
+        self.h2d_event.wait()
+        self.h2d_event.clear()
+        self.d2h_event.set()
+
+    def index_kvcache(self, tensor):
+        tensor = tensor.view(-1, tensor.size(-1))[self.batch_token_indices]
+        return tensor 
+    
     def synchronize_h2d(
         self,
-        prefix_meta: "PrefixCopyMeta",
         layer_idx: int,
     ) -> None:
         """When prefix is hit, load the relevant KV from CPU to device buffer.
         key_states: (Tq, N, Dk)
         values_states: (Tq, N, Dv)
         """
-        if prefix_meta is None or layer_idx >= self.num_layers:
-            return
+        if self.apc_host_index is None or self.apc_device_index is None or layer_idx >= self.num_layers:
+            self.h2d_event.set()
+            return None
 
         with torch.npu.stream(self.h2d_stream):
             # Step0: get the contiguous host data
-            host_data = self.get_current_rank_host_data(layer_idx, prefix_meta)
+            host_data = self.get_current_rank_host_data(layer_idx)
 
             # Step1: to_device -> [num_blocks*block_size//nn_nodes//NUM_DIE_PER_MACH * headsize]
             device_data = host_data.to(device=self.device)
 
-            # Step2: All Gather -> [tp_world_size, num_blocks*block_size//nn_nodes//NUM_DIE_PER_MACH * headsize]
-            global_device_data = tensor_model_parallel_all_gather(device_data, dim=0)
+            # Step2: All Gather -> [num_blocks, tp_world_size*block_size//nn_nodes//NUM_DIE_PER_MACH * headsize]
+            global_device_data = tensor_model_parallel_all_gather(device_data, dim=1)
+        
+        self.h2d_event.set()
+        return global_device_data
+    
+    def synchronize_d2d(self, device_data) -> None:
 
-            # Step3: -> [nn_nodes, num_blocks, node_block_size, headsize]
-            global_device_data = global_device_data.view(self.tp_nnodes, -1, self.node_block_size, self.head_size)
+        with torch.npu.stream(self.h2d_stream):
+            if device_data is None:
+                return
 
-            # Step4: tranpose -> [num_blocks, nn_nodes, node_block_size, headsize]
-            global_device_data = global_device_data.permute(1, 0, 2, 3) # is_contiguous: False
+            # Step3: -> [num_blocks, block_size, 1, headsize]
+            global_device_data = device_data.view(-1, self.block_size, 1, self.head_size)
 
-            # Step5: contiguous() --> [num_blocks*block_size, headsize]
+            # Step5: split
             device_kvi_tensor = []
             start_index = 0
-            for i, tensor in enumerate(self.host_cache.kvi_tensors):
+            for tensor in self.host_cache.kvi_tensors:
                 length = tensor.shape[-1]
-                device_kvi_tensor.append(global_device_data[..., start_index : start_index + length].contiguous().view(-1, self.block_size, 1, length))
+                device_kvi_tensor.append(global_device_data[..., start_index : start_index + length])
                 start_index += length
 
             #  Step6: Device To Device Copy
-            self.update_device_cache(prefix_meta, device_kvi_tensor)
+            self.update_device_cache(device_kvi_tensor)
 
-            self.h2d_event.record(self.h2d_stream)
-
-    def _copy_tensor_to_buffer(self, src_tensor, buffer_idx):
-        for idx_block in range((src_tensor.shape[0] + self.block_size - 1) // self.block_size):
-            offset = self.block_size // self.tp_world_size
-            start = self.tp_rank * offset + idx_block * self.block_size
-            end = min((self.tp_rank + 1) * offset + idx_block * self.block_size, src_tensor.shape[0])
-            if start < src_tensor.shape[0]:
-                tensor_slice = src_tensor[start:end, ...] # [2, 1,]
-                logger.warning(f"<<<{self.batch_buffer_cpu[buffer_idx].shape=}, {self.batch_buffer_cpu[buffer_idx][0:offset, ...].shape=}, {src_tensor.shape=}, {tensor_slice.shape=}")
-                self.batch_buffer_cpu[buffer_idx][idx_block*offset : (idx_block+1) * offset, ...].copy_(tensor_slice.squeeze(1), non_blocking=True)  # self.batch_buffer_cpu.shape[1] = 32
-
-    # modified by gpt to improve efficiency
     def synchronize_d2h(
         self,
-        kv_states: List[torch.Tensor],
         layer_idx: int,
         kv_event: torch.npu.Event,
     ) -> None:
-        if self.copy_future is not None and not self.copy_future.done():
-            self.copy_future.result()
-        d2h_event = torch.npu.Event(blocking=False, enable_timing=False)
+        
+        self.d2h_event.wait()
+        self.d2h_event.clear()
+        # For synchronize func(layer_idx=0)
+        if layer_idx < 0  or kv_event is None:
+            return 
+
+        num_tokens = self.batch_token_indices.shape[0]
         with torch.npu.stream(self.d2h_stream):
-            num_tokens = self.batch_token_indices.shape[0]
             self.d2h_stream.wait_event(kv_event)
-            for i in range(len(kv_states)):
+            for i in range(len(self.device_cache)):
                 self.batch_buffer_cpu[i][:num_tokens].copy_(
-                    self._nd_to_nz(kv_states[i].squeeze(1)), non_blocking=True)
-            d2h_event.record(self.d2h_stream)
-
-        self.copy_future = self.d2h_thrp.submit(
-            self._update_host_cache_thread,
-            num_tokens, layer_idx, d2h_event,
-        )
-    
-    def _padding_kv_cache(self, tensor):
-        result = torch.zeros((self.sum_total_len, *tensor.shape[1:]), dtype=tensor.dtype, device = tensor.device)
-        result[self.query_mask] = tensor[:self.sum_query_len]
-        return result
-    
-    def _nd_to_nz(self, tensor):
-        # Padding KVCache per Req to full Block
-        tensor = self._padding_kv_cache(tensor)
-
-        # [global_num_tokens, hidden_size]
-        golbal_num_tokens = tensor.size(0)
-
-        # [num_blocks, block_size, num_nz, nz_dim]
-        tensor = tensor.view(golbal_num_tokens//self.block_size, self.block_size, -1, self._nz_size)
-
-        # [num_blocks, num_nz, block_size, nz_dim] by Permute & Contiguous
-        tensor = tensor.permute(0, 2, 1, 3).contiguous()
-
-        # view to fake global num_tokens
-        tensor = tensor.view(golbal_num_tokens, -1)
-
-        # Get local num tokens by Rank index
-        tensor = tensor[self.batch_token_indices]
-
-        return tensor
-
-    def _update_host_cache_thread(self, num_tokens, layer_idx, event):
-        torch.npu.set_device(self.device)
-        event.synchronize()
+                    self.index_kvcache(self.device_cache[i]), non_blocking=True)
+                self.device_cache[i].zero_()
+        self.d2h_stream.synchronize()
 
         slots = self.batch_slots_cpu[:num_tokens]
         for i, tensor in enumerate(self.host_cache.kvi_tensors):
             tensor.view(self.num_layers, -1, tensor.shape[-1])[layer_idx, slots] = self.batch_buffer_cpu[i][:num_tokens]
+    
+    def synchronize(
+        self,
+        layer_idx: int,
+        kv_event
+    ):
+        # Update layer_idx-1 to host
+        # Update layer_idx to device
 
+        if self.copy_future is not None and not self.copy_future.done():
+            self.copy_future.result()
+        
+        self.copy_future = self.d2h_thrp.submit(
+            self._update_host_and_device_cache_thread,
+            layer_idx, kv_event,
+        )
+    
+    def  _update_host_and_device_cache_thread(self, layer_idx, kv_event):
+        # mask the h2d comm & be masked by the moe layer
+
+        torch.npu.set_device(self.device)
+        device_data = self.synchronize_h2d(layer_idx)
+        self.synchronize_d2h(layer_idx-1, kv_event)
+        self.synchronize_d2d(device_data)
+    
 
 class DecodeOmniCache(BaseOmniCache):
     def __init__(

@@ -864,6 +864,12 @@ class DeepseekMLA(nn.Module):
             q = tensor_model_parallel_all_gather(q, dim=0)
             latent_cache = tensor_model_parallel_all_gather(latent_cache, dim=0)
 
+        if model_extra_config.operator_opt_config.use_omni_cache and \
+            attn_metadata is not None:
+            attn_metadata.omni_cache.synchronize(
+                layer_idx = self.layer_idx + 1,
+                kv_event = kv_event
+            )
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim],  dim=-1)
         # k_pe:BNS,64 kv_a:BNS, 512, kv_states:bnsd, cos,sin:bnsd, kv cache:bsnd
         q_pe = q_pe.unsqueeze(2)
@@ -876,6 +882,11 @@ class DeepseekMLA(nn.Module):
         q[..., self.qk_nope_head_dim:] = q_pe
         if isinstance(kv_cache, Dict):
             kv_cache = kv_cache.get("kv_cache")
+        
+        if model_extra_config.operator_opt_config.use_omni_cache and \
+            attn_metadata is not None:
+            kv_cache = attn_metadata.omni_cache.device_cache
+
         if kv_cache is not None and isinstance(kv_cache, Tuple) and kv_cache[0].numel() > 0:
             # raise RuntimeError(f"Should not come here.")
             with torch.npu.stream(self.stream1):
@@ -913,18 +924,6 @@ class DeepseekMLA(nn.Module):
             k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
             k_pe = k_pe.squeeze(2)
 
-            # for omni_cache
-            if attn_metadata is not None:
-                assert len(kv_a.shape) == 2 and kv_a.shape[1] == 512, f"{kv_a.shape=}"
-                assert k_pe.shape == (kv_a.shape[0], 1, 64), f"{k_pe.shape=}"
-
-                if model_extra_config.operator_opt_config.use_omni_cache and \
-                    attn_metadata.prefill.prefix_meta is not None:
-                    prefix_buffer = attn_metadata.omni_cache.prefix_buffer_npu
-                    dst_slots = attn_metadata.prefill.prefix_meta.query_slots
-                    num_actual_tokens = attn_metadata.prefill.prefix_meta.num_actual_tokens
-                    prefix_buffer[dst_slots, :, :512] = kv_a.unsqueeze(1)[:num_actual_tokens]
-                    prefix_buffer[dst_slots, :, 512:] = k_pe[:num_actual_tokens]
 
         is_attn_output_reshape = model_extra_config.operator_opt_config.prefill_enable_mla_alltoall and attn_metadata is None
         o_proj_tp_size = get_o_proj_dp_group().world_size \
@@ -961,15 +960,10 @@ class DeepseekMLA(nn.Module):
                         .index_select(0, prefill_metadata.kv_index_list[iter]).contiguous()
                     k_pe = kv_cache_pe.reshape(-1, kv_cache[1].shape[-1]) \
                         .index_select(0, prefill_metadata.kv_index_list[iter]).contiguous()
-                if model_extra_config.operator_opt_config.use_omni_cache and \
-                    prefill_metadata.prefix_meta is not None:
-                    prefix_buffer = attn_metadata.omni_cache.prefix_buffer_npu
-                    prefill_kv_a, prefill_k_pe = prefix_buffer[:actual_seq_kvlen[-1], :, :512], prefix_buffer[:actual_seq_kvlen[-1], :, 512:]
-                    prefix_event = attn_metadata.omni_cache.h2d_event
-                else:
-                    prefill_kv_a = kv_a[:actual_seq_kvlen[-1]]
-                    prefill_k_pe = k_pe[:actual_seq_kvlen[-1]]
-                    prefix_event = None
+
+                prefill_kv_a = kv_a[:actual_seq_kvlen[-1]]
+                prefill_k_pe = k_pe[:actual_seq_kvlen[-1]]
+                prefix_event = None
 
                 if get_dp_group().world_size > 1:
                     self.kv_b_proj.weight = torch.nn.Parameter(torch.cat((self.W_UK.permute(2,0,1), self.W_UV.transpose(0,1)), dim=-1) \
@@ -1009,6 +1003,11 @@ class DeepseekMLA(nn.Module):
                 computed_tokens += actual_seq_qlen[-1]
         else:
             attn_output.fill_(0)
+        
+        if model_extra_config.operator_opt_config.use_omni_cache and \
+            attn_metadata is not None:
+            attn_metadata.omni_cache.wait_h2d_event_and_d2h_trigger()
+            kv_event.record(main_stream if self.stream1 is None else self.stream1)
 
         self.stream1 = None
 
@@ -1048,15 +1047,6 @@ class DeepseekMLA(nn.Module):
             else:
                 output = self.o_proj.forward(attn_output, comm_group=comm_group)[0]
                 
-        if model_extra_config.operator_opt_config.use_omni_cache and \
-            attn_metadata is not None:
-            kv_states = [kv_a.unsqueeze(1), k_pe]
-            kv_event.record(main_stream)
-            attn_metadata.omni_cache.synchronize_d2h(kv_states, self.layer_idx, kv_event)
-            attn_metadata.omni_cache.synchronize_h2d(
-                prefix_meta=attn_metadata.prefill.prefix_meta,
-                layer_idx=self.layer_idx + 1,
-            )
         return output
 
     def _forward_mlaprolog_decode(
@@ -1076,7 +1066,7 @@ class DeepseekMLA(nn.Module):
         cos, sin = attn_metadata.decode.cos, attn_metadata.decode.sin
         q_norm = None
         dequant_scale_q_norm = None
-        if model_extra_config.operator_opt_config.enable_dsa or model_extra_config.operator_opt_config.use_omni_cache:
+        if model_extra_config.operator_opt_config.enable_dsa:
             cache_mode = "PA_BSND"
             q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
                 token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
