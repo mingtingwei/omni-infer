@@ -9,10 +9,11 @@ import sys
 import pandas as pd
 import openpyxl
 import traceback
+import datetime
 
 FILL_VALUE = "-"
 
-def parse_trace_logs(root_dir):
+def parse_trace_logs(root_dir, time_pairs, action_maps):
     pattern = (
         r"<<<Action: (.*?); Timestamp:([\d.]+); RequestID:([a-z0-9-]+)(?:; Role:(\S+))?"
     )
@@ -42,23 +43,24 @@ def parse_trace_logs(root_dir):
 
         # process time analysis
         if data_by_request:
-            df_final = _get_final_df(data_by_request, request_role)
-
-            with pd.ExcelWriter(time_analysis_path, engine="openpyxl") as writer:
-                df_final.to_excel(writer, sheet_name="time_analysis", index=False)
-                summary_data = {
+            summary_data = {
                     "RequestID": list(data_by_request.keys()),
                     "ActionCount": [
                         len(actions) for actions in data_by_request.values()
                     ],
                 }
-                df_summary = pd.DataFrame(summary_data)
+            df_summary = pd.DataFrame(summary_data)
+            df_final = _get_final_df(data_by_request, request_role, action_maps)
+            df_diff = _calculate_time_difference(df_final, time_pairs)
+
+            with pd.ExcelWriter(time_analysis_path, engine="openpyxl") as writer:
+                df_final.to_excel(writer, sheet_name="time_analysis", index=False)
                 df_summary.to_excel(writer, sheet_name="Summary", index=False)
+                df_diff.to_excel(writer, sheet_name="time_difference", index=False)
 
             print(
-                f"Successfully parsed time analysis files."
+                f"Successfully parsed time analysis files. Check {time_analysis_path} for details."
             )
-
         else:
             print("No valid action record found in any log files.")
 
@@ -76,6 +78,189 @@ def parse_trace_logs(root_dir):
     except Exception as e:
         print(f"Error occurred: {str(e)}")
         print(traceback.print_exc())
+
+
+def _calculate_time_difference(time_record, time_pairs):
+    """Calculate time stream end to end of p2d/d2p connector"""
+    
+    time_difference = pd.DataFrame()
+    first_col_name = time_record.columns[0]
+    first_col_data = time_record.iloc[:, 0].copy()
+    time_difference[first_col_name] = first_col_data
+
+    for start_col, end_col in time_pairs:
+        col_name = start_col + " -> " + end_col
+        time_difference[col_name] = time_record.apply(
+            lambda row: safe_subtract(row[start_col], row[end_col]), axis=1
+        )
+
+    # calculate the average time of all requests traced for each phase
+    averages = {}
+    for col in time_difference.columns[1:]:
+        column_data = time_difference[col].iloc[2:]
+
+        valid_values = []
+        for val in column_data:
+            if val != FILL_VALUE:
+                try:
+                    valid_values.append(float(val))
+                except:
+                    pass
+
+        if valid_values:
+            avg_value = sum(valid_values) / len(valid_values)
+            averages[col] = round(avg_value, 6)
+        else:
+            averages[col] = FILL_VALUE
+    
+    time_difference.iloc[0, 0] = "average_time_difference(s)"
+    for col in time_difference.columns[1:]:
+        time_difference.at[0, col] = averages.get(col, FILL_VALUE)
+
+    return time_difference
+
+
+def generate_connected_graphviz_flowchart(time_difference, time_pairs, action_maps):
+    """Generate Graphviz DOT code of flowchart"""
+    all_nodes = set()
+    for start_node, end_node in time_pairs:
+        all_nodes.add(start_node)
+        all_nodes.add(end_node)
+
+    # classify nodes to different types
+    action_class = dict(map(lambda k, v: (k, v[1]), action_maps.keys(), action_maps.values()))
+    
+    # node_categories: {class1: [node1, node2], class2: [node3, node4]}
+    classes = [
+        "proxy", 
+        "prefill_api_server", 
+        "prefill_engine", 
+        "decode_api_server", 
+        "decode_engine"
+    ]
+
+    node_categories = {key: [] for key in classes}
+    for node in all_nodes:     
+        if node not in action_class:
+            print(f"Warning: {node} is not defined in action_maps")
+            continue
+            
+        node_class = action_class[node]
+        if node_class == 0:
+            node_categories["proxy"].append(node)
+        elif node_class == 1:
+            node_categories["prefill_api_server"].append(node)
+        elif node_class == 2:
+            node_categories["prefill_engine"].append(node)
+        elif node_class == 3:
+            node_categories["decode_api_server"].append(node)
+        else:
+            node_categories["decode_engine"].append(node)
+    
+    # define node colors
+    node_colors = {
+        "proxy": {"fill": "#FFEBEE", "stroke": "#C62828", "bg": "#FFCDD2"},
+        "prefill_api_server": {"fill": "#E8F5E9", "stroke": "#2E7D32", "bg": "#C8E6C9"},
+        "prefill_engine": {"fill": "#E3F2FD", "stroke": "#1565C0", "bg": "#BBDEFB"},
+        "decode_api_server": {"fill": "#FFF3E0", "stroke": "#EF6C00", "bg": "#FFE0B2"},
+        "decode_engine": {"fill": "#F3E5F5", "stroke": "#7B1FA2", "bg": "#E1BEE7"}
+    }
+    
+    # generate code
+    dot_code = 'digraph G {\n'
+    dot_code += '    // Graph settings\n'
+    dot_code += '    rankdir=TB;           // Top to Bottom layout\n'
+    dot_code += '    compound=true;        // Allow edges between clusters\n'
+    dot_code += '    nodesep=0.5;          // Horizontal spacing between nodes\n'
+    dot_code += '    ranksep=0.8;          // Vertical spacing between ranks\n'
+    dot_code += '    fontname="Arial";\n'
+    dot_code += '    fontsize=16;\n\n'
+    
+    dot_code += '    // Default node style\n'
+    dot_code += '    node [\n'
+    dot_code += '        shape=box,\n'
+    dot_code += '        style="rounded,filled",\n'
+    dot_code += '        fontname="Arial",\n'
+    dot_code += '        fontsize=18,\n'
+    dot_code += '        penwidth=2\n'
+    dot_code += '    ];\n\n'
+    
+    dot_code += '    // Default edge style\n'
+    dot_code += '    edge [\n'
+    dot_code += '        color="#666666",\n'
+    dot_code += '        penwidth=3,\n'
+    dot_code += '        fontname="Arial",\n'
+    dot_code += '        fontsize=14\n'
+    dot_code += '    ];\n\n'
+    
+    # make subgraph
+    node_id_map = {}
+    cluster_id = 0
+    
+    for category, nodes in node_categories.items():
+        if not nodes:
+            continue
+            
+        cluster_name = f"cluster_{cluster_id}"
+        readable_title = category.replace('_', ' ').title()
+        colors = node_colors.get(category, {"fill": "#FFFFFF", "stroke": "#000000", "bg": "#F5F5F5"})
+        
+        dot_code += f'    // {readable_title}\n'
+        dot_code += f'    subgraph {cluster_name} {{\n'
+        dot_code += f'        label="{readable_title}";\n'
+        dot_code += f'        bgcolor="{colors["bg"]}";\n'
+        dot_code += f'        color="{colors["stroke"]}";\n'
+        dot_code += f'        penwidth=3;\n'
+        dot_code += f'        fontname="Arial";\n'
+        dot_code += f'        fontsize=20;\n\n'
+        
+        for node in nodes:
+            node_id = node.replace(" ", "_").replace(",", "").replace("(", "").replace(")", "")
+            node_label = node
+            node_id_map[node] = node_id
+            
+            dot_code += f'        {node_id} [\n'
+            dot_code += f'            label="{node_label}",\n'
+            dot_code += f'            fillcolor="{colors["fill"]}",\n'
+            dot_code += f'            color="{colors["stroke"]}"\n'
+            dot_code += f'        ];\n'
+        
+        dot_code += '    }\n\n'
+        cluster_id += 1
+    
+    # add edges
+    dot_code += '    // Connections between nodes\n'
+    
+    for start_node, end_node in time_pairs:
+        if start_node not in node_id_map or end_node not in node_id_map:
+            continue
+            
+        start_id = node_id_map[start_node]
+        end_id = node_id_map[end_node]
+        
+        # get time difference
+        phase = start_node + " -> " + end_node
+        if phase in time_difference.columns:
+            time_val = time_difference.iloc[0][phase]
+            if pd.isna(time_val) or time_val == "-":
+                avg_time = "N/A"
+            else:
+                try:
+                    phase_time = pd.to_numeric(time_val)
+                    if phase_time < 1:
+                        avg_time = f"{phase_time*1000:.3f}ms"
+                    else:
+                        avg_time = f"{phase_time:.3f}s"
+                except:
+                    avg_time = str(time_val)
+        else:
+            avg_time = "N/A"
+        
+        dot_code += f'    {start_id} -> {end_id} [label="{avg_time}"];\n'
+    
+    dot_code += '}\n'
+    
+    return dot_code
 
 
 def _get_engine_step_headers():
@@ -101,8 +286,7 @@ def _get_engine_step_headers():
     ]
 
 
-def _get_final_df(data_by_request, request_role):
-    origin_action_map = _get_action_map()
+def _get_final_df(data_by_request, request_role, origin_action_map):
     action_map = dict(map(lambda k, v: (k, v[0]), origin_action_map.keys(), origin_action_map.values()))
     fieldnames = ["RequestID", "P_NODE", "D_NODE"] + list(action_map.keys())
     data = []
@@ -298,11 +482,10 @@ def _get_action_map() -> dict:
         proxy -- 0
         P side:
             api server -- 1
-            engine core -- 2
+            engine -- 2
         D side:
             api server -- 3
-            engine core -- 4
-            worker -- 5
+            engine -- 4
     """
     return {
         "PD api server get request": ("P侧api server收到请求", 1),
@@ -327,8 +510,8 @@ def _get_action_map() -> dict:
         "Enter decode to generate": ("D侧api server收到请求", 3),
         "Start to dispatch decode request": ("进入engine分发请求", 4),
         "Add need pulling sequence": ("D侧请求添加到need pulling队列", 4),
-        "Start pull kv": ("开始pull kv", 5),
-        "Finish pull kv": ("结束pull kv", 5),
+        "Start pull kv": ("开始pull kv", 4),
+        "Finish pull kv": ("结束pull kv", 4),
         "Prefill free kv blocks": ("P侧释放KV(和前后列时间戳可能存在时钟误差)", 2),
         "Start append running sequece for decode": ("pull kv结束添加到running队列", 4),
         "Start to send output": ("触发首个decode token执行", 4),
@@ -403,56 +586,6 @@ def _get_main_model_info(engine_core_info, line):
         )
 
 
-def _calculate_time_difference(df_time, connector_type):
-    # calculate time stream end to end of p2d/d2p connector
-    try:
-        time_record = pd.read_excel(df_time)
-        print("time_analysis.xlsx文件读取成功")
-    except Exception as e:
-        print(f"time_analysis.xlsx文件读取失败: {e}")
-        return
-
-    time_pairs = _get_time_pairs(connector_type)
-
-    time_difference = pd.DataFrame()
-    first_col_name = time_record.columns[0]
-    first_col_data = time_record.iloc[:, 0].copy()
-    time_difference[first_col_name] = first_col_data
-
-    for start_col, end_col, col_name in time_pairs:
-        time_difference[col_name] = time_record.apply(
-            lambda row: safe_subtract(row[start_col], row[end_col]), axis=1
-        )
-
-    # calculate the average time of all requests traced for each phase
-    averages = {}
-    for col in time_difference.columns[1:]:
-        column_data = time_difference[col].iloc[2:]
-
-        valid_values = []
-        for val in column_data:
-            if val != FILL_VALUE:
-                try:
-                    valid_values.append(float(val))
-                except:
-                    pass
-
-        if valid_values:
-            avg_value = sum(valid_values) / len(valid_values)
-            averages[col] = round(avg_value, 6)
-        else:
-            averages[col] = FILL_VALUE
-    
-    time_difference.iloc[0, 0] = "average_time_difference(s)"
-    for col in time_difference.columns[1:]:
-        time_difference.at[0, col] = averages.get(col, FILL_VALUE)
-
-    with pd.ExcelWriter(df_time, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-        time_difference.to_excel(writer, sheet_name="time_difference", index=False)
-
-    print(f"Successfully calculate time difference. Check {df_time} for details.")
-
-
 def safe_subtract(a, b):
     if a == FILL_VALUE or b == FILL_VALUE:
         return FILL_VALUE
@@ -464,70 +597,43 @@ def safe_subtract(a, b):
 
 def _get_time_pairs(connector_type):
     commen_time_pairs = [
-        ("PD api server get request", "Get prefill engine request and start pickle", 
-         "PD api server get request -> Get prefill engine request and start pickle"),
-        ("Get prefill engine request and start pickle", "Finish process request in prefill engine", 
-         "Get prefill engine request and start pickle -> Finish process request in prefill engine"),
-        ("Finish process request in prefill engine", "Start process request in prefill engine", 
-         "Finish process request in prefill engine -> Start process request in prefill engine"),
-        ("Start process request in prefill engine", "Prefill add waiting queue", 
-         "Start process request in prefill engine -> Prefill add waiting queue"),
-        ("Prefill add waiting queue", "try to schedule in waiting queue", 
-         "Prefill add waiting queue -> try to schedule in waiting queue"),
-        ("try to schedule in waiting queue", "Prefill get new_blocks", 
-         "try to schedule in waiting queue -> Prefill get new_blocks"),
-        ("Prefill get new_blocks", "success add to seq groups", 
-         "Prefill get new_blocks -> success add to seq groups"),
-        ("success add to seq groups", "Prefill start execute_model", 
-         "success add to seq groups -> Prefill start execute_model"),
-        ("Prefill start execute_model", "Prefill done execute_model", 
-         "Prefill start execute_model -> Prefill done execute_model"),
-        ("Enter decode to generate", "Start to dispatch decode request", 
-         "Enter decode to generate -> Start to dispatch decode request"),
-        ("Start to dispatch decode request", "Add need pulling sequence", 
-         "Start to dispatch decode request -> Add need pulling sequence"),
-        ("Add need pulling sequence", "Start pull kv", 
-         "Add need pulling sequence -> Start pull kv"),
-        ("Start pull kv", "Finish pull kv", 
-         "Start pull kv -> Finish pull kv"),
-        ("Finish pull kv", "Start append running sequece for decode", 
-         "Finish pull kv -> Start append running sequece for decode"),
-        ("Finish pull kv", "Prefill free kv blocks", 
-         "Finish pull kv -> Prefill free kv blocks"),
-        ("Start append running sequece for decode", "Start to send output", 
-         "Start append running sequece for decode -> Start to send output"),
-        ("Start to send output", "First decode output token", 
-         "Start to send output -> First decode output token"),
-        ("First decode output token", "Second decode output token", 
-         "First decode output token -> Second decode output token"),
-        ("Second decode output token", "Third decode output token", 
-         "Second decode output token -> Third decode output token"),
-        ("Third decode output token", "Finish decode pickle and start response", 
-         "Third decode output token -> Finish decode pickle and start response"),    
+        ("PD api server get request", "Get prefill engine request and start pickle"),
+        ("Get prefill engine request and start pickle", "Finish process request in prefill engine"),
+        ("Finish process request in prefill engine", "Start process request in prefill engine"),
+        ("Start process request in prefill engine", "Prefill add waiting queue"),
+        ("Prefill add waiting queue", "try to schedule in waiting queue"),
+        ("try to schedule in waiting queue", "Prefill get new_blocks"),
+        ("Prefill get new_blocks", "success add to seq groups"),
+        ("success add to seq groups", "Prefill start execute_model"),
+        ("Prefill start execute_model", "Prefill done execute_model"),
+        ("Enter decode to generate", "Start to dispatch decode request"),
+        ("Start to dispatch decode request", "Add need pulling sequence"),
+        ("Start pull kv", "Finish pull kv"),
+        ("Finish pull kv", "Start append running sequece for decode"),
+        ("Finish pull kv", "Prefill free kv blocks"),
+        ("Start append running sequece for decode", "Start to send output"),
+        ("Start to send output", "First decode output token"),
+        ("First decode output token", "Second decode output token"),
+        ("Second decode output token", "Third decode output token"),
+        ("Third decode output token", "Finish decode pickle and start response"),    
     ]
 
     p2d_time_pairs = [
-        ("Prefill done execute_model", "Start to send output in prefill stage", 
-         "Prefill done execute_model -> Start to send output in prefill stage"),
-        ("Start to send output in prefill stage", "Finish prefill pickle and start response", 
-         "Start to send output in prefill stage -> Finish prefill pickle and start response"),
-        ("Finish prefill pickle and start response", "Client get prefill output", 
-         "Finish prefill pickle and start response -> Client get prefill output"),
-        ("Client get prefill output", "Enter decode to generate", 
-         "Client get prefill output -> Enter decode to generate"),
+        ("Prefill done execute_model", "Start to send output in prefill stage"),
+        ("Start to send output in prefill stage", "Finish prefill pickle and start response"),
+        ("Finish prefill pickle and start response", "Client get prefill output"),
+        ("Add need pulling sequence", "Start pull kv"),
+        ("Client get prefill output", "Enter decode to generate"),
     ]
 
     d2p_time_pairs = [
-        ("Start to dispatch decode request", "Decode send ip, rank", 
-         "Start to dispatch decode request -> Decode send ip, rank"),
-        ("Decode send ip, rank", "Prefill receive and record decode ip, rank", 
-         "Decode send ip, rank -> Prefill receive and record decode ip, rank"),
-        ("Prefill done execute_model", "Prefill send metadata", 
-         "Prefill done execute_model -> Prefill send metadata"),
-        ("Prefill send metadata", "Decode receive metadata", 
-         "Prefill send metadata -> Decode receive metadata"),
-        ("Decode receive metadata", "Start pull kv", 
-         "Decode receive metadata -> Start pull kv"),
+        ("Finish process request in prefill engine", "Prefill receive and record decode ip, rank"),
+        ("Start to dispatch decode request", "Decode send ip, rank"),
+        ("Decode send ip, rank", "Prefill receive and record decode ip, rank"),
+        ("Prefill done execute_model", "Prefill send metadata"),
+        ("Prefill send metadata", "Decode receive metadata"),
+        ("Add need pulling sequence", "Decode receive metadata"),
+        ("Decode receive metadata", "Start pull kv"),
     ]
 
     if connector_type == "p2d":
@@ -545,5 +651,29 @@ if __name__ == "__main__":
         connector_type = sys.argv[2]
     else:
         connector_type = "p2d"
-    parse_trace_logs(root_dir)
-    _calculate_time_difference(os.path.join(root_dir, "time_analysis.xlsx"), connector_type)
+
+    time_pairs = _get_time_pairs(connector_type)
+    action_maps = _get_action_map()
+    
+    parse_trace_logs(root_dir, time_pairs, action_maps)
+    
+    time_diff_path = os.path.join(root_dir, "time_analysis.xlsx")
+    time_difference_df = pd.read_excel(time_diff_path, sheet_name="time_difference")
+    
+    stream_gv_code = generate_connected_graphviz_flowchart(time_difference_df, time_pairs, action_maps)
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    gv_file_name = f"flowchart_{connector_type}_{timestamp}.gv"
+    output_dir = os.path.join(root_dir, "graphviz_output")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    
+    gv_file_path = os.path.join(output_dir, gv_file_name)
+    
+    with open(gv_file_path, "w", encoding="utf-8") as f:
+        f.write(stream_gv_code)
+    
+    print(f"✅ Graphviz DOT codes have been save in: {gv_file_path},",
+          "check the flowchart through https://dreampuf.github.io/GraphvizOnline,",
+          "or using VSCode plugin - Graphviz Interactive Preview.")
