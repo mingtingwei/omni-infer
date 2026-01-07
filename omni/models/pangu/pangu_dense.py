@@ -222,6 +222,7 @@ class PanguEmbeddedAttention(nn.Module):
             base=self.rope_theta,
             rope_scaling=rope_scaling,
             is_neox_style=is_neox_style,
+            num_hidden_layers_cache = getattr(config, "num_hidden_layers", None),
         )
 
 

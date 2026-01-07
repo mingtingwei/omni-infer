@@ -842,53 +842,46 @@ class MRotaryEmbeddingInterleaved(GPUMRotaryEmbedding):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass with interleaved rotary embedding."""
         if self.layer_counts % self.num_hidden_layers_cache == 0:
-            cos_sin, positions = self._rebuild_pos_emb(positions)
-            self.layer_cache = (cos_sin, positions)
+            cos_sin, self.positions = self._rebuild_pos_emb(positions)
+            self.layer_cache = (cos_sin, self.positions)
             self.layer_counts = 0
-        else:
-            cos_sin, positions = self.layer_cache
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            if self.rotary_mode == 'half':
+                cos = torch.cat((cos, cos), dim=-1)
+                sin = torch.cat((sin, sin), dim=-1)
+            elif self.rotary_mode == 'interleave':
+                cos = rearrange(torch.stack((cos, cos), dim=-1), "... d two -> ...(d two)", two=2)
+                sin = rearrange(torch.stack((sin, sin), dim=-1), "... d two -> ...(d two)", two=2)
+            else:
+                raise ValueError("only support half or interleave")
+            self.cos = cos.reshape(-1, 1, 1, self.rotary_dim)
+            self.sin = sin.reshape(-1, 1, 1, self.rotary_dim)
+        
         self.layer_counts += 1
-
-        import torch_npu
 
         mrope_section = [
             0, 0, 0] if positions.ndim == 1 else self.mrope_section
 
         num_tokens = query.shape[0]
 
-        cos, sin = cos_sin.chunk(2, dim=-1)
+        query = query.view(num_tokens, 1, -1, self.head_size)
+        key = key.view(num_tokens, 1, -1, self.head_size)
 
-        if positions.ndim == 2:
-            assert self.mrope_section
+        if self.head_size == self.rotary_dim:
+            query_rot, query_pass = query, None
+            key_rot, key_pass = key, None
+        else:
+            query_rot, query_pass = query[..., :self.rotary_dim], query[..., self.rotary_dim:]
+            key_rot, key_pass = key[..., :self.rotary_dim], key[..., self.rotary_dim:]
 
-            cos = torch.cat(
-                [m[i]
-                    for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
-                dim=-1,
-            )
-            sin = torch.cat(
-                [m[i]
-                    for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
-                dim=-1,
-            )
+        query_rot = torch_npu.npu_rotary_mul(query_rot.contiguous(), self.cos, self.sin, rotary_mode=self.rotary_mode)
+        key_rot = torch_npu.npu_rotary_mul(key_rot.contiguous(), self.cos, self.sin, rotary_mode=self.rotary_mode)
 
-        query_shape = query.shape
-        query = query.reshape(num_tokens, -1, self.head_size)
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb_torch(
-            query_rot, cos, sin, self.is_neox_style)
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+        if query_pass is not None:
+            query_rot = torch.cat((query_rot, query_pass), dim=-1)
+            key_rot = torch.cat((key_rot, key_pass), dim=-1)
 
-        key_shape = key.shape
-        key = key.reshape(num_tokens, -1, self.head_size)
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb_torch(
-            key_rot, cos, sin, self.is_neox_style)
-        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
-
-        return query, key
+        return query_rot.reshape(num_tokens, -1), key_rot.reshape(num_tokens, -1)
 
     @staticmethod
     def get_mrope_interleaved_id_list(a: int, b: int, c: int, force_last: bool = False) -> List[int]:
