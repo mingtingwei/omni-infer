@@ -1,0 +1,116 @@
+diff --git a/vllm/v1/core/sched/utils.py b/vllm/v1/core/sched/utils.py
+index 2f54694ee..c14e44336 100644
+--- a/vllm/v1/core/sched/utils.py
++++ b/vllm/v1/core/sched/utils.py
+@@ -25,24 +25,40 @@ ENABLE_MAX_TOKENS_EXCLUDE_REASONING = (
+ )
+ ENABLE_REASONING_MAX_TOKENS = os.environ.get("ENABLE_REASONING_MAX_TOKENS", "0") == "1"
+ REASONING_MAX_TOKENS = int(os.environ.get("REASONING_MAX_TOKENS", "32768"))
+-THINK_START_TOKEN_ID: int = int(os.environ.get("THINK_START_TOKEN_ID", "0"))
++THINK_START_TOKEN_ID: list[int] = [
++    int(x.strip()) for x in os.environ.get("THINK_START_TOKEN_ID", "0").split(",") if x.strip().isdigit()
++]
+ THINK_END_TOKEN_ID: int = int(os.environ.get("THINK_END_TOKEN_ID", "0"))
+ 
+ def add_token_and_check_stop(token_ids: list[int], request: Request, max_model_len: int):
+     global ENABLE_MAX_TOKENS_EXCLUDE_REASONING, ENABLE_REASONING_MAX_TOKENS, REASONING_MAX_TOKENS, THINK_START_TOKEN_ID, THINK_END_TOKEN_ID
+-    if ENABLE_REASONING_MAX_TOKENS and not request.is_cot_end() and request.num_output_tokens >= REASONING_MAX_TOKENS:
++
++    if ENABLE_REASONING_MAX_TOKENS and not request.is_cot_end() and request.is_cot_started() and request.num_output_tokens >= REASONING_MAX_TOKENS:
+         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+         return True, 1
+     
+-    if ENABLE_MAX_TOKENS_EXCLUDE_REASONING and not request.is_cot_end():
+-        end_index = -1
+-        for token_id in token_ids:
+-            if token_id == THINK_END_TOKEN_ID:
+-                end_index = token_ids.index(token_id)
+-                break
+-        prompt_len = request.num_prompt_tokens
+-        
+-        if prompt_len + request.max_tokens < max_model_len:
++    is_able_to_add_max_tokens = request.num_prompt_tokens + request.max_tokens < max_model_len
++    if ENABLE_MAX_TOKENS_EXCLUDE_REASONING and is_able_to_add_max_tokens and not request.is_cot_end():
++        is_cot_started = request.is_cot_started()
++        # If the start of COT is recognized in this turn and its THINK_START_TOKEN_ID is long in size, then the
++        # tokens consumed by THINK_START_TOKEN_ID in previous turns need to be returned
++        if not is_cot_started:
++            all_output_token_ids = list(request.output_token_ids) + token_ids
++            for i in range(len(all_output_token_ids) - len(THINK_START_TOKEN_ID) + 1):
++                if all_output_token_ids[i:i + len(THINK_START_TOKEN_ID)] == THINK_START_TOKEN_ID:
++                    is_cot_started = True
++                    if len(all_output_token_ids[i:]) > len(token_ids):
++                        request.max_tokens = request.max_tokens + len(request.output_token_ids[i:])
++                    break
++
++        # Once the start of the COT is recognized, all tokens consumed by COT need to be returned. Specifically, if the
++        # end of the COT is recognized in this turn, any main content afterward should be normally counted.
++        if is_cot_started:
++            end_index = -1
++            for token_id in token_ids:
++                if token_id == THINK_END_TOKEN_ID:
++                    end_index = token_ids.index(token_id)
++                    break
+             request.max_tokens = request.max_tokens + len(token_ids)
+             if end_index != -1 and end_index != len(token_ids) - 1:
+                 request.max_tokens = request.max_tokens - (len(token_ids) - 1 - end_index)
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+index 0fac84a2e..62188dd33 100755
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -17,7 +17,13 @@ if TYPE_CHECKING:
+ 
+ import os
+ 
++THINK_START_TOKEN_ID: list[int] = [
++    int(x.strip()) for x in os.environ.get("THINK_START_TOKEN_ID", "0").split(",") if x.strip().isdigit()
++]
+ THINK_END_TOKEN_ID: int = int(os.environ.get("THINK_END_TOKEN_ID", "0"))
++CONTENT_START_TOKEN_ID: list[int] = [
++    int(x.strip()) for x in os.environ.get("CONTENT_START_TOKEN_ID", "0").split(",") if x.strip().isdigit()
++]
+ 
+ class Request:
+ 
+@@ -92,10 +98,26 @@ class Request:
+         # P/D: Decode will get num_cached_tokens from kv_tranfer_params, passed by Prefill.
+         if self.kv_transfer_params is not None:
+             self.num_cached_tokens = self.kv_transfer_params.get("num_cached_tokens", -1)
++        self._cot_started_symbol = False
+         self._cot_end_symbol = False
+         
++    def is_cot_started(self):
++        global THINK_START_TOKEN_ID
++
++        if self._cot_started_symbol:
++            return True
++
++        check_token_ids = self.output_token_ids
++
++        for i in range(len(check_token_ids) - len(THINK_START_TOKEN_ID) + 1):
++            if check_token_ids[i:i + len(THINK_START_TOKEN_ID)] == THINK_START_TOKEN_ID:
++                self._cot_started_symbol = True
++                break
++
++        return self._cot_started_symbol
++
+     def is_cot_end(self):
+-        global THINK_END_TOKEN_ID
++        global THINK_END_TOKEN_ID, CONTENT_START_TOKEN_ID
+         SLIDING_WINDOW_SIZE = -16
+         if self._cot_end_symbol:
+             return True
+@@ -109,6 +131,13 @@ class Request:
+         if THINK_END_TOKEN_ID in check_token_ids:
+             cot_end = True
+ 
++        # If the start of the main content is recognized, it is also treated as the end of the COT.
++        if not cot_end and CONTENT_START_TOKEN_ID != [0]:
++            for i in range(len(check_token_ids) - len(CONTENT_START_TOKEN_ID), -1, -1):
++                if check_token_ids[i:i + len(CONTENT_START_TOKEN_ID)] == CONTENT_START_TOKEN_ID:
++                    cot_end = True
++                    break
++
+         if cot_end:
+             self._cot_end_symbol = True
+ 
