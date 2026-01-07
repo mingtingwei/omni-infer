@@ -559,6 +559,7 @@ class NPUWorker(WorkerBase):
 class RLNPUWorker(NPUWorker):
 
     def sleep(self, level: int = 1) -> None:
+        self.model_runner.unregister_kv_caches()
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         self.model_runner.model = self.model_runner.model.to("cpu")
         if hasattr(self.model_runner, "drafter") and self.model_runner.drafter:
@@ -599,6 +600,8 @@ class RLNPUWorker(NPUWorker):
             for i, kv_caches_i in enumerate(self.model_runner.kv_caches):
                 for j, kv_caches_i_j in enumerate(kv_caches_i):
                     kv_caches_i_j.untyped_storage().resize_(self.kv_nbytes[i][j])
+
+            self.model_runner.reregister_kv_caches()
             from vllm.distributed.parallel_state import get_tp_group, get_dp_group
             get_tp_group().all_reduce(torch.ones(1).npu())
             if get_dp_group().world_size > 1:

@@ -227,6 +227,8 @@ class LLMDataDistManager:
         if not self.data_dist_config.is_prefill:
             self.decode_id = self.dp_rank // NUM_DIE_PER_MACH
 
+        self.data_dist_option = None
+        self.data_dist_engine_is_inited = False
         self.data_dist_engine = self._init_llm_data_dist()
 
         self.registered_kv_caches = []
@@ -261,7 +263,6 @@ class LLMDataDistManager:
         return remote_cluster_ids
 
     def _init_llm_data_dist(self):
-        data_dist = LLMDataDist(self.data_dist_config.role, self.data_dist_config.cluster_id)
         llm_config = LLMConfig()
         llm_config.device_id = self.local_rank
         llm_config.local_comm_res = ""
@@ -278,10 +279,24 @@ class LLMDataDistManager:
             llm_config.listen_ip_info = f"{host_ip_t}:{host_port_t}"
 
         options = llm_config.generate_options()
+        self.data_dist_option = options
+        data_dist = LLMDataDist(self.data_dist_config.role, self.data_dist_config.cluster_id)
         data_dist.init(options)
         logger.info(f"init {self.data_dist_config.kv_role_tmp} success, {self.data_dist_config.cluster_id=}")
 
+        self.data_dist_engine_is_inited = True
+
         return data_dist
+    
+    def _finalize_llm_data_dist(self):
+        logger.info(f"finalize LLMDataDist, {self.data_dist_config.cluster_id=}")
+        self.data_dist_engine.finalize()
+        self.data_dist_engine_is_inited = False
+
+    def _reinit_llm_data_dist(self):
+        logger.info(f"reinit LLMDataDist, {self.data_dist_config.cluster_id=}")
+        self.data_dist_engine.init(self.data_dist_option)
+        self.data_dist_engine_is_inited = True
 
     # dynamically register link only when is needed
     def register_link(self, host_cluster_id, prefill_dp_rank, d_rank, tp_rank=0):
@@ -328,10 +343,11 @@ class LLMDataDistManager:
 
     def unregister_link(self):
         if self.data_dist_config.is_prefill:
-            return
-        for host_cluster_id, dp_rank, d_rank in list(self.datadist_manager.registered_link_infos.keys()):
-            logger.info(f"{d_rank=}, unlink {host_cluster_id=}")
-            self.close_link(host_cluster_id, dp_rank, d_rank)
+            self._finalize_llm_data_dist()
+        else:
+            for host_cluster_id, dp_rank, d_rank in list(self.registered_link_infos.keys()):
+                logger.info(f"{d_rank=}, unlink {host_cluster_id=}")
+                self.close_link(host_cluster_id, dp_rank, d_rank)
 
     async def _pull_blocks(self, src_cache_key, dst_cache, src_blocks, dst_blocks):
         """Pull kv from remote cache to local cache; return False on failure."""
@@ -468,6 +484,9 @@ class LLMDataDistManager:
 
     # reuse the existing code
     def register_memory(self, kv_caches: dict[str, torch.Tensor]):
+        if not self.data_dist_engine_is_inited:
+            self._reinit_llm_data_dist()
+
         if len(self.registered_kv_caches) > 0:
             raise ValueError("Attr `registered_kv_caches` must be empty before register kv_caches.")
         if isinstance(kv_caches, dict):
@@ -530,9 +549,10 @@ class LLMDataDistManager:
             cnt_layer_num += cur_pp_stage_layer_num
 
     def unregister_memory(self):
-        for kv_cache in self.registered_kv_caches:
-            logger.info(f"unregister {kv_cache=}")
-            self.data_dist_engine.cache_manager.unregister_cache(kv_cache.cache_id)
+        if not self.data_dist_config.is_prefill:
+            for kv_cache in self.registered_kv_caches:
+                logger.info(f"unregister {kv_cache=}")
+                self.data_dist_engine.cache_manager.unregister_cache(kv_cache.cache_id)
         self.registered_kv_caches = []
 
     def _run_coro_sync(self, coro_or_callable, timeout: float | None = None):
@@ -676,8 +696,6 @@ def ip_port_to_int(ip_port, tp_size, tp_rank=0):
     # result = (ip_int << 48) | (port << 32) | (tp_size << 16) | (tp_rank)
     result = (ip_int << 32) | (port << 16) | (tp_size & 0xFFFF)
     return result
-
-
 
 def cluster_id_to_ip_port(cluster_id):
     """Extract ip_port from int64 cluster id (inverse of ip_port_to_int)."""

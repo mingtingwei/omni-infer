@@ -331,11 +331,13 @@ class PrefillConnectorWorker:
         self.requests_finish_time = dict()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.info(f"register_kv_caches")
         self.datadist_manager.register_memory(kv_caches)
         if not FLAG_ENABLE_DYNAMIC_LLMDATADIST:
             self.datadist_manager.register_link()
 
     def unregister_kv_caches(self):
+        logger.info(f"unregister_kv_caches")
         self.datadist_manager.unregister_link()
         self.datadist_manager.unregister_memory()
 

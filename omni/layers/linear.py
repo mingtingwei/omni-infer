@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from abc import abstractmethod
 from vllm.platforms import current_platform
 
+import multiprocessing
 import torch
 import torch_npu
 import torch.distributed as dist
@@ -917,7 +918,10 @@ class UnquantizedFlashCommLinearMethod(FlashCommLinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        current_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method('spawn', force=True)
         weight_data = torch_npu.npu_format_cast(layer.weight.data.t().contiguous(), 29)
+        multiprocessing.set_start_method(current_method, force=True)
         layer.weight.data = weight_data
         if not hasattr(layer.weight, "is_weight_transposed"):
             set_weight_attrs(layer.weight, {"is_weight_transposed": True})
