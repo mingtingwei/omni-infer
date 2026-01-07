@@ -345,14 +345,28 @@ class NPUPlatform(Platform):
 
     @staticmethod
     def _check_required_env_vars():
-        """Check if THINK_START_TOKEN_ID,THINK_END_TOKEN_ID are set."""
+        """Check if THINK_START_TOKEN_ID,THINK_END_TOKEN_ID are set properly."""
         ENABLE_MAX_TOKENS_EXCLUDE_REASONING = (os.environ.get("ENABLE_MAX_TOKENS_EXCLUDE_REASONING","0") == "1")
         ENABLE_REASONING_MAX_TOKENS = (os.environ.get("ENABLE_REASONING_MAX_TOKENS","0") == "1")
-        THINK_START_TOKEN_ID: int = int(os.environ.get("THINK_START_TOKEN_ID","0"))
-        THINK_END_TOKEN_ID: int = int(os.environ.get("THINK_END_TOKEN_ID","0"))
         
-        if (ENABLE_MAX_TOKENS_EXCLUDE_REASONING or ENABLE_REASONING_MAX_TOKENS) and not (THINK_START_TOKEN_ID and THINK_END_TOKEN_ID):
-            raise ValueError("Environment variable THINK_START_TOKEN_ID,THINK_END_TOKEN_ID not set")
+        if not (ENABLE_MAX_TOKENS_EXCLUDE_REASONING or ENABLE_REASONING_MAX_TOKENS):
+            return
+
+        think_start_token_id_raw = os.environ.get("THINK_START_TOKEN_ID")
+        think_end_token_id_raw = os.environ.get("THINK_END_TOKEN_ID")
+
+        if not think_start_token_id_raw or not think_end_token_id_raw:
+            raise ValueError("Environment variable THINK_START_TOKEN_ID, THINK_END_TOKEN_ID are required but not set")
+
+        think_start_token_ids = [token_id.strip() for token_id in think_start_token_id_raw.split(",")]
+        if not think_start_token_ids or not all(token_id.isdigit() for token_id in think_start_token_ids):
+            raise ValueError(
+                f"Environment variable THINK_START_TOKEN_ID should be a comma-separated list of non-negative integers. Got: {think_start_token_id_raw!r}"
+            )
+        if not think_end_token_id_raw.strip().isdigit():
+            raise ValueError(
+                f"Environment variable THINK_END_TOKEN_ID should be a non-negative integer. Got: {think_end_token_id_raw!r}"
+            )
 
     @classmethod
     def is_sleep_mode_available(cls) -> bool:
