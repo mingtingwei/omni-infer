@@ -21,6 +21,7 @@ from openai_harmony import (Author, ChannelConfig, Conversation,
 import os
 
 _harmony_encoding = None
+GPT_OSS_CHANNEL_TOKEN_ID = 200005
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -44,8 +45,8 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     # The start token_id <|channel|> has already been returned in the prefill node.
     # So it is necessary to append the default start token_id <|channel|> 
     # at the decoding node to ensure parsing successfully.
-    if os.getenv('ROLE') == "decode":
-        parser.process(200005)
+    if os.getenv('ROLE') == "decode" and token_ids[0] != GPT_OSS_CHANNEL_TOKEN_ID:
+        parser.process(GPT_OSS_CHANNEL_TOKEN_ID)
     for token_id in token_ids:
         parser.process(token_id)
     return parser
