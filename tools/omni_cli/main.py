@@ -411,8 +411,16 @@ def _verify_and_fix_env_vars(
 
 def omni_ranktable(inventory):
     cur_dir = os.path.dirname(__file__)
-    cmd = "ansible-playbook -i " + str(inventory) + " " + str(cur_dir) + "/configs/generate_ranktable.yml"
-    os.system(cmd)
+    cmd = ["ansible-playbook", "-i", str(inventory), 
+           f"{cur_dir}/configs/generate_ranktable.yml"]
+    
+    result = subprocess.Popen(cmd, text=True)
+    result.wait()
+
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        )
 
 def maybe_start_ray(is_master, pod_info, role, log_path):
 
@@ -704,6 +712,8 @@ def sync_code(
         print(f"{ERROR} code_path is required")
         return
 
+    inventory_path = Path(inventory_path).expanduser().resolve()
+    code_path = Path(code_path).expanduser().resolve()
     # Read inventory file
     with open(inventory_path, 'r') as f:
         inventory_data = yaml.safe_load(f)
@@ -741,127 +751,111 @@ def sync_code(
         if host_ip not in p_d_ips:
             c_hosts_to_process.add(host)
         else:
-            print("{INFO} Node C is skipped because it has the same IP address as a P or D node")
+            print(f"{INFO} Node C is skipped because it has the same IP address as a P or D node")
 
     # All hosts that need processing
-    all_target_hosts = p_hosts | d_hosts | c_hosts_to_process
+    all_target_hosts = list(p_hosts | d_hosts | c_hosts_to_process)
 
-    # Create temporary script file
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".sh") as tf:
-        script_path = tf.name
+    thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
+    futures = []
+    scripts = []
 
-        # Write script header
-        tf.write("#!/bin/bash\n\n")
-        tf.write(f"CODE_SRC=\"{code_path}\"\n\n")
+    # Create directories and sync code to all target hosts
+    for host in all_target_hosts:
+        host_vars = all_hosts.get(host, {})
+        # Get actual connection address for the host
+        host_addr = host_vars.get("ansible_host", host)
 
-        # Add progress indicator function
-        tf.write("""
-# Function to show progress spinner
-show_spinner() {
-    local pid=$!
-    local delay=0.1
-    local spinstr='|/-\'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c] " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\\b\\b\\b\\b\\b"
-    done
-    printf "    \\b\\b\\b\\b"
-}
-""")
+        # Get SSH key path (if exists)
+        ssh_private_key = host_vars.get("ansible_ssh_private_key_file", "")
+        ssh_password = host_vars.get("ansible_ssh_pass","")
+        ssh_user = host_vars.get("ansible_user", "")
+        env = host_vars.get("env", {})
+        log_path = env.get("LOG_PATH")
 
-        # Create directories and sync code to all target hosts
-        for host in all_target_hosts:
-            host_vars = all_hosts.get(host, {})
-            # Get actual connection address for the host
-            host_addr = host_vars.get("ansible_host", host)
+        # Build SSH command prefixes
+        ssh_prefix = "ssh -o StrictHostKeyChecking=no"
+        if ssh_private_key:
+            ssh_prefix = f"{ssh_prefix} -i {ssh_private_key}"
+        if ssh_user:
+            ssh_prefix = f"{ssh_prefix} -l {ssh_user}"
+        
+        rsync_prefix = f"rsync -avz --quiet --delete -e '{ssh_prefix}'"
+        if not ssh_private_key and ssh_password:
+            rsync_prefix = f"SSHPASS={shlex.quote(ssh_password)} sshpass -e rsync -avz --quiet --delete -e '{ssh_prefix}'"
+            ssh_prefix = f"SSHPASS={shlex.quote(ssh_password)} sshpass -e {ssh_prefix}"
 
-            # Get SSH key path (if exists)
-            ssh_private_key = host_vars.get("ansible_ssh_private_key_file", "")
-            ssh_user = host_vars.get("ansible_user", "")
-            env = host_vars.get("env", {})
+        # Create temporary script file
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".sh") as tf:
+            script_path = tf.name
 
-            # Build SSH command prefixes
-            ssh_prefix = "ssh"
-            rsync_prefix = "rsync -avz --quiet --delete"
+            # Write script header
+            tf.write("#!/bin/bash\n\n")
+            tf.write("set -euo pipefail\n")
+            tf.write(f"CODE_SRC=\"{code_path}\"\n\n")
 
-            if ssh_private_key:
-                ssh_prefix = f"ssh -i {ssh_private_key}"
-                rsync_prefix = f"rsync -avz --quiet --delete -e 'ssh -i {ssh_private_key}'"
-
-            if ssh_user:
-                ssh_prefix = f"{ssh_prefix} -l {ssh_user}"
-                rsync_prefix = f"{rsync_prefix} -e 'ssh -l {ssh_user}'"
-                if ssh_private_key:
-                    rsync_prefix = f"rsync -avz --quiet --delete -e 'ssh -i {ssh_private_key} -l {ssh_user}'"
-
-            log_path = env.get("LOG_PATH")
             if log_path:
                 tf.write(f"echo \"{INFO} Creating log directory \"{log_path}/{host}\" on {host}\"\n")
-                tf.write(f"{ssh_prefix} {host_addr} \"mkdir -p {log_path}/{host}\" >/dev/null 2>&1\n\n")
+                tf.write(f"{ssh_prefix} {host_addr} \"mkdir -p {log_path}/{host}\" \n\n")
             else:
                 tf.write(f"echo \"{WARNING} LOG_PATH not defined for host {host}, skipping log directory creation\"\n\n")
 
             tf.write(f"echo \"{INFO} Creating code directory \'{code_path}\' on {host}\"\n")
-            tf.write(f"{ssh_prefix} {host_addr} \"mkdir -p {code_path}\" >/dev/null 2>&1\n\n")
+            tf.write(f"{ssh_prefix} {host_addr} \"mkdir -p {shlex.quote(str(code_path))}\"\n\n")
 
             tf.write(f"echo \"{INFO} Syncing code from executor from \'{code_path}/omniinfer/\' to \'{host}:{code_path}/omniinfer/\' \"\n")
-            tf.write(f"echo -n \"{INFO} Progress: \"\n")
-            tf.write(f"{rsync_prefix} {code_path}/omniinfer/ {host_addr}:{code_path}/omniinfer/ & show_spinner\n")
-            tf.write(f"echo \"Done\"\n\n")
+            tf.write(f"{rsync_prefix} {shlex.quote(str(code_path))}/omniinfer/ {host_addr}:{shlex.quote(str(code_path))}/omniinfer/ \n")
 
             # Handle docker cp for all hosts that need it
             container_name = host_vars.get("container_name", "")
             if container_name:
                 tf.write(f"echo \"{INFO} Docker cp code to container on {host}, from {code_path}/omniinfer to {container_name}:/workspace/\"\n")
-                tf.write(f"{ssh_prefix} {host_addr} \"docker cp {code_path}/omniinfer {container_name}:/workspace/\" >/dev/null 2>&1\n")
-                tf.write(f"echo \"{INFO} Container copy completed\"\n\n")
+                tf.write(f"{ssh_prefix} {host_addr} \"docker cp {shlex.quote(str(code_path))}/omniinfer {container_name}:/workspace/\"\n")
+                tf.write(f"echo \"{INFO} Container copy completed on {host}\"\n\n")
             else:
                 tf.write(f"echo \"{WARNING} Missing container_name for host {host}\"\n\n")
 
-    # Set script execution permissions
-    os.chmod(script_path, 0o755)
+        # Set script execution permissions
+        os.chmod(script_path, 0o755)
 
-    # Execute script or display dry run information
-    if dry_run:
-        print("Dry run: would execute the following script:")
-        with open(script_path, 'r') as f:
-            print(f.read())
-    else:
-        print("Starting sync process...")
+        # Execute script or display dry run information
+        if dry_run:
+            print("Dry run: would execute the following script:")
+            with open(script_path, 'r') as f:
+                print(f.read())
+        else:
+            print(f"{INFO} Starting sync process on {host}...")
+            try:
+                def run_script():
+                    # Execute the script and capture output
+                    process = subprocess.Popen(
+                        [script_path],
+                        text=True
+                    )
+                    # Wait for process to complete
+                    process.wait()
+                    return process.returncode
+
+                futures.append(thread_pool_executor.submit(run_script))
+                scripts.append(script_path)
+            except Exception as e:
+                print(f"Error during sync process: {e}")      
+
+    for i, f in enumerate(futures):
         try:
-            # Execute the script and capture output
-            process = subprocess.Popen(
-                [script_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-
-            # Print output in real-time
-            for line in process.stdout:
-                print(line, end='')
-
-            # Wait for process to complete
-            process.wait()
-
-            if process.returncode == 0:
-                print("\nSync process completed successfully.")
+            return_code = f.result()
+            if return_code == 0:
+                print(f"{INFO} Sync process on host {all_target_hosts[i]} completed successfully.")
             else:
-                print(f"\nSync process failed with return code {process.returncode}")
-                print("Error output:")
-                for line in process.stderr:
-                    print(line, end='')
+                print(f"{ERROR} Sync process on host {all_target_hosts[i]} failed with return code {return_code}.")
         except Exception as e:
-            print(f"Error during sync process: {e}")
+            print(f"{ERROR} Error waiting for sync process on host {all_target_hosts[i]}: {e}")
         finally:
             # Clean up temporary file
             try:
-                os.unlink(script_path)
+                os.unlink(scripts[i])
             except:
-                pass
+                print(f"{WARNING} Failed to delete temp file: {e}")
 
 def install_code(
     inventory_path,
@@ -905,6 +899,11 @@ def install_code(
     '
     """
 
+    host_names = []
+    thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
+    futures = []
+    scripts = []
+
     for host, hv in all_hosts:
         groups = host_groups.get(host, [])
         print(f"\nProcessing host: {host} (groups: {groups})")
@@ -922,6 +921,8 @@ def install_code(
         if role not in ['P', 'D']:
             print(f"Skipping host {host} (not in P or D group)")
             continue
+
+        host_names.append(host)
 
         # Get environment variables and other host variables
         env = hv.get("env", {})
@@ -972,25 +973,36 @@ def install_code(
                 print("===")
 
         if not dry_run:
-            try:
-                # Build ansible commands
-                cmd = (
-                    f"ansible {shlex.quote(host)} "
-                    f"-i {shlex.quote(str(inv_file))} "
-                    f"-m script "
-                    f"-a {shlex.quote(str(script_path))}"
-                )
-                execute_command(cmd)
-            finally:
-                # Clean up temporary files
-                try:
-                    script_path.unlink(missing_ok=True)
-                except Exception as e:
-                    print(f"Warning: Failed to delete temp file: {e}")
+            # Build ansible commands
+            cmd = (
+                f"ansible {shlex.quote(host)} "
+                f"-i {shlex.quote(str(inv_file))} "
+                f"-m script "
+                f"-a {shlex.quote(str(script_path))}"
+            )
+            
+            futures.append(thread_pool_executor.submit(execute_command, cmd))
+            scripts.append(script_path)
         else:
             # In dry run mode, only the commands we will run are displayed
             print(f"DRY RUN: Would execute for host {host}:")
             print(f"  ansible {host} -i {inv_file} -m script -a {script_path}")
+
+    for i, f in enumerate(futures):
+        try:
+            return_code = f.result()
+            if return_code == 0:
+                print(f"\nCode installation on host {host_names[i]} completed successfully.")
+            else:
+                print(f"{ERROR} Code installation on {host_names[i]} failed with return code {return_code}")
+        except Exception as e:
+            print(f"Error waiting for installation process on host {host_names[i]}: {e}")
+        finally:
+            # Clean up temporary file
+            try:
+                scripts[i].unlink(missing_ok=True)
+            except Exception as e:
+                print(f"{WARNING} Failed to delete temp file: {e}")
 
     print("\nInstall process completed.")
 
@@ -1309,11 +1321,12 @@ def upgrade_packages():
 
 def collect_logs(inventory_path):
     """Fetch logs"""
+    inventory_path = Path(inventory_path).expanduser().resolve()
     # Read inventory file
     with open(inventory_path, 'r') as f:
         inventory_data = yaml.safe_load(f)
 
-    local_log_path = "/logs"
+    local_log_path = "./logs"
     try:
         os.mkdir(local_log_path)
         print(f"Directory '{local_log_path}' created successfully")
@@ -1321,6 +1334,7 @@ def collect_logs(inventory_path):
         print(f"Directory '{local_log_path}' already exists")
     except OSError as e:
         print(f"Error creating directory: {e}")
+        return
 
     # Get host-group mapping
     host_groups = get_host_groups(inventory_data)
@@ -1336,24 +1350,7 @@ def collect_logs(inventory_path):
 
         # Write script header
         tf.write("#!/bin/bash\n\n")
-
-        # Add progress indicator function
-        tf.write("""
-# Function to show progress spinner
-show_spinner() {
-    local pid=$!
-    local delay=0.1
-    local spinstr='|/-\'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c] " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\\b\\b\\b\\b\\b"
-    done
-    printf "    \\b\\b\\b\\b"
-}
-""")
+        tf.write("set -euo pipefail\n\n")
 
         # Collect logs from all target hosts
         for host in all_target_hosts:
@@ -1368,7 +1365,6 @@ show_spinner() {
 
             # Build SSH command prefixes
             ssh_prefix = "ssh"
-            rsync_prefix = "rsync -avz --quiet --delete"
 
             if ssh_private_key:
                 ssh_prefix = f"{ssh_prefix} -i {ssh_private_key}"
@@ -1379,22 +1375,20 @@ show_spinner() {
             rsync_prefix = f"rsync -avz --quiet --delete -e '{ssh_prefix}'"
 
             if not ssh_private_key and ssh_password:
-                rsync_prefix = f"sshpass -p {ssh_password} rsync -avz --quiet --delete"
+                rsync_prefix = f"SSHPASS={shlex.quote(ssh_password)} sshpass -e rsync -avz --quiet --delete -e '{ssh_prefix}'"
 
             env = host_vars.get("env", {})
             log_path = env.get("LOG_PATH")
             log_sub_dir = host if host != "c0" else "nginx"
             tf.write(f"echo \"{INFO} Collecting logs from {host} from \'{host}:{log_path}/{log_sub_dir}\' to \'{local_log_path}\' \"\n")
             tf.write(f"echo -n \"{INFO} Progress: \"\n")
-            tf.write(f"{rsync_prefix} {ssh_user}@{host_addr}:{log_path}/{log_sub_dir} {local_log_path}/ & show_spinner\n")
+            tf.write(f"{rsync_prefix} {ssh_user}@{shlex.quote(host_addr)}:{log_path}/{log_sub_dir} {local_log_path}/ \n")
             tf.write(f"echo \"Done\"\n\n")
-
 
     # Set script execution permissions
     os.chmod(script_path, 0o755)
 
     # Execute script 
-
     print("Collecting logs...")
     try:
         # Execute the script and capture output
@@ -1426,7 +1420,7 @@ show_spinner() {
         try:
             os.unlink(script_path)
         except:
-            pass
+            print(f"{WARNING} Failed to delete temp file: {e}")
 
 def main():
     # Create main argument parser with description
