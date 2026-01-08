@@ -1,0 +1,20 @@
+diff --git a/vllm/entrypoints/chat_utils.py b/vllm/entrypoints/chat_utils.py
+index 01423ac1a..3c9c02db2 100644
+--- a/vllm/entrypoints/chat_utils.py
++++ b/vllm/entrypoints/chat_utils.py
+@@ -1136,6 +1136,15 @@ def _parse_chat_message_content(
+             if ("tool_calls" in parsed_msg
+                 and parsed_msg["tool_calls"] is not None):
+                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
++
++            # vLLM uses `reasoning` as the canonical field for reasoning outputs.
++            # Add `reasoning_content` as an alias for compatibility with downstream.
++            if "reasoning" in parsed_msg and parsed_msg["reasoning"] is not None:
++                result_msg["reasoning_content"] = parsed_msg["reasoning"]
++            elif "reasoning_content" in parsed_msg and parsed_msg["reasoning_content"] is not None:
++                # backward / custom compatibility if some parser still outputs reasoning_content
++                result_msg["reasoning_content"] = parsed_msg["reasoning_content"]
++
+         elif role == "tool":
+             parsed_msg = _ToolParser(message)
+             if "tool_call_id" in parsed_msg:
