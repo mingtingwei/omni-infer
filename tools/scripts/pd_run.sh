@@ -415,6 +415,11 @@ if [[ -n "$PROCESS_INVALID_TOKENS" ]]; then
     echo "PROCESS_INVALID_TOKENS: $PROCESS_INVALID_TOKENS"
 fi
 
+if [ -n "$PROMETHEUS_MULTIPROC_DIR" ] && [! -d "$PROMETHEUS_MULTIPROC_DIR" ]; then
+    echo "Error: Directory '$PROMETHEUS_MULTIPROC_DIR' does not exist!" >&2
+    exit 1
+fi
+
 # Print current configuration
 echo "==== Current Configuration ===="
 echo "GLOBAL_RANK_TABLE_FILE_PATH: $GLOBAL_RANK_TABLE_FILE_PATH"
