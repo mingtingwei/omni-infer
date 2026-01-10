@@ -56,6 +56,7 @@ git apply --whitespace=nowarn $PATCH_ROOT/adapt_deepseek_v32_tokenizer.patch
 git apply --whitespace=nowarn $PATCH_ROOT/think_compression.patch
 git apply --whitespace=nowarn $PATCH_ROOT/vllm_bench_serve_v090.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_deepseekv32_gd.patch
+git apply --whitespace=nowarn $PATCH_ROOT/top_n_sigma.patch
 git apply --whitespace=nowarn $PATCH_ROOT/chat_message_reasoning_content.patch
 git apply --whitespace=nowarn $PATCH_ROOT/gpt_oss_make_request_by_chat_template.patch
 git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_max_tokens_exclude_reasoning.patch

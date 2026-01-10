@@ -27,6 +27,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import apply_min_token_penalties
 from vllm.v1.sample.sampler import Sampler as SamplerV1
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.sample.sampler import apply_top_n_sigma
 
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.npu_sampler_cache import PenaltyCache, ProbCache
@@ -153,6 +154,7 @@ class AscendSamplerV1(SamplerV1):
         top_k = None if sampling_metadata.top_k is None else sampling_metadata.top_k.repeat_interleave(**repeat_parameters)
         min_p = None if sampling_metadata.min_p is None else sampling_metadata.min_p.repeat_interleave(**repeat_parameters)
         seq_data = None if sampling_metadata.seq_data is None else sampling_metadata.seq_data
+        top_n_sigma = None if sampling_metadata.top_n_sigma is None else sampling_metadata.top_n_sigma.repeat_interleave(**repeat_parameters)
         allowed_token_ids_mask = None if sampling_metadata.allowed_token_ids_mask is None \
             else sampling_metadata.allowed_token_ids_mask.repeat_interleave(**repeat_parameters)
 
@@ -175,7 +177,8 @@ class AscendSamplerV1(SamplerV1):
             logit_bias=sampling_metadata.logit_bias,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=sampling_metadata.bad_words_token_ids,
-            seq_data=seq_data
+            seq_data=seq_data,
+            top_n_sigma=top_n_sigma,
         )
 
     # TODO apply min p on logits directly
@@ -247,6 +250,10 @@ class AscendSamplerV1(SamplerV1):
 
             p = sampling_metadata.top_p
             k = sampling_metadata.top_k
+
+            if sampling_metadata.top_n_sigma is not None:
+                top_n_sigm = sampling_metadata.top_n_sigma
+                logits_or_prob = apply_top_n_sigma(logits_or_prob, top_n_sigm)            
 
             if os.getenv("OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE", "0") == "1" or (k is None and p is None):
                 probs, idx = apply_top_k_top_p(
