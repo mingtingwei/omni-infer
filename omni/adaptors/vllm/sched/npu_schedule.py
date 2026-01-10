@@ -32,6 +32,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsReader
+from omni.adaptors.vllm import envs
 
 @dataclass
 class HybridSchedulerConfig(SchedulerConfig):
@@ -106,6 +108,16 @@ class NpuHybridScheduler(Scheduler):
             self.vllm_config.kv_transfer_config.is_kv_consumer:
             raise ValueError(
                 "AscendScheduler cannot be used for decode nodes. ")
+        
+        self.routed_experts_reader = RoutedExpertsReader.create() if envs.EXPORT_MOE_EXPERTS == '1' else None
+        if self.routed_experts_reader is not None:
+            self.routed_experts_reader.attach_buffer(
+                num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers,
+                mlp_only_layers = self.vllm_config.model_config.hf_config.mlp_only_layers,
+                num_experts_per_tok = self.vllm_config.model_config.hf_config.num_experts_per_tok,
+                block_size = self.cache_config.block_size,
+                instance_id=self.vllm_config.instance_id
+            )
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -517,11 +529,20 @@ class NpuHybridScheduler(Scheduler):
                 # This must be called before we make the EngineCoreOutput.
                 stopped = check_stop(request, self.max_model_len)
 
+                if self.routed_experts_reader is not None:
+                    routed_experts = self.routed_experts_reader.get_routed_experts(
+                        request=request,
+                        kv_cache_manager=self.kv_cache_manager,
+                        stopped=stopped
+                    )
+                else:
+                    routed_experts = None
+
                 if stopped:
                     self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
-
+                    
             # Extract sample logprobs if needed.
             if request.sampling_params.logprobs is not None and logprobs:
                 # NOTE: once we support N tokens per step (spec decode),
@@ -558,7 +579,9 @@ class NpuHybridScheduler(Scheduler):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        routed_experts=routed_experts,
+                        ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

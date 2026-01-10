@@ -60,6 +60,8 @@ from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
 from omni.accelerators.reasoning_compression.apply import init_reasoner_compression_configs
 from omni.accelerators.reasoning_compression.config import ThinkCompressDict
+from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsCapturer
+from omni.adaptors.vllm import envs
 
 import json
 profiling_is_set = os.getenv("PROFILING_NAMELIST", None) is not None
@@ -266,6 +268,8 @@ class NPUModelRunner(GPUModelRunner):
         self.finished_sending = set()
         self.finished_recving = set()
         self.loading_kv_failure = set()
+
+        self.routed_experts_capturer = RoutedExpertsCapturer.create() if envs.EXPORT_MOE_EXPERTS == '1' else None
 
     def _init_graph_options(self):
         from vllm.utils import supports_dynamo
@@ -489,6 +493,8 @@ class NPUModelRunner(GPUModelRunner):
                 block_numbers * block_size,
                 block_offsets,
                 out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
+            if self.routed_experts_capturer:
+                self.slot_mapping = block_table.slot_mapping_np[:total_num_scheduled_tokens]
 
         # check and set attention state
         can_decode = self.vllm_config.kv_transfer_config is None or self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
@@ -1066,6 +1072,10 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+
+        if self.routed_experts_capturer is not None:
+            self.routed_experts_capturer.clear_buffer()
+
         start_0 = time.time()
 
         if self.save_token_ids:
@@ -1317,6 +1327,14 @@ class NPUModelRunner(GPUModelRunner):
                     logprobs=hidden_states.cpu(),
                     selected_token_ranks=positions[:hidden_states.shape[0]].cpu()
                 )
+        
+        if self.routed_experts_capturer is not None:
+            self.routed_experts_capturer.save_captured_experts(
+                slot_mapping=self.slot_mapping,
+                len_req_ids=len(self.input_batch.req_ids),
+                max_num_seqs=(self.scheduler_config.max_num_seqs), 
+                enable_torchair_graph_mode = self.enable_torchair_graph_mode
+            )
     
         # Support thinking compression by updating the current sampled token ids and length status
         if ThinkCompressDict.reasoner_early_think_stopping_enabled == 1:
@@ -1631,6 +1649,22 @@ class NPUModelRunner(GPUModelRunner):
                                                                                            self.enable_torchair_graph_mode)
                 else:
                     raise ValueError("Unknown KV cache spec type.")
+        
+        if self.routed_experts_capturer is not None:
+            self.routed_experts_capturer.init_buffer(
+                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+                num_blocks = num_blocks,
+                num_cache_groups = len(kv_cache_config.kv_cache_groups),
+                block_size = self.cache_config.block_size,
+                num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers,
+                mlp_only_layers = self.vllm_config.model_config.hf_config.mlp_only_layers,
+                num_experts_per_tok = self.vllm_config.model_config.hf_config.num_experts_per_tok,
+                instance_id=self.vllm_config.instance_id,
+                enable_init_shared_memory=(get_tensor_model_parallel_rank()==0)
+            )
+            logger.info(
+                "Initializing routed experts capturer, enable_return_routed_experts",
+            )
 
         if preemption_mode and preemption_mode == "swap":
             self.cache_engine = CacheEngine(self.attn_backends, self.kv_cache_config, gpu_cache=kv_caches, cpu_cache=cpu_caches)

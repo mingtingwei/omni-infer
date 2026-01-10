@@ -75,6 +75,7 @@ from omni.layers.rotary_embedding import get_rope
 from omni.layers.utils import ConditionalTNGScope
 from omni.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from omni.models.config_loader.loader import model_extra_config
+from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsCapturer
 
 logger = init_logger(__name__)
 
@@ -565,7 +566,7 @@ class PanguProMoEV2MoEBlock(DeepseekMoE):
             self.is_init_gate = True
 
         if is_prefill:
-            return self._forward_prefill_norm(hidden_states, residual, attn_metadata)
+            return self._forward_prefill_norm(hidden_states, residual, attn_metadata, layer_id)
         else:
             return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
     
@@ -624,6 +625,10 @@ class PanguProMoEV2MoEBlock(DeepseekMoE):
             layer=self.experts)
 
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=None)
+        
+        capture = RoutedExpertsCapturer.get_instance()
+        if capture is not None:
+            capture.capture(layer_id=layer_id, topk_ids=topk_ids)
 
         layer = self.experts
         max_num_deployed_expert = self.local_expert_num * get_ep_group().world_size

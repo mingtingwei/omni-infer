@@ -1,0 +1,267 @@
+diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
+index 572ad9681..a92965dbe 100644
+--- a/vllm/entrypoints/openai/protocol.py
++++ b/vllm/entrypoints/openai/protocol.py
+@@ -1263,6 +1263,7 @@ class CompletionResponse(OpenAIBaseModel):
+     usage: UsageInfo
+     kv_transfer_params: Optional[dict[str, Any]] = Field(
+         default=None, description="KVTransfer parameters.")
++    routed_experts: Optional[list[list[list[int]]]] = None
+ 
+ 
+ class CompletionResponseStreamChoice(OpenAIBaseModel):
+@@ -1286,6 +1287,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
+     model: str
+     choices: list[CompletionResponseStreamChoice]
+     usage: Optional[UsageInfo] = Field(default=None)
++    routed_experts: Optional[list[list[list[int]]]] = None
+ 
+ 
+ class EmbeddingResponseData(OpenAIBaseModel):
+@@ -1454,6 +1456,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
+     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+     kv_transfer_params: Optional[dict[str, Any]] = Field(
+         default=None, description="KVTransfer parameters.")
++    routed_experts: Optional[list[list[list[int]]]] = None
+ 
+ 
+ class DeltaMessage(OpenAIBaseModel):
+@@ -1478,6 +1481,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
+     model: str
+     choices: list[ChatCompletionResponseStreamChoice]
+     usage: Optional[UsageInfo] = Field(default=None)
++    routed_experts: Optional[list[list[list[int]]]] = None
+ 
+ 
+ class TranscriptionResponseStreamChoice(OpenAIBaseModel):
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 37d5e1746..70265352f 100755
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -637,6 +637,10 @@ class OpenAIServingChat(OpenAIServing):
+                             choices=[choice_data],
+                             model=model_name)
+ 
++                        if os.getenv("ROLE") == "decode":
++                            prefill_experts_id = request.kv_transfer_params.get('prefill_experts_id', None)
++                            chunk.routed_experts = prefill_experts_id
++
+                         # if continuous usage stats are requested, add it
+                         if include_continuous_usage:
+                             chunk.usage = UsageInfo(
+@@ -1060,6 +1064,10 @@ class OpenAIServingChat(OpenAIServing):
+                         created=created_time,
+                         choices=[choice_data],
+                         model=model_name)
++                    
++                    expert_ids = getattr(res, 'routed_experts', None)
++                    if expert_ids:
++                        chunk.routed_experts = expert_ids
+ 
+                     # handle usage stats if requested & if continuous
+                     if include_continuous_usage:
+@@ -1407,6 +1415,16 @@ class OpenAIServingChat(OpenAIServing):
+ 
+         request_metadata.final_usage_info = usage
+ 
++        final_expert_ids = None
++        if os.getenv('ROLE', None) == "prefill":
++            final_res.kv_transfer_params["prefill_experts_id"] = getattr(final_res, 'routed_experts', None)
++        else:
++            kv_transfer_params = getattr(request, 'kv_transfer_params', {}) or {}
++            prefill_expert_ids = kv_transfer_params.get('prefill_experts_id')
++            final_expert_ids = getattr(final_res, 'routed_experts', None)
++            if prefill_expert_ids is not None:
++                final_expert_ids = prefill_expert_ids + (final_expert_ids if final_expert_ids is not None else [])
++
+         response = ChatCompletionResponse(
+             id=request_id,
+             created=created_time,
+@@ -1414,6 +1432,7 @@ class OpenAIServingChat(OpenAIServing):
+             choices=choices,
+             usage=usage,
+             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
++            routed_experts = final_expert_ids,
+             kv_transfer_params=final_res.kv_transfer_params,
+         )
+         if response.kv_transfer_params is None:
+diff --git a/vllm/entrypoints/openai/serving_completion.py b/vllm/entrypoints/openai/serving_completion.py
+index e43a96d51..64efaacad 100755
+--- a/vllm/entrypoints/openai/serving_completion.py
++++ b/vllm/entrypoints/openai/serving_completion.py
+@@ -417,6 +417,15 @@ class OpenAIServingCompletion(OpenAIServing):
+                                 stop_reason=stop_reason,
+                             )
+                         ])
++
++                    expert_ids = getattr(res, 'routed_experts', None)
++                    if expert_ids:
++                        chunk.routed_experts = expert_ids
++                    elif os.getenv("ROLE") == "decode":
++                        expert_ids = request.kv_transfer_params.get('prefill_experts_id', None)
++                        if expert_ids:
++                            chunk.routed_experts = expert_ids
++
+                     if include_continuous_usage:
+                         prompt_tokens = num_prompt_tokens[prompt_idx]
+                         completion_tokens = previous_num_tokens[i]
+@@ -572,12 +581,23 @@ class OpenAIServingCompletion(OpenAIServing):
+ 
+         request_metadata.final_usage_info = usage
+ 
++        final_expert_ids = None
++        if os.getenv('ROLE', None) == "prefill":
++            final_res.kv_transfer_params["prefill_experts_id"] = getattr(final_res, 'routed_experts', None)
++        else:
++            kv_transfer_params = getattr(request, 'kv_transfer_params', {}) or {}
++            prefill_expert_ids = kv_transfer_params.get('prefill_experts_id')
++            final_expert_ids = getattr(final_res, 'routed_experts', None)
++            if prefill_expert_ids is not None:
++                final_expert_ids = prefill_expert_ids + (final_expert_ids if final_expert_ids is not None else [])
++
+         return CompletionResponse(
+             id=request_id,
+             created=created_time,
+             model=model_name,
+             choices=choices,
+             usage=usage,
++            routed_experts = final_expert_ids,
+             kv_transfer_params=final_res_batch[0].kv_transfer_params)
+ 
+     def _create_completion_logprobs(
+diff --git a/vllm/outputs.py b/vllm/outputs.py
+index 33cc50c87..54edd726a 100644
+--- a/vllm/outputs.py
++++ b/vllm/outputs.py
+@@ -117,6 +117,7 @@ class RequestOutput:
+         prompt_logprobs: Optional[PromptLogprobs],
+         outputs: list[CompletionOutput],
+         finished: bool,
++        routed_experts: Optional[list[list[list[int]]]] = None,
+         metrics: Optional[RequestMetrics] = None,
+         lora_request: Optional[LoRARequest] = None,
+         encoder_prompt: Optional[str] = None,
+@@ -145,6 +146,7 @@ class RequestOutput:
+         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+         self.num_cached_tokens = num_cached_tokens
+         self.kv_transfer_params = kv_transfer_params
++        self.routed_experts = routed_experts
+ 
+     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
+         """Merge subsequent RequestOutput into this one"""
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 7038a87cd..05d6c53f5 100755
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -35,6 +35,8 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
+ from vllm.v1.structured_output import StructuredOutputManager
+ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
+                                               create_request_queue)
++from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsReader
++from omni.adaptors.vllm import envs
+ 
+ logger = init_logger(__name__)
+ 
+@@ -225,6 +227,16 @@ class Scheduler(SchedulerInterface):
+ 
+                 self.cpu_npu_kv_cache_manager = CpuNpuKVCacheManager(self.kv_cache_manager, cpu_kv_cache_manager, self.max_model_len, self.enable_omni_attn)
+ 
++        self.routed_experts_reader = RoutedExpertsReader.create() if envs.EXPORT_MOE_EXPERTS == '1' else None
++        if self.routed_experts_reader is not None:
++            self.routed_experts_reader.attach_buffer(
++                num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers,
++                mlp_only_layers = self.vllm_config.model_config.hf_config.mlp_only_layers,
++                num_experts_per_tok = self.vllm_config.model_config.hf_config.num_experts_per_tok,
++                block_size = self.cache_config.block_size,
++                instance_id=self.vllm_config.instance_id
++            )
++
+     def schedule(self) -> SchedulerOutput:
+         # NOTE(woosuk) on the scheduling algorithm:
+         # There's no "decoding phase" nor "prefill phase" in the scheduler.
+@@ -936,6 +948,16 @@ class Scheduler(SchedulerInterface):
+             # to return empty token ids for the request.
+ 
+             stopped, num_new = add_token_and_check_stop(new_token_ids, request, self.max_model_len - (1 + self.num_spec_tokens) * num_steps + 1 if (self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer") else self.max_model_len)
++
++            if self.routed_experts_reader is not None:
++                    routed_experts = self.routed_experts_reader.get_routed_experts(
++                        request=request,
++                        kv_cache_manager=self.kv_cache_manager,
++                        stopped=stopped
++                    )
++            else:
++                routed_experts = None
++
+             if stopped:
+                 kv_transfer_params = self._free_request(request)
+                 del new_token_ids[num_new:]  # Trim new tokens if needed.
+@@ -1005,6 +1027,7 @@ class Scheduler(SchedulerInterface):
+                         events=request.take_events(),
+                         kv_transfer_params=kv_transfer_params,
+                         num_cached_tokens=request.num_cached_tokens,
++                        routed_experts=routed_experts,
+                     ))
+ 
+             else:
+diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
+index 1474f9528..f4bd02797 100755
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -110,6 +110,7 @@ class EngineCoreOutput(
+ 
+     # The number of tokens with prefix cache hits.
+     num_cached_tokens: int = 0
++    routed_experts: Optional[list[list[list[int]]]] = None
+ 
+     @property
+     def finished(self) -> bool:
+diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
+index 293c291b4..623d5132a 100644
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -148,6 +148,7 @@ class RequestState:
+         stop_reason: Union[int, str, None],
+         kv_transfer_params: Optional[dict[str, Any]] = None,
+         num_cached_tokens: int = 0,
++        routed_experts: Optional[list[list[list[int]]]] = None,
+     ) -> Optional[RequestOutput]:
+ 
+         finished = finish_reason is not None
+@@ -170,7 +171,7 @@ class RequestState:
+                 return None
+ 
+         return self._new_request_output(request_id, outputs, finished,
+-                                        kv_transfer_params, num_cached_tokens)
++                                        kv_transfer_params, num_cached_tokens, routed_experts=routed_experts)
+ 
+     def _new_request_output(
+         self,
+@@ -179,6 +180,7 @@ class RequestState:
+         finished: bool,
+         kv_transfer_params: Optional[dict[str, Any]] = None,
+         num_cached_tokens: int = 0,
++        routed_experts: Optional[list[list[list[int]]]] = None,
+     ) -> RequestOutput:
+ 
+         if self.output_kind == RequestOutputKind.DELTA:
+@@ -196,6 +198,7 @@ class RequestState:
+             finished=finished,
+             kv_transfer_params=kv_transfer_params,
+             num_cached_tokens=num_cached_tokens,
++            routed_experts=routed_experts,
+         )
+ 
+     def _new_completion_output(
+@@ -359,7 +362,7 @@ class OutputProcessor:
+             # 4) Create and handle RequestOutput objects.
+             if request_output := req_state.make_request_output(
+                     new_token_ids, finish_reason, stop_reason,
+-                    kv_transfer_params, num_cached_tokens):
++                    kv_transfer_params, num_cached_tokens, routed_experts=engine_core_output.routed_experts):
+                 if req_state.queue is not None:
+                     # AsyncLLM: put into queue for handling by generate().
+                     req_state.queue.put(request_output)
+-- 
+2.33.0
+

@@ -67,6 +67,7 @@ from omni.layers.moe.fused_moe.layer import FusedMoE
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.moe.fused_moe.fused_moe import fused_experts_moe_dispatch_combine, set_fake_expand_x
 from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsCapturer
 
 """NPU Stream Switch Names"""
 STREAM_SHARED_EXPERT = 'stream_shared_expert'
@@ -461,13 +462,13 @@ class DeepseekMoE(nn.Module):
                 if self.is_A2 and not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
                     return self.forward_prefill_a2(hidden_states, residual, attn_metadata)
                 else:
-                    return self._forward_prefill_norm(hidden_states, residual, attn_metadata)
+                    return self._forward_prefill_norm(hidden_states, residual, attn_metadata, layer_id)
             elif self.is_A2 and model_extra_config.operator_opt_config.enable_round_pipeline_comm:
                 return self.forward_decode_a2(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
             else:
                 return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
 
-    def _forward_prefill_norm(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata) -> torch.Tensor:
+    def _forward_prefill_norm(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int = 0) -> torch.Tensor:
         shared_output = self.shared_experts(hidden_states)  
         if not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
             hidden_states_int8, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -498,6 +499,10 @@ class DeepseekMoE(nn.Module):
             topk_weights, topk_ids = DynamicPruningUnsorted(topk_weights, 
                                                             topk_ids, 
                                                             self.experts_pruning_threshold)
+        
+        capture = RoutedExpertsCapturer.get_instance()
+        if capture is not None:
+            capture.capture(layer_id=layer_id, topk_ids=topk_ids)
 
         if not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
             topk_cat = torch.cat((topk_weights, topk_ids.to(torch.float), pertoken_scale.unsqueeze(-1)), dim=-1)
@@ -596,6 +601,10 @@ class DeepseekMoE(nn.Module):
             topk_weights, topk_ids, global_pertoken_scale = torch.split(topk_all, [topk_weights.shape[-1], topk_ids.shape[-1], 1], dim=-1)
             topk_ids = torch.round(topk_ids).to(torch.int32)
             global_pertoken_scale = global_pertoken_scale.squeeze(-1)
+
+        capture = RoutedExpertsCapturer.get_instance()
+        if capture is not None:
+            capture.capture(layer_id=layer_id, topk_ids=topk_ids)
 
         final_hidden_states_list = self.experts(
             hidden_states=global_hidden_states,

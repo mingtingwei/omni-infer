@@ -61,3 +61,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/chat_message_reasoning_content.patch
 git apply --whitespace=nowarn $PATCH_ROOT/gpt_oss_make_request_by_chat_template.patch
 git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_max_tokens_exclude_reasoning.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix-stream-no-id-and-type.patch
+git apply --whitespace=nowarn $PATCH_ROOT/export_moe_experts.patch
