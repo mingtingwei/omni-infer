@@ -52,7 +52,7 @@ index 74c2251c7..16165b52e 100644
          self.engine_core = core_client_class(
              vllm_config=vllm_config,
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
-index 740ba60fe..909623d75 100644
+index 740ba60fe..78f2c35ad 100644
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
 @@ -10,6 +10,7 @@ from concurrent.futures import Future
@@ -112,10 +112,22 @@ index 740ba60fe..909623d75 100644
                  if self.scheduler.has_finished_requests():
                      # There are no unfinished requests, but there are some
                      # finished requests remaining to be removed from the
-@@ -775,12 +782,18 @@ class DPEngineCoreProc(EngineCoreProc):
-                 # There must be unfinished requests in DP peers, run a
-                 # dummy forward pass.
-                 self.execute_dummy_batch()
+@@ -767,20 +774,22 @@ class DPEngineCoreProc(EngineCoreProc):
+                     # pass but will flush the finished requests to ensure
+                     # up-to-date state is returned in the engine outputs.
+                     self._process_engine_step()
+-
+-                if not self.engines_running:
+-                    # All engines are idle.
+-                    continue
+-
+-                # There must be unfinished requests in DP peers, run a
+-                # dummy forward pass.
+-                self.execute_dummy_batch()
++                else:
++                    # There must be unfinished requests in DP peers, run a
++                    # dummy forward pass.
++                    self.execute_dummy_batch()
 +            else:
 +                time.sleep(0.001)
 +            if not self.enable_sleep_mode:
@@ -123,7 +135,7 @@ index 740ba60fe..909623d75 100644
 +                continue
  
              # 3) All-reduce operation to determine global unfinished reqs.
-+            last_engines_running = self._has_global_unfinished_reqs
++            last_engines_running = self.engines_running
              self.engines_running = self._has_global_unfinished_reqs(
                  local_unfinished_reqs)
  
@@ -132,7 +144,7 @@ index 740ba60fe..909623d75 100644
                  if self.dp_rank == 0:
                      # Notify client that we are pausing the loop.
                      logger.debug("Wave %d finished, pausing engine loop.",
-@@ -794,7 +807,7 @@ class DPEngineCoreProc(EngineCoreProc):
+@@ -794,7 +803,7 @@ class DPEngineCoreProc(EngineCoreProc):
          # Optimization - only perform finish-sync all-reduce every 24 steps.
          self.counter += 1
          if self.counter != 24:

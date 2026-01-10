@@ -893,7 +893,7 @@ class DeepseekMLA(nn.Module):
                 self.kv_all_gather_event.wait()
                 # k_pe:BNS,64 kv_a:BNS, 512, kv_states:bnsd, cos,sin:bnsd,kv cache:bsnd
                 _, _, k_pe, kv_a = torch_npu.npu_kv_rmsnorm_rope_cache(
-                    latent_cache.view(-1, 1, 1, 576), # bnsd
+                    latent_cache.view(-1, 1, 1, self.kv_lora_rank + self.qk_rope_head_dim), # bnsd
                     self.kv_a_layernorm.weight,
                     cos.view(-1, 1, 1, self.qk_rope_head_dim),
                     sin.view(-1, 1, 1, self.qk_rope_head_dim),

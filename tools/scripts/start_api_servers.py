@@ -95,6 +95,7 @@ def start_single_node_api_servers(
     log_dir="logs",
     max_port_attempts=10,
     max_tokens=4096,
+    load_format="auto",
     extra_args=None,
     additional_config=None,
     enable_mtp=False,
@@ -163,7 +164,8 @@ def start_single_node_api_servers(
             "--data-parallel-rpc-port", str(master_port), # 'Port for data parallel RPC '
             "--port", str(port),
             "--served-model-name", served_model_name,
-            "--max-model-len", str(max_tokens)
+            "--max-model-len", str(max_tokens),
+            "--load-format", str(load_format)
         ]
         if distributed_executor_backend is not None and distributed_executor_backend != "None":
             cmd.extend(["--distributed-executor-backend", str(distributed_executor_backend)])
@@ -343,7 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--tool-parser-plugin", type=str, help="Path of reasoning parser")
     parser.add_argument("--dtype", type=str, help="Data type of model")
     parser.add_argument("--print-screen", default=False, action="store_true")
-
+    parser.add_argument("--load-format", type=str, default="auto", help="load format for VLLM")
     args = parser.parse_args()
     if not args.num_dp:
         args.num_dp = args.num_servers
@@ -370,7 +372,8 @@ if __name__ == "__main__":
         log_dir=args.log_dir,
         max_port_attempts=args.max_port_attempts,
         kv_transfer_config=args.kv_transfer_config,
-        max_tokens=args.max_model_len, 
+        max_tokens=args.max_model_len,
+        load_format=args.load_format, 
         extra_args=args.extra_args,
         additional_config=args.additional_config,
         enable_mtp=args.enable_mtp,

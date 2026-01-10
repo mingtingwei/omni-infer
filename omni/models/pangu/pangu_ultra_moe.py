@@ -16,6 +16,7 @@
 """Inference-only PanguUltraMoE model."""
 import copy
 import itertools
+import os
 from typing import Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch_npu
@@ -247,7 +248,7 @@ class PanguUltraMoEDecoderLayer(nn.Module):
             reduce_length = torch.tensor(hidden_states.shape[0], dtype=torch.int64, device=current_platform.device_type)
             local_length = hidden_states.shape[0]
             # global_max_length = torch.tensor(0, dtype=torch.int64)
-            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+            dist.all_reduce(reduce_length, group=get_dp_group().device_group, op=dist.ReduceOp.MAX, async_op=False)
             global_max_length = reduce_length.item()
             pad_size = global_max_length - hidden_states.shape[0]
             hidden_states = torch.nn.functional.pad(
@@ -739,10 +740,16 @@ class PanguUltraMoEForCausalLM(nn.Module):
         
         self.model = self.get_model()
 
+        rl_service_mode = os.getenv("RL_SERVICE_MODE", "0") == "1"
+        if rl_service_mode:
+            parallel_lmhead_enable = False
+        else:
+            parallel_lmhead_enable = (get_dp_group().world_size > 1)
+
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       quant_config=self.quant_config,
-									  parallel_lmhead=(get_dp_group().world_size > 1))
+									  parallel_lmhead=parallel_lmhead_enable)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 logits_as_input=True)
         self.sampler = Sampler()
