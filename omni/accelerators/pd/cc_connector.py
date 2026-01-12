@@ -103,7 +103,6 @@ class CcConnectorScheduler:
         if request.request_id in self.processed_requests:
             logger.debug(f"req {request.request_id} already in processed requests.")
             return 0, False
-        self.processed_requests.add(request.request_id)
 
         num_computed_blocks = num_computed_tokens // self.block_size
         num_total_blocks = (len(request.prompt_token_ids) - 1) // self.block_size
@@ -145,6 +144,9 @@ class CcConnectorScheduler:
             req_meta.num_total_blocks = num_block_ids
         req_meta.block_ids = blocks.get_block_ids()[0][req_meta.num_computed_blocks:req_meta.num_total_blocks]
         req_meta.operation = OperationType.Load
+
+        self.processed_requests.add(request.request_id)
+
         logger.debug(f"req {request.request_id} update block ids, meta: {req_meta}.")
     
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
