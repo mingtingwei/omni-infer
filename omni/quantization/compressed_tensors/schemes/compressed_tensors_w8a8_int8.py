@@ -7,6 +7,8 @@ import torch
 from torch.nn import Parameter
 import torch_npu
 
+import torchair
+from omni.adaptors.vllm.distributed.parallel_state import get_scale_parallel_group
 from compressed_tensors.quantization import QuantizationStrategy
 from vllm.distributed import get_tp_group
 from vllm.model_executor.utils import set_weight_attrs
@@ -102,8 +104,14 @@ class AscendCompressedTensorsW8A8Int8LinearMethod(CompressedTensorsScheme):
             pertoken_scale = x.get('pertoken_scale')
         else:
             x_int8, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+
+        scale_parallel = model_extra_config.operator_opt_config.enable_scale_parallel
         if x_transform == 'AG':
-            pertoken_scale = get_tp_group().all_gather(pertoken_scale, dim=0)
+            if is_prefill or (not scale_parallel):
+                pertoken_scale = get_tp_group().all_gather(pertoken_scale, dim=0)
+            else:
+                with torchair.scope.npu_stream_switch('scale'):
+                    pertoken_scale = get_scale_parallel_group().all_gather(pertoken_scale, dim=0)
             x_int8 = get_tp_group().all_gather(x_int8, dim=0)
         elif x_transform == 'A2A':
             pertoken_scale = get_tp_group().all_to_all(pertoken_scale, dim=0)

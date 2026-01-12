@@ -61,7 +61,8 @@ class AscendMergedColumnParallelLinear(LinearBase):
                  tp_rank: int = 0,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 throw_dequant: bool = True):
         self.output_sizes = output_sizes
         self.tp_size = tp_size
         if not all(output_size % tp_size == 0 for output_size in output_sizes):
@@ -104,7 +105,8 @@ class AscendMergedColumnParallelLinear(LinearBase):
             })
         else:
             self.register_parameter("bias", None)
-        self.throw_dequant = True
+        
+        self.throw_dequant = throw_dequant
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
@@ -262,8 +264,16 @@ class AscendRowParallelLinear(LinearBase):
                  reduce_results: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
+        
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
+        
+        if quant_config is None or (quant_config.ignore is not None and prefix in quant_config.ignore):
+            self.quant_method: Optional[
+                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
+        else:
+            self.quant_method = quant_config.get_quant_method(self,
+                                                            prefix=prefix)
 
         if self.quant_method is None:
             raise RuntimeError("self.quant_method must not be None")
@@ -1023,7 +1033,7 @@ class RowParallelFlashCommLinear(FlashCommLinearBase):
         if is_weight_transposed:
             param.data = torch_npu.npu_format_cast(param.data.t_(), 29)
 
-    def forward(self, input_, reduce_type="AR", x_transform=None, next_layer=None):
+    def forward(self, input_, reduce_type="AR", x_transform=None, next_layer=None, is_prefill=True):
         input_parallel = input_
 
         # Matrix multiply.
@@ -1035,7 +1045,8 @@ class RowParallelFlashCommLinear(FlashCommLinearBase):
                                                   input_parallel,
                                                   bias=bias_,
                                                   module_name=self.prefix,
-                                                  x_transform=x_transform)
+                                                  x_transform=x_transform,
+                                                  is_prefill=is_prefill)
         if next_layer:
             prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 *1024
             for layer in next_layer:
