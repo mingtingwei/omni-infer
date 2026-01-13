@@ -26,28 +26,12 @@
     }
   },
   "loggers": {
-    "vllm": {
-      "handlers": [
-        "vllm",
-        "console"
-      ],
-      "level": "DEBUG",
-      "propagate": false
-    },
-    "omni": {
-      "handlers": [
-        "vllm",
-        "console"
-      ],
-      "level": "DEBUG",
-      "propagate": false
-    },
     "": {
       "handlers": [
         "vllm",
         "console"
       ],
-      "level": "WARNING"
+      "level": "DEBUG"
     }
   },
   "version": 1,
