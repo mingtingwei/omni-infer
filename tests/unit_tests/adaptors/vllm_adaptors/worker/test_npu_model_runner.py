@@ -536,6 +536,32 @@ def test_init_hybrid_chunked_prefill_graph_mode(parallel_state, sampler_and_draf
     assert runner.max_batch_size == sched_cfg.max_num_batched_tokens
 
 
+def test_mixed_deployment_chunked_prefill_disables_hybrid_graph_mode(
+    parallel_state, sampler_and_drafter, npu_device
+):
+    model_cfg = DummyModelConfig()
+    cache_cfg = DummyCacheConfig()
+    sched_cfg = DummySchedulerConfig(max_num_batched_tokens=20, max_num_seqs=2, enable_chunked_prefill=True)
+    parallel_cfg = DummyParallelConfig()
+    npu_comp_cfg = DummyNPUCompilationConfig(level=CompilationLevel.PIECEWISE, decode_gear_list=[4, 8])
+
+    vllm_cfg = make_vllm_config(
+        model_config=model_cfg,
+        cache_config=cache_cfg,
+        scheduler_config=sched_cfg,
+        parallel_config=parallel_cfg,
+        npu_compilation_config=npu_comp_cfg,
+        spec_config=None,
+        kv_role="kv_consumer",
+        additional_config={},
+    )
+
+    runner = NPUModelRunner(vllm_cfg, npu_device)
+
+    assert runner.is_pd_seperate_d
+    assert not runner.is_hybrid_chunked_prefill_graph_mode
+
+
 def test_init_training_flags_and_c8_kv_dtype(monkeypatch, parallel_state, sampler_and_drafter, npu_device):
     # Training save flags and C8 kv_cache dtype selection respect kv_role and mla flag.
     from omni.models.config_loader import loader
