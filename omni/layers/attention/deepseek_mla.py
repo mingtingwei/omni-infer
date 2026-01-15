@@ -56,10 +56,6 @@ from omni.adaptors.vllm.distributed.parallel_state import (
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.utils import ConditionalTNGScope
 
-try:
-    import custom_ops
-except:
-    pass
 from vllm.logger import logger
 
 KVCACHE_NZ_DIM = 16
@@ -179,7 +175,7 @@ class Indexer(nn.Module):
         }
 
         if model_extra_config.operator_opt_config.enable_indexer_quant:
-            li_fusion = torch.ops.custom.npu_lightning_indexer_quant
+            li_fusion = torch_npu.npu_quant_lightning_indexer
             li_fusion_input_kwargs.update({
                 "key_dequant_scale": kv_cache[3].view(-1, 128, kv_cache[3].shape[-1]),
                 "key_quant_mode": 0,
@@ -188,7 +184,7 @@ class Indexer(nn.Module):
                 "weights": weights.type(torch.float16),
             })
         else:
-            li_fusion = torch.ops.custom.npu_lightning_indexer
+            li_fusion = torch_npu.npu_lightning_indexer
         topk_indices = li_fusion(**li_fusion_input_kwargs)
         return topk_indices
 
@@ -604,7 +600,7 @@ class DeepseekMLA(nn.Module):
                 else:
                     actual_seq_kvlen = computed_seq_len + (actual_seq_kvlen - computed_seq_len) * (sp_rank + 1)
 
-            attn_output = torch.ops.custom.npu_sparse_flash_attention(
+            attn_output = torch_npu.npu_sparse_flash_attention(
                 query=q_nope,
                 key=k_nope,
                 value=k_nope,
@@ -619,7 +615,10 @@ class DeepseekMLA(nn.Module):
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
+                attention_mode=2,
             )
+            if isinstance(attn_output, tuple):
+                attn_output = attn_output[0]
         else:
             is_attn_output_reshape = model_extra_config.operator_opt_config.prefill_enable_mla_alltoall
             o_proj_tp_size = get_o_proj_dp_group().world_size \
@@ -1068,7 +1067,7 @@ class DeepseekMLA(nn.Module):
         dequant_scale_q_norm = None
         if model_extra_config.operator_opt_config.enable_dsa:
             cache_mode = "PA_BSND"
-            q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
+            q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch_npu.npu_mla_prolog_v3(
                 token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
                 weight_dq=self.q_a_proj.weight,
                 weight_uq_qr=self.q_b_proj.weight,
@@ -1280,7 +1279,7 @@ class DeepseekMLA(nn.Module):
                 kv_actual_seqlen_dsa = attn_metadata.decode.seq_lens.to(torch.int32)
                 key_rope_dsa = k_rope
 
-            attn_output = torch.ops.custom.npu_sparse_flash_attention(
+            attn_output = torch_npu.npu_sparse_flash_attention(
                 query=q_nope,
                 key=kv_dsa,
                 value=kv_dsa,
@@ -1295,7 +1294,10 @@ class DeepseekMLA(nn.Module):
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
+                attention_mode=2,
             )
+            if isinstance(attn_output, tuple):
+                attn_output = attn_output[0]
         else:
             input_layout_mla = input_layout
             actual_seq_lengths_mla = self.actual_seq_lengths[bsz]
