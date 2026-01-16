@@ -11,7 +11,7 @@ index 5c6708c7d..506cf9268 100644
          if any(p in config for p in available_params):
              diff_sampling_param = {
 diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
-index 572ad9681..cbadb080f 100644
+index a92965dbe..b02fdedd3 100644
 --- a/vllm/entrypoints/openai/protocol.py
 +++ b/vllm/entrypoints/openai/protocol.py
 @@ -269,6 +269,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
@@ -99,7 +99,7 @@ index b1816d758..3ade689b7 100644
 +    
 +    top_n_sigma: Optional[torch.Tensor]
 diff --git a/vllm/v1/sample/sampler.py b/vllm/v1/sample/sampler.py
-index 225965b41..bf2eabea1 100644
+index 225965b41..55190ed2c 100644
 --- a/vllm/v1/sample/sampler.py
 +++ b/vllm/v1/sample/sampler.py
 @@ -124,6 +124,10 @@ class Sampler(nn.Module):
@@ -108,7 +108,7 @@ index 225965b41..bf2eabea1 100644
  
 +        # Apply top_n_sigma
 +        if sampling_metadata.top_n_sigma is not None:
-+            logits = apply_top_n_sigma(logits, sampling_metadata.top_n_sigma)
++            logits = self.apply_top_n_sigma(logits, sampling_metadata.top_n_sigma)
 +
          # Apply top_k and/or top_p.
          random_sampled = self.topk_topp_sampler(
@@ -122,19 +122,19 @@ index 225965b41..bf2eabea1 100644
 +        return token_ids
 +
 +
-+def apply_top_n_sigma(logits: torch.Tensor, top_n_sigma: torch.Tensor):
-+    
-+    top_n_sigma = top_n_sigma.unsqueeze(-1)
-+    top_n_sigma_mask = top_n_sigma != -1
-+    
-+    filter_value = -3.4028e38
-+    max_vals, _ = logits.max(dim=-1, keepdim=True)
-+    std_vals = logits.std(dim=-1, keepdim=True)
-+    threshold = max_vals - top_n_sigma * std_vals
-+    threshold = torch.where(top_n_sigma_mask, threshold, filter_value)
-+    mask = logits < threshold
-+    logits = torch.where(mask, filter_value, logits)
-+    return logits
++    def apply_top_n_sigma(self, logits: torch.Tensor, top_n_sigma: torch.Tensor):
++        
++        top_n_sigma = top_n_sigma.unsqueeze(-1)
++        top_n_sigma_mask = top_n_sigma != -1
++        
++        filter_value = -3.4028e38
++        max_vals, _ = logits.max(dim=-1, keepdim=True)
++        std_vals = logits.std(dim=-1, keepdim=True)
++        threshold = max_vals - top_n_sigma * std_vals
++        threshold = torch.where(top_n_sigma_mask, threshold, filter_value)
++        mask = logits < threshold
++        logits = torch.where(mask, filter_value, logits)
++        return logits
 \ No newline at end of file
 diff --git a/vllm/v1/worker/gpu_input_batch.py b/vllm/v1/worker/gpu_input_batch.py
 index b0534ed73..4ccaa00aa 100644

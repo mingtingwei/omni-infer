@@ -27,7 +27,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import apply_min_token_penalties
 from vllm.v1.sample.sampler import Sampler as SamplerV1
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.sample.sampler import apply_top_n_sigma
 
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.npu_sampler_cache import PenaltyCache, ProbCache
@@ -252,8 +251,8 @@ class AscendSamplerV1(SamplerV1):
             k = sampling_metadata.top_k
 
             if sampling_metadata.top_n_sigma is not None:
-                top_n_sigm = sampling_metadata.top_n_sigma
-                logits_or_prob = apply_top_n_sigma(logits_or_prob, top_n_sigm)            
+                top_n_sigma = sampling_metadata.top_n_sigma
+                logits_or_prob = self.apply_top_n_sigma(logits_or_prob, top_n_sigma)            
 
             if os.getenv("OMNI_DISABLE_NPU_TOP_K_TOP_P_SAMPLE", "0") == "1" or (k is None and p is None):
                 probs, idx = apply_top_k_top_p(

@@ -361,7 +361,8 @@ def test_ascend_sampler_v1_apply_penalties_passthrough(npu_device):
         logit_bias=[None, None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        seq_data=[]
+        seq_data=[],
+        top_n_sigma=[],
     )
 
     out = sampler.apply_penalties(logits.clone(), sampling_metadata)
@@ -397,7 +398,8 @@ def test_simple_sampler_prefill_returns_argmax(npu_device):
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        seq_data=[]
+        seq_data=[],
+        top_n_sigma=[],
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(
@@ -480,7 +482,8 @@ def test_sparse_rejection_sampler_resample_when_uncomputed(npu_device, monkeypat
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        seq_data=[]
+        seq_data=[],
+        top_n_sigma=[],
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(
@@ -688,7 +691,8 @@ def test_simple_sampler_decode_accepts_tokens(npu_device):
         logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        seq_data=[]
+        seq_data=[],
+        top_n_sigma=[],
     )
 
     sampler_output, forward_tokens, last_accepted_index, accepted_num = sampler(
