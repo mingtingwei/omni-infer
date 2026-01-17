@@ -74,18 +74,27 @@ def test_sleep_and_wake_up(fake_platform, monkeypatch, dummy_worker):
     kv_caches = [[torch.zeros((kv_config.batch_size, kv_config.num_heads, kv_config.seq_len, kv_config.head_dim), 
                 dtype=torch.float32, device=dummy_worker.device)
                 for _ in range(2)] for _ in range(kv_config.num_layers)]
-    dummy_worker.model_runner = SimpleNamespace(        
+    
+    called = {"unregister_kv_caches": False, "reregister_kv_caches": False}
+    def fake_unregister_kv_caches():
+        called["unregister_kv_caches"] = True
+
+    def fake_reregister_kv_caches():
+        called["reregister_kv_caches"] = True
+
+    dummy_worker.model_runner = SimpleNamespace(   
+        unregister_kv_caches = fake_unregister_kv_caches,
+        reregister_kv_caches = fake_reregister_kv_caches,     
         kv_caches = kv_caches,
         model=FakeModel(dummy_worker.device),
     )
 
-    # print(dummy_worker.model_runner.kv_caches[0][0].shape)
     id_kv_caches_before_sleep = id(dummy_worker.model_runner.kv_caches)
     dummy_worker.sleep(level=1)
     assert dummy_worker.kv_nbytes is not None
     assert dummy_worker.kv_nbytes[0][0] ==  \
         kv_config.batch_size * kv_config.num_heads * kv_config.seq_len * kv_config.head_dim * torch.float32.itemsize
-    # print(dummy_worker.model_runner.kv_caches[0][0].shape)
+    assert called["unregister_kv_caches"]
     assert dummy_worker.model_runner.kv_caches[0][0].untyped_storage().nbytes() == 0
     assert dummy_worker.model_runner.model.device == "cpu"
 
@@ -95,6 +104,7 @@ def test_sleep_and_wake_up(fake_platform, monkeypatch, dummy_worker):
     assert id_kv_caches_before_sleep == id_kv_caches_after_wake_up
     assert dummy_worker.model_runner.kv_caches[0][0].untyped_storage().nbytes() == \
         dummy_worker.kv_nbytes[0][0]
+    assert called["reregister_kv_caches"]
     assert dummy_worker.model_runner.model.device == "npu"
 
 def test_sleep_and_wake_up_with_drafter(fake_platform, monkeypatch, dummy_worker):
@@ -109,7 +119,17 @@ def test_sleep_and_wake_up_with_drafter(fake_platform, monkeypatch, dummy_worker
     kv_caches = [[torch.zeros((kv_config.batch_size, kv_config.num_heads, kv_config.seq_len, kv_config.head_dim), 
                 dtype=torch.float32, device=dummy_worker.device)
                 for _ in range(2)] for _ in range(kv_config.num_layers)]
-    dummy_worker.model_runner = SimpleNamespace(        
+    
+    called = {"unregister_kv_caches": False, "reregister_kv_caches": False}
+    def fake_unregister_kv_caches():
+        called["unregister_kv_caches"] = True
+
+    def fake_reregister_kv_caches():
+        called["reregister_kv_caches"] = True
+
+    dummy_worker.model_runner = SimpleNamespace(   
+        unregister_kv_caches= fake_unregister_kv_caches,
+        reregister_kv_caches = fake_reregister_kv_caches,     
         kv_caches = kv_caches,
         model=FakeModel(dummy_worker.device),
     )
@@ -129,7 +149,7 @@ def test_sleep_and_wake_up_with_drafter(fake_platform, monkeypatch, dummy_worker
 
 def test_wake_up_dp_world_size(fake_platform, monkeypatch, dummy_worker):
     # Ensure calling sleep/wake_up on RLNPUWorker with patched platform/allocator does not raise.
-    called = {"dp_all_reduce": False}
+    called = {"dp_all_reduce": False, "unregister_kv_caches": False, "reregister_kv_caches": False}
 
     def fake_all_reduce(x):
         called["dp_all_reduce"] = True
@@ -144,7 +164,15 @@ def test_wake_up_dp_world_size(fake_platform, monkeypatch, dummy_worker):
     kv_caches = [[torch.zeros((kv_config.batch_size, kv_config.num_heads, kv_config.seq_len, kv_config.head_dim), 
                 dtype=torch.float32, device=dummy_worker.device)
                 for _ in range(2)] for _ in range(kv_config.num_layers)]
-    dummy_worker.model_runner = SimpleNamespace(        
+    
+    def fake_unregister_kv_caches():
+        called["unregister_kv_caches"] = True
+
+    def fake_reregister_kv_caches():
+        called["reregister_kv_caches"] = True
+    dummy_worker.model_runner = SimpleNamespace(   
+        unregister_kv_caches = fake_unregister_kv_caches,
+        reregister_kv_caches = fake_reregister_kv_caches,     
         kv_caches = kv_caches,
         model=FakeModel(dummy_worker.device),
     )
