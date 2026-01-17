@@ -188,9 +188,31 @@ def fetch_post(url, headers, data):
             "error": str(e)
         }
 
-def teardown_proxy_balance():
+def get_ngx_pid():
     try:
-        cmd = "kill -QUIT $(ps -ef --sort=-lstart | grep 'nginx: master' | grep -v grep | head -n1 | awk '{print $2}')"
+        cmd = "ps -ef --sort=-lstart | grep 'nginx: master' | grep -v grep | head -n1 | awk '{print $2}'"
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        if result.returncode == 0:
+            ngx_mstr_pid = result.stdout.strip()
+            print(f"[NGX ID] Script succeeded. Output:\n{result.stdout}")
+            return ngx_mstr_pid
+    except subprocess.CalledProcessError as e:
+        error_msg = (
+            f"Get nginx pid failed with exit code {e.returncode}.\n"
+            f"STDERR: {e.stderr}\n"
+            f"STDOUT: {e.stdout}"
+        )
+        print(error_msg)
+
+def teardown_proxy_balance(ngx_pid):
+    try:
+        cmd = f"kill -QUIT {ngx_pid}"
         
         print(f"\n[TEARDOWN] Stopping proxy with command: {cmd}")
         result = subprocess.run(
@@ -214,7 +236,7 @@ def test_chat_completions_with_proxy_basic(setup_teardown):
     ret = setup_proxy_basic(proxy_port)
     if not ret == 0:
         pytest.fail(f"Start proxy fail")
-
+    ngx_pid = get_ngx_pid()
     url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"  
     data = [
         {
@@ -270,24 +292,24 @@ def test_chat_completions_with_proxy_basic(setup_teardown):
     for future in concurrent.futures.as_completed(future_to_data):
         result = future.result()
         results.append(result)
-        print(f"Status: {result['status']}, Preview: {result['text']}")
         try:
+            print(f"Status: {result['status']}, Preview: {result['text']}")
             assert result['status'] == 200
-        except AssertionError as e:
-            teardown_proxy_balance()
+        except Exception as e:
+            teardown_proxy_balance(ngx_pid)
     end_time = time.time()
-    print(f"take: {end_time - start_time:.2f} seconds")
+    print(f"Total time: {end_time - start_time:.2f} seconds")
     log_file = f"{CUR_DIR}/nginx_access_balance.log"
     num_logs = len(data)
     print("\n=== verifying load balance ===")
     try:
         analyze_balance_basic(log_file, num_logs)
     except Exception as e:
-        teardown_proxy_balance()
+        teardown_proxy_balance(ngx_pid)
         print(f"\n=== verifying fail: {e} ===")
         raise
     print("\n=== verifying pass ===")
-    teardown_proxy_balance()
+    teardown_proxy_balance(ngx_pid)
 
 def analyze_balance_basic(log_file, num_logs = 5):
     if not os.path.exists(log_file):
@@ -341,6 +363,7 @@ def test_chat_completions_with_proxy_earliest(setup_teardown):
         pytest.fail(f"Start proxy fail")
     #wait proxy service ready 
     time.sleep(5)
+    ngx_pid = get_ngx_pid()
     url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"  
 
     data = [
@@ -414,12 +437,11 @@ def test_chat_completions_with_proxy_earliest(setup_teardown):
     for future in concurrent.futures.as_completed(future_to_data):
         result = future.result()
         results.append(result)
-
-        print(f"Status: {result['status']}, Preview: {result['text']}")
         try:
+            print(f"Status: {result['status']}, Preview: {result['text']}")
             assert result['status'] == 200
-        except AssertionError as e:
-            teardown_proxy_balance()
+        except Exception as e:
+            teardown_proxy_balance(ngx_pid)
     end_time = time.time()
     print(f"take: {end_time - start_time:.2f} seconds")
     log_file = f"{CUR_DIR}/nginx_access_balance.log"
@@ -429,16 +451,15 @@ def test_chat_completions_with_proxy_earliest(setup_teardown):
         analyze_balance_earliest(log_file, num_logs, len(data))
     
     except Exception as e:
-        teardown_proxy_balance()
+        teardown_proxy_balance(ngx_pid)
         print(f"\n=== verifying fail: {e} ===")
         raise
     print("\n=== verifying pass ===")
-    teardown_proxy_balance()
+    teardown_proxy_balance(ngx_pid)
 
 def analyze_balance_earliest(log_file, num_logs, num_data):
     if not os.path.exists(log_file):
         raise FileNotFoundError(f"log {log_file} does not exist")
-    
     try:
         with open(log_file, 'r', encoding='utf-8') as f:
             logs = [line.strip() for line in f if line.strip()]
@@ -498,6 +519,7 @@ def test_chat_completions_with_proxy_apc(setup_teardown):
     time.sleep(5) 
     if not ret == 0:
         pytest.fail(f"Start proxy fail")
+    ngx_pid = get_ngx_pid()
     url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"  
 
     data = [
@@ -554,7 +576,7 @@ def test_chat_completions_with_proxy_apc(setup_teardown):
         for d_index in range(POST_DATA_COUNT):
             headers = {
                 "Content-Type": "application/json",
-                "X-Request-Id": f"{'12345'}",                
+                "X-Request-Id": f"{''.join(random.choices('123456789', k = 5))}",                
             }
             future = executor.submit(fetch_post, url, headers, data[d_index % len(data)])
             future_to_data[future] = data[d_index % len(data)]
@@ -563,12 +585,11 @@ def test_chat_completions_with_proxy_apc(setup_teardown):
     for future in concurrent.futures.as_completed(future_to_data):
         result = future.result()
         results.append(result)
-        print(f"Status: {result['status']}, Preview: {result['text']}")
         try:
+            print(f"Status: {result['status']}, Preview: {result['text']}")
             assert result['status'] == 200
-        except AssertionError as e:
-            teardown_proxy_balance()
-
+        except Exception as e:
+            teardown_proxy_balance(ngx_pid)
     end_time = time.time()
     print(f"Total time: {end_time - start_time:.2f} seconds")
     log_file = f"{CUR_DIR}/nginx_access_balance.log"
@@ -578,11 +599,11 @@ def test_chat_completions_with_proxy_apc(setup_teardown):
         analyze_balance_apc(log_file, num_logs)
         
     except Exception as e:
-        teardown_proxy_balance()
+        teardown_proxy_balance(ngx_pid)
         print(f"\n=== verifying fail: {e} ===")
         raise
     print("\n=== verifying pass ===")
-    teardown_proxy_balance()
+    teardown_proxy_balance(ngx_pid)
 
 def analyze_balance_apc(log_file, num_logs):
     if not os.path.exists(log_file):
@@ -634,86 +655,88 @@ def test_chat_completions_with_proxy_concurrent(setup_teardown):
     ret = setup_proxy_basic(proxy_port)
     if not ret == 0:
         pytest.fail(f"Start proxy fail")
+    ngx_pid = get_ngx_pid()
     url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions" 
 
     start_time = time.time()
     results = []
     POST_DATA_COUNT = 2000
 
+    data = [
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,
+            "messages": [{"role": "user", "content": "The city of New Ember is a highly developed technological city. In this city, all natural landscapes have been replaced by high-rise buildings, concrete roads, and artificial gardens. The air is filled with the smell of exhaust gas, and the sky is always gray. The people of New Ember are used to this kind of life. They rely on technology for everything, and they have long forgotten what real nature looks like. Jamie is a 12-year-old boy who lives in New Ember. He is different from other children. He likes to read books about nature, and he dreams of seeing real trees, flowers, and birds. One day, when Jamie is walking home from school, he finds a single seed in the middle of a concrete street. The seed is small, brown, and covered with dust. Jamie picks up the seed, feeling a strange connection with it. He takes the seed home, finds a small pot, puts some soil in it, and plants the seed. He waters the seed every day, and takes good care of it. To his surprise, a week later, the seed germinates and grows into a small seedling. Another week later, the seedling grows into a small tree with green leaves. What's even more amazing is that the tree can produce fruit that tastes like childhood memories. When Jamie eats the fruit, he can clearly remember the happy times he spent with his grandfather in the countryside when he was a child—running on the grass, picking wild flowers, and listening to the birds sing. Jamie shares the fruit with his friends. After eating the fruit, his friends also remember the fragments of nature in their memories. They are all shocked and moved. Please create a story based on this setting, describing Jamie's care for the tree, the changes that the tree brings to Jamie and his friends, the opposition from the city government (which considers the tree a 'harmful organism' that violates the city's technological aesthetic), the process of Jamie and his friends protecting the tree, and the impact of the tree on the entire city of New Ember. The word count should be no less than 1200 words."}],
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Honeyglow Village is located near a large beehive, and the villagers can communicate with bees and collect honey easily—some use bees to pollinate crops, others use honey to make food, and a few can even use bee venom to heal certain diseases. Lucas, a 10-year-old boy in the village, is afraid of bees, and they never respond to his calls. Whenever he approaches the beehive, the bees buzz around him angrily. The other children laugh at him, calling him 'the Bee-Fearer' and excluding him from honey-collecting activities. Lucas often stands far away from the beehive, watching the others work with bees and feeling lonely. One morning, a queen bee with golden stripes flies to him and hovers in front of his face. The queen bee is the leader of the beehive, and it tells Lucas that his fear of bees is a sign of his special power—he can communicate with the plants that the bees rely on, and he can ensure that the plants bloom and provide enough nectar for the bees. Lucas is skeptical at first. The queen bee asks him to touch a nearby clover. When he does, he suddenly hears the clover's voice—it is telling him that it needs more sunlight and water to bloom. He also hears the other plants in the area whispering that a drought is coming, which will make them unable to produce nectar. Lucas is overjoyed. He has found his own power. Please continue this story, describing Lucas's process of learning to use his power to communicate with plants, the help he gives to the villagers (such as helping the plants grow, ensuring a steady supply of honey), the changes in the villagers' attitude towards him, the danger the village faces (such as the drought causing the bees to leave and the crops to fail), and how Lucas uses his power to help the plants survive the drought and keep the bees in the village. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Emberwood Village is built in a forest where the trees have glowing embers on their branches, and the villagers can collect these embers and use them for light and heat—some use them to light their houses, others use them to cook, and a few can even use them to ward off cold spirits. Maya, an 11-year-old girl in the village, cannot collect any embers. Whenever she tries to touch an ember, it goes out immediately. The other children tease her, calling her 'the Ember-Extinguisher' and not letting her near the glowing trees. Maya often sits under a non-glowing tree, watching the embers flicker and feeling sad. One evening, a firefly with glowing red wings flies to her. The firefly is the guardian of the ember trees, and it tells Maya that her power is not collecting embers, but communicating with the cold spirits in the forest and calming them down. It says that the embers go out around her because her power balances the heat of the embers, making the cold spirits less aggressive. Maya is doubtful at first. The firefly asks her to walk into the deeper part of the forest where the cold spirits are most active. When she does, she suddenly hears faint whimpering sounds—the cold spirits are telling her that their home is being destroyed by the excessive heat of the embers, and they are forced to attack the village. Maya's eyes light up. She has finally found her own power. Please continue this story, describing Maya's process of learning to use her power to communicate with cold spirits, the help she provides to the villagers (such as calming the cold spirits, preventing them from attacking the village), the changes in the villagers' attitude towards her, the danger the village faces (such as a group of enraged cold spirits launching a large-scale attack to put out all the embers), and how Maya uses her power to mediate between the villagers and the cold spirits and save the village. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Coralreef Village is built on a small island surrounded by coral reefs, and the villagers can control coral and use it to build houses and defend the island—some use coral to make strong walls, others use it to trap fish for food, and a few can even make coral grow to block incoming ships. Jack, a 12-year-old boy in the village, cannot control any coral. No matter how he touches the coral reefs, they remain unchanged. The other children mock him, calling him 'the Coralless Boy' and excluding him from island defense activities. Jack often sits on the beach, watching the coral reefs and feeling lonely. One morning, a seahorse with purple scales swims to the shore and stops in front of him. The seahorse is the guardian of the coral reefs, and it tells Jack that his power is not controlling coral, but communicating with the creatures living in the coral reefs—seahorses, clownfish, crabs, and even the coral spirits. Jack doesn't believe it at first. The seahorse asks him to put his hand into the water near the coral reef. When he does, he suddenly hears a series of voices—the clownfish are telling him that a large ship is about to sail into the coral reefs and destroy them, and the coral spirits are warning that the destruction of the reefs will leave the island unprotected from storms. Jack is excited. He has found his own power. Please continue this story, describing Jack's learning to use his power to communicate with coral reef creatures, the help he gives to the villagers (such as warning them of the incoming ship, protecting the coral reefs), the changes in the villagers' attitude towards him, the danger the village faces (such as a hurricane approaching the island after the coral reefs are damaged), and how Jack uses his power to guide the villagers to repair the coral reefs and protect the island from the hurricane. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Duststorm Village is located in a desert oasis, and the villagers can control sand and use it to protect the oasis—some use sand to make barriers around the oasis, others use it to filter water, and a few can even create sandstorms to drive away desert bandits. Emma, a 10-year-old girl in the village, cannot control any sand. Whenever she tries to pick up sand, it slips through her fingers. The other children tease her, calling her 'the Sandless Girl' and not letting her play in the sand. Emma often sits by the oasis's spring, watching the sand dunes and feeling sad. One afternoon, a desert fox with golden fur walks up to her. The fox is the guardian of the oasis, and it tells Emma that her power is not controlling sand, but communicating with the desert's water spirits and finding hidden water sources. It says that her inability to hold sand is because her power is connected to water, which is the opposite of sand. Emma is skeptical at first. The fox asks her to close her eyes and feel the ground under her feet. When she does, she suddenly feels a faint vibration—the water spirits are telling her that the oasis's spring is drying up, and there is a hidden underground river not far from the village. Emma's heart fills with excitement. She has finally found her own special power. Please continue this story, describing Emma's process of learning to use her power to communicate with water spirits, the help she provides to the villagers (such as finding the hidden underground river, saving the oasis's spring), the changes in the villagers' attitude towards her, the danger the village faces (such as a severe sandstorm combined with the drying up of the spring, threatening to make the oasis disappear), and how Emma uses her power to guide the villagers to tap the underground river and save the oasis. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Starfall Village is located on a mountain where shooting stars often fall, and the villagers can collect stardust from the shooting stars and use it to enhance their abilities—some use it to make their strength stronger, others use it to improve their speed, and a few can even use it to heal serious injuries. Liam, an 11-year-old boy in the village, cannot collect any stardust. Whenever a shooting star falls, the stardust passes right through his hands. The other children laugh at him, calling him 'the Stardustless Boy' and excluding him from stardust-collecting activities. Liam often sits on the mountain top, watching the shooting stars and feeling lonely. One night, a shooting star falls near him and turns into a small glowing creature. The creature is a star spirit, and it tells Liam that his power is not collecting stardust, but communicating with the stars and understanding their predictions—he can tell the village's future by observing the stars' positions and movements. Liam doesn't believe it at first. The star spirit asks him to look up at the stars. When he does, he suddenly understands the pattern of the stars—they are predicting that a meteor shower will hit the village soon, and there is also a sign that a rare medicinal herb that can cure the village elder's illness is growing on the other side of the mountain. Liam is overjoyed. He has found his own power. Please continue this story, describing Liam's learning to use his power to communicate with the stars, the help he gives to the villagers (such as finding the medicinal herb, warning of the meteor shower), the changes in the villagers' attitude towards him, the danger the village faces (such as the meteor shower causing fires and destroying houses), and how Liam uses his power to guide the villagers to avoid the meteor shower's impact and put out the fires. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Mushroomglade Village is built in a forest full of giant mushrooms, and the villagers can control the growth of mushrooms—some use them to build houses, others use them to make food, and a few can even use mushroom spores to put enemies to sleep. Zoe, a 10-year-old girl in the village, cannot make any mushrooms grow. No matter how she cares for the mushroom spores, they never germinate. The other children tease her, calling her 'the Mushroomless Girl' and not letting her play in the mushroom forest. Zoe often sits under a giant mushroom cap, watching the others tend to the mushrooms and feeling sad. One morning, a snail with a shell covered in mushroom patterns crawls onto her hand. The snail is the guardian of the mushroom forest, and it tells Zoe that her power is not controlling mushrooms, but communicating with the fungi and bacteria in the soil that help mushrooms grow. She can tell when the soil is lacking nutrients and help improve it to promote mushroom growth. Zoe is doubtful at first. The snail asks her to touch the soil under a giant mushroom. When she does, she suddenly hears a series of tiny voices—the fungi are telling her that the soil is lacking nitrogen, and the bacteria are warning that a harmful mold is spreading in the soil, which will kill the mushrooms. Zoe's eyes light up. She has finally found her own power. Please continue this story, describing Zoe's process of learning to use her power to communicate with soil fungi and bacteria, the help she provides to the villagers (such as improving the soil, eliminating the harmful mold), the changes in the villagers' attitude towards her, the danger the village faces (such as the harmful mold spreading rapidly and threatening to destroy all the mushrooms in the forest), and how Zoe uses her power to stop the mold and save the mushroom forest and the village. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Waterfall Village is built beside a large waterfall, and the villagers can control the flow of the waterfall and use its energy—some use it to turn watermills, others use it to generate power, and a few can even jump through the waterfall to reach a hidden cave. Ethan, a 12-year-old boy in the village, cannot control the waterfall's flow. Whenever he tries to touch the waterfall, the water pushes him away. The other children mock him, calling him 'the Waterfall-Rejected' and excluding him from activities near the waterfall. Ethan often sits on a rock beside the waterfall, listening to the water's roar and feeling lonely. One afternoon, a water snake with silver scales swims up to the shore and stops in front of him. The snake is the guardian of the waterfall, and it tells Ethan that his power is not controlling the waterfall's flow, but understanding the water's memory—he can see the images of what has happened in the waterfall's waters over the years. Ethan doesn't believe it at first. The snake asks him to stare at the waterfall's water. When he does, he suddenly sees images in the water—the village being built beside the waterfall, a group of travelers getting lost and being saved by the villagers, and a hidden treasure hidden behind the waterfall by the village's ancestors. He also sees a warning in the water's memory: the waterfall's rocks are loosening, and it will collapse soon. Ethan is excited. He has found his own power. Please continue this story, describing Ethan's learning to use his power to see the water's memory, the help he gives to the villagers (such as finding the hidden treasure, warning of the waterfall's collapse), the changes in the villagers' attitude towards him, the danger the village faces (such as the waterfall collapsing and causing a flood that threatens to destroy the village), and how Ethan uses his power to guide the villagers to reinforce the waterfall's rocks and evacuate to a safe place. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Sunflower Village is located in a field full of sunflowers that always face the sun, and the villagers can use the sunflowers' energy to enhance their mood and strength—some use it to stay happy even in difficult times, others use it to work longer hours, and a few can even use it to heal emotional wounds. Mia, an 11-year-old girl in the village, cannot feel any energy from the sunflowers. No matter how she stands among them, she remains sad and tired. The other children tease her, calling her 'the Sunflowerless Girl' and not letting her play in the sunflower field. Mia often sits at the edge of the field, watching the sunflowers turn towards the sun and feeling lonely. One morning, a ladybug with orange spots crawls onto her shoulder. The ladybug is the guardian of the sunflower field, and it tells Mia that her power is not absorbing the sunflowers' energy, but communicating with the sun's rays and guiding the sunflowers to grow better. She can tell when the sunflowers need more sunlight and help them adjust their direction to absorb more energy. Mia is skeptical at first. The ladybug asks her to touch a sunflower that is wilting. When she does, she suddenly hears the sunflower's voice—it is telling her that it cannot get enough sunlight because it is blocked by a tall tree. She also hears the other sunflowers whispering that a group of birds is going to eat their seeds soon. Mia's heart fills with excitement. She has finally found her own special power. Please continue this story, describing Mia's process of learning to use her power to communicate with the sun's rays and sunflowers, the help she provides to the villagers (such as moving the blocking tree, driving away the birds), the changes in the villagers' attitude towards her, the danger the village faces (such as a long period of cloudy weather that makes the sunflowers wilt, depriving the villagers of their energy source), and how Mia uses her power to guide the sunflowers to absorb the little sunlight available and help them survive until the sun comes out again. The word count should be no less than 1200 words."}], 
+            "stream": True
+        },
+        {
+            "model": "qwen", 
+            "temperature": 0, 
+            "max_tokens": 20, 
+            "messages": [{"role": "user", "content": "Cave dweller Village is built inside a large cave, and the villagers can see in the dark and control the glow of cave crystals—some use it to find their way in the cave, others use it to light up the village, and a few can even use the crystals to detect hidden passages. Ryan, a 10-year-old boy in the village, cannot see in the dark and cannot control the cave crystals. Whenever he enters the dark part of the cave, he has to feel his way around, and the crystals never glow for him. The other children laugh at him, calling him 'the Cave Blind Boy' and excluding him from cave exploration activities. Ryan often stays in the lit part of the cave, watching the others explore the dark passages and feeling sad. One evening, a bat with large ears flies to him and perches on his hand. The bat is the guardian of the cave, and it tells Ryan that his power is not seeing in the dark or controlling crystals, but communicating with the cave's creatures—bats, spiders, mice, and even the cave spirits. He can use their eyes and ears to 'see' and 'hear' in the dark. Ryan doesn't believe it at first. The bat asks him to close his eyes and let the cave's creatures guide him. When he does, he suddenly feels as if he can see the entire cave through the bats' eyes—he sees a hidden passage that leads to a underground spring, and he also sees a group of poisonous snakes approaching the village from the dark part of the cave. Ryan is overjoyed. He has found his own power. Please continue this story, describing Ryan's learning to use his power to communicate with cave creatures, the help he gives to the villagers (such as finding the underground spring, warning of the poisonous snakes), the changes in the villagers' attitude towards him, the danger the village faces (such as the cave's ceiling collapsing in the dark part, threatening to block the village's exit), and how Ryan uses his power to guide the villagers to find a new exit and avoid the collapse. The word count should be no less than 1200 words."}], 
+            "stream": True
+        }
+    ]
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(PREFILL_NUM, 200)) as executor:
         futures = []
-        data = [
-            {
-                "model": "qwen",
-                "temperature": 0,
-                "max_tokens": 20,
-                "messages": [{"role": "user", "content": "The city of New Ember is a highly developed technological city. In this city, all natural landscapes have been replaced by high-rise buildings, concrete roads, and artificial gardens. The air is filled with the smell of exhaust gas, and the sky is always gray. The people of New Ember are used to this kind of life. They rely on technology for everything, and they have long forgotten what real nature looks like. Jamie is a 12-year-old boy who lives in New Ember. He is different from other children. He likes to read books about nature, and he dreams of seeing real trees, flowers, and birds. One day, when Jamie is walking home from school, he finds a single seed in the middle of a concrete street. The seed is small, brown, and covered with dust. Jamie picks up the seed, feeling a strange connection with it. He takes the seed home, finds a small pot, puts some soil in it, and plants the seed. He waters the seed every day, and takes good care of it. To his surprise, a week later, the seed germinates and grows into a small seedling. Another week later, the seedling grows into a small tree with green leaves. What's even more amazing is that the tree can produce fruit that tastes like childhood memories. When Jamie eats the fruit, he can clearly remember the happy times he spent with his grandfather in the countryside when he was a child—running on the grass, picking wild flowers, and listening to the birds sing. Jamie shares the fruit with his friends. After eating the fruit, his friends also remember the fragments of nature in their memories. They are all shocked and moved. Please create a story based on this setting, describing Jamie's care for the tree, the changes that the tree brings to Jamie and his friends, the opposition from the city government (which considers the tree a 'harmful organism' that violates the city's technological aesthetic), the process of Jamie and his friends protecting the tree, and the impact of the tree on the entire city of New Ember. The word count should be no less than 1200 words."}],
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Honeyglow Village is located near a large beehive, and the villagers can communicate with bees and collect honey easily—some use bees to pollinate crops, others use honey to make food, and a few can even use bee venom to heal certain diseases. Lucas, a 10-year-old boy in the village, is afraid of bees, and they never respond to his calls. Whenever he approaches the beehive, the bees buzz around him angrily. The other children laugh at him, calling him 'the Bee-Fearer' and excluding him from honey-collecting activities. Lucas often stands far away from the beehive, watching the others work with bees and feeling lonely. One morning, a queen bee with golden stripes flies to him and hovers in front of his face. The queen bee is the leader of the beehive, and it tells Lucas that his fear of bees is a sign of his special power—he can communicate with the plants that the bees rely on, and he can ensure that the plants bloom and provide enough nectar for the bees. Lucas is skeptical at first. The queen bee asks him to touch a nearby clover. When he does, he suddenly hears the clover's voice—it is telling him that it needs more sunlight and water to bloom. He also hears the other plants in the area whispering that a drought is coming, which will make them unable to produce nectar. Lucas is overjoyed. He has found his own power. Please continue this story, describing Lucas's process of learning to use his power to communicate with plants, the help he gives to the villagers (such as helping the plants grow, ensuring a steady supply of honey), the changes in the villagers' attitude towards him, the danger the village faces (such as the drought causing the bees to leave and the crops to fail), and how Lucas uses his power to help the plants survive the drought and keep the bees in the village. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Emberwood Village is built in a forest where the trees have glowing embers on their branches, and the villagers can collect these embers and use them for light and heat—some use them to light their houses, others use them to cook, and a few can even use them to ward off cold spirits. Maya, an 11-year-old girl in the village, cannot collect any embers. Whenever she tries to touch an ember, it goes out immediately. The other children tease her, calling her 'the Ember-Extinguisher' and not letting her near the glowing trees. Maya often sits under a non-glowing tree, watching the embers flicker and feeling sad. One evening, a firefly with glowing red wings flies to her. The firefly is the guardian of the ember trees, and it tells Maya that her power is not collecting embers, but communicating with the cold spirits in the forest and calming them down. It says that the embers go out around her because her power balances the heat of the embers, making the cold spirits less aggressive. Maya is doubtful at first. The firefly asks her to walk into the deeper part of the forest where the cold spirits are most active. When she does, she suddenly hears faint whimpering sounds—the cold spirits are telling her that their home is being destroyed by the excessive heat of the embers, and they are forced to attack the village. Maya's eyes light up. She has finally found her own power. Please continue this story, describing Maya's process of learning to use her power to communicate with cold spirits, the help she provides to the villagers (such as calming the cold spirits, preventing them from attacking the village), the changes in the villagers' attitude towards her, the danger the village faces (such as a group of enraged cold spirits launching a large-scale attack to put out all the embers), and how Maya uses her power to mediate between the villagers and the cold spirits and save the village. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Coralreef Village is built on a small island surrounded by coral reefs, and the villagers can control coral and use it to build houses and defend the island—some use coral to make strong walls, others use it to trap fish for food, and a few can even make coral grow to block incoming ships. Jack, a 12-year-old boy in the village, cannot control any coral. No matter how he touches the coral reefs, they remain unchanged. The other children mock him, calling him 'the Coralless Boy' and excluding him from island defense activities. Jack often sits on the beach, watching the coral reefs and feeling lonely. One morning, a seahorse with purple scales swims to the shore and stops in front of him. The seahorse is the guardian of the coral reefs, and it tells Jack that his power is not controlling coral, but communicating with the creatures living in the coral reefs—seahorses, clownfish, crabs, and even the coral spirits. Jack doesn't believe it at first. The seahorse asks him to put his hand into the water near the coral reef. When he does, he suddenly hears a series of voices—the clownfish are telling him that a large ship is about to sail into the coral reefs and destroy them, and the coral spirits are warning that the destruction of the reefs will leave the island unprotected from storms. Jack is excited. He has found his own power. Please continue this story, describing Jack's learning to use his power to communicate with coral reef creatures, the help he gives to the villagers (such as warning them of the incoming ship, protecting the coral reefs), the changes in the villagers' attitude towards him, the danger the village faces (such as a hurricane approaching the island after the coral reefs are damaged), and how Jack uses his power to guide the villagers to repair the coral reefs and protect the island from the hurricane. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Duststorm Village is located in a desert oasis, and the villagers can control sand and use it to protect the oasis—some use sand to make barriers around the oasis, others use it to filter water, and a few can even create sandstorms to drive away desert bandits. Emma, a 10-year-old girl in the village, cannot control any sand. Whenever she tries to pick up sand, it slips through her fingers. The other children tease her, calling her 'the Sandless Girl' and not letting her play in the sand. Emma often sits by the oasis's spring, watching the sand dunes and feeling sad. One afternoon, a desert fox with golden fur walks up to her. The fox is the guardian of the oasis, and it tells Emma that her power is not controlling sand, but communicating with the desert's water spirits and finding hidden water sources. It says that her inability to hold sand is because her power is connected to water, which is the opposite of sand. Emma is skeptical at first. The fox asks her to close her eyes and feel the ground under her feet. When she does, she suddenly feels a faint vibration—the water spirits are telling her that the oasis's spring is drying up, and there is a hidden underground river not far from the village. Emma's heart fills with excitement. She has finally found her own special power. Please continue this story, describing Emma's process of learning to use her power to communicate with water spirits, the help she provides to the villagers (such as finding the hidden underground river, saving the oasis's spring), the changes in the villagers' attitude towards her, the danger the village faces (such as a severe sandstorm combined with the drying up of the spring, threatening to make the oasis disappear), and how Emma uses her power to guide the villagers to tap the underground river and save the oasis. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Starfall Village is located on a mountain where shooting stars often fall, and the villagers can collect stardust from the shooting stars and use it to enhance their abilities—some use it to make their strength stronger, others use it to improve their speed, and a few can even use it to heal serious injuries. Liam, an 11-year-old boy in the village, cannot collect any stardust. Whenever a shooting star falls, the stardust passes right through his hands. The other children laugh at him, calling him 'the Stardustless Boy' and excluding him from stardust-collecting activities. Liam often sits on the mountain top, watching the shooting stars and feeling lonely. One night, a shooting star falls near him and turns into a small glowing creature. The creature is a star spirit, and it tells Liam that his power is not collecting stardust, but communicating with the stars and understanding their predictions—he can tell the village's future by observing the stars' positions and movements. Liam doesn't believe it at first. The star spirit asks him to look up at the stars. When he does, he suddenly understands the pattern of the stars—they are predicting that a meteor shower will hit the village soon, and there is also a sign that a rare medicinal herb that can cure the village elder's illness is growing on the other side of the mountain. Liam is overjoyed. He has found his own power. Please continue this story, describing Liam's learning to use his power to communicate with the stars, the help he gives to the villagers (such as finding the medicinal herb, warning of the meteor shower), the changes in the villagers' attitude towards him, the danger the village faces (such as the meteor shower causing fires and destroying houses), and how Liam uses his power to guide the villagers to avoid the meteor shower's impact and put out the fires. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Mushroomglade Village is built in a forest full of giant mushrooms, and the villagers can control the growth of mushrooms—some use them to build houses, others use them to make food, and a few can even use mushroom spores to put enemies to sleep. Zoe, a 10-year-old girl in the village, cannot make any mushrooms grow. No matter how she cares for the mushroom spores, they never germinate. The other children tease her, calling her 'the Mushroomless Girl' and not letting her play in the mushroom forest. Zoe often sits under a giant mushroom cap, watching the others tend to the mushrooms and feeling sad. One morning, a snail with a shell covered in mushroom patterns crawls onto her hand. The snail is the guardian of the mushroom forest, and it tells Zoe that her power is not controlling mushrooms, but communicating with the fungi and bacteria in the soil that help mushrooms grow. She can tell when the soil is lacking nutrients and help improve it to promote mushroom growth. Zoe is doubtful at first. The snail asks her to touch the soil under a giant mushroom. When she does, she suddenly hears a series of tiny voices—the fungi are telling her that the soil is lacking nitrogen, and the bacteria are warning that a harmful mold is spreading in the soil, which will kill the mushrooms. Zoe's eyes light up. She has finally found her own power. Please continue this story, describing Zoe's process of learning to use her power to communicate with soil fungi and bacteria, the help she provides to the villagers (such as improving the soil, eliminating the harmful mold), the changes in the villagers' attitude towards her, the danger the village faces (such as the harmful mold spreading rapidly and threatening to destroy all the mushrooms in the forest), and how Zoe uses her power to stop the mold and save the mushroom forest and the village. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Waterfall Village is built beside a large waterfall, and the villagers can control the flow of the waterfall and use its energy—some use it to turn watermills, others use it to generate power, and a few can even jump through the waterfall to reach a hidden cave. Ethan, a 12-year-old boy in the village, cannot control the waterfall's flow. Whenever he tries to touch the waterfall, the water pushes him away. The other children mock him, calling him 'the Waterfall-Rejected' and excluding him from activities near the waterfall. Ethan often sits on a rock beside the waterfall, listening to the water's roar and feeling lonely. One afternoon, a water snake with silver scales swims up to the shore and stops in front of him. The snake is the guardian of the waterfall, and it tells Ethan that his power is not controlling the waterfall's flow, but understanding the water's memory—he can see the images of what has happened in the waterfall's waters over the years. Ethan doesn't believe it at first. The snake asks him to stare at the waterfall's water. When he does, he suddenly sees images in the water—the village being built beside the waterfall, a group of travelers getting lost and being saved by the villagers, and a hidden treasure hidden behind the waterfall by the village's ancestors. He also sees a warning in the water's memory: the waterfall's rocks are loosening, and it will collapse soon. Ethan is excited. He has found his own power. Please continue this story, describing Ethan's learning to use his power to see the water's memory, the help he gives to the villagers (such as finding the hidden treasure, warning of the waterfall's collapse), the changes in the villagers' attitude towards him, the danger the village faces (such as the waterfall collapsing and causing a flood that threatens to destroy the village), and how Ethan uses his power to guide the villagers to reinforce the waterfall's rocks and evacuate to a safe place. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Sunflower Village is located in a field full of sunflowers that always face the sun, and the villagers can use the sunflowers' energy to enhance their mood and strength—some use it to stay happy even in difficult times, others use it to work longer hours, and a few can even use it to heal emotional wounds. Mia, an 11-year-old girl in the village, cannot feel any energy from the sunflowers. No matter how she stands among them, she remains sad and tired. The other children tease her, calling her 'the Sunflowerless Girl' and not letting her play in the sunflower field. Mia often sits at the edge of the field, watching the sunflowers turn towards the sun and feeling lonely. One morning, a ladybug with orange spots crawls onto her shoulder. The ladybug is the guardian of the sunflower field, and it tells Mia that her power is not absorbing the sunflowers' energy, but communicating with the sun's rays and guiding the sunflowers to grow better. She can tell when the sunflowers need more sunlight and help them adjust their direction to absorb more energy. Mia is skeptical at first. The ladybug asks her to touch a sunflower that is wilting. When she does, she suddenly hears the sunflower's voice—it is telling her that it cannot get enough sunlight because it is blocked by a tall tree. She also hears the other sunflowers whispering that a group of birds is going to eat their seeds soon. Mia's heart fills with excitement. She has finally found her own special power. Please continue this story, describing Mia's process of learning to use her power to communicate with the sun's rays and sunflowers, the help she provides to the villagers (such as moving the blocking tree, driving away the birds), the changes in the villagers' attitude towards her, the danger the village faces (such as a long period of cloudy weather that makes the sunflowers wilt, depriving the villagers of their energy source), and how Mia uses her power to guide the sunflowers to absorb the little sunlight available and help them survive until the sun comes out again. The word count should be no less than 1200 words."}], 
-                "stream": True
-            },
-            {
-                "model": "qwen", 
-                "temperature": 0, 
-                "max_tokens": 20, 
-                "messages": [{"role": "user", "content": "Cave dweller Village is built inside a large cave, and the villagers can see in the dark and control the glow of cave crystals—some use it to find their way in the cave, others use it to light up the village, and a few can even use the crystals to detect hidden passages. Ryan, a 10-year-old boy in the village, cannot see in the dark and cannot control the cave crystals. Whenever he enters the dark part of the cave, he has to feel his way around, and the crystals never glow for him. The other children laugh at him, calling him 'the Cave Blind Boy' and excluding him from cave exploration activities. Ryan often stays in the lit part of the cave, watching the others explore the dark passages and feeling sad. One evening, a bat with large ears flies to him and perches on his hand. The bat is the guardian of the cave, and it tells Ryan that his power is not seeing in the dark or controlling crystals, but communicating with the cave's creatures—bats, spiders, mice, and even the cave spirits. He can use their eyes and ears to 'see' and 'hear' in the dark. Ryan doesn't believe it at first. The bat asks him to close his eyes and let the cave's creatures guide him. When he does, he suddenly feels as if he can see the entire cave through the bats' eyes—he sees a hidden passage that leads to a underground spring, and he also sees a group of poisonous snakes approaching the village from the dark part of the cave. Ryan is overjoyed. He has found his own power. Please continue this story, describing Ryan's learning to use his power to communicate with cave creatures, the help he gives to the villagers (such as finding the underground spring, warning of the poisonous snakes), the changes in the villagers' attitude towards him, the danger the village faces (such as the cave's ceiling collapsing in the dark part, threatening to block the village's exit), and how Ryan uses his power to guide the villagers to find a new exit and avoid the collapse. The word count should be no less than 1200 words."}], 
-                "stream": True
-            }
-            ]
         
         for i in range(POST_DATA_COUNT):
             headers = {
@@ -730,7 +753,7 @@ def test_chat_completions_with_proxy_concurrent(setup_teardown):
                 results.append(result)
                 assert result.get('status') == 200
             except Exception as e:
-                teardown_proxy_balance()
+                teardown_proxy_balance(ngx_pid)
 
     end_time = time.time()
     print(f"Total time: {end_time - start_time:.2f} seconds")
@@ -749,11 +772,11 @@ def test_chat_completions_with_proxy_concurrent(setup_teardown):
             assert num_logs // DECODE_NUM - 30 <= count <= num_logs // DECODE_NUM + 30
 
     except Exception as e:
-        teardown_proxy_balance()
+        teardown_proxy_balance(ngx_pid)
         print(f"\n=== verifying fail: {e} ===")
         raise
     print("\n=== verifying pass ===")
-    teardown_proxy_balance()
+    teardown_proxy_balance(ngx_pid)
 
 def analyze_balance_concurrent(log_file, num_logs):
     if not os.path.exists(log_file):
