@@ -186,6 +186,8 @@ class Indexer(nn.Module):
         else:
             li_fusion = torch_npu.npu_lightning_indexer
         topk_indices = li_fusion(**li_fusion_input_kwargs)
+        if isinstance(topk_indices, tuple):
+            topk_indices = topk_indices[0]
         return topk_indices
 
     def forward(self, 
@@ -606,16 +608,19 @@ class DeepseekMLA(nn.Module):
                 value=k_nope,
                 sparse_indices=topk_indices,
                 scale_value=self.scale,
-                sparse_block_size=1,
                 block_table=prefill_metadata.block_table,
                 actual_seq_lengths_query=actual_seq_qlen.to(torch.int32),# todo 等接口支持后切换成tensor
                 actual_seq_lengths_kv=actual_seq_kvlen.to(torch.int32),
                 query_rope=q_rope,
                 key_rope=k_rope,
+                sparse_block_size=1,
                 layout_query="TND",
                 layout_kv="PA_BSND",
-                sparse_mode=3,
-                attention_mode=2,
+                sparse_mode=3, 
+                pre_tokens=(1<<63)-1, 
+                next_tokens=(1<<63)-1,
+                attention_mode = 2, 
+                return_softmax_lse = False,
             )
             if isinstance(attn_output, tuple):
                 attn_output = attn_output[0]
@@ -1285,16 +1290,19 @@ class DeepseekMLA(nn.Module):
                 value=kv_dsa,
                 sparse_indices=topk_indices_dsa,
                 scale_value=self.scale,
-                sparse_block_size=1,
                 block_table=block_table_dsa,
                 actual_seq_lengths_query=self.actual_seq_lengths[bsz].to(torch.int32),
                 actual_seq_lengths_kv=kv_actual_seqlen_dsa,
                 query_rope=q_pe,
                 key_rope=key_rope_dsa,
+                sparse_block_size=1,
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
-                attention_mode=2,
+                pre_tokens=(1<<63)-1, 
+                next_tokens=(1<<63)-1,
+                attention_mode=2, 
+                return_softmax_lse=False,
             )
             if isinstance(attn_output, tuple):
                 attn_output = attn_output[0]
