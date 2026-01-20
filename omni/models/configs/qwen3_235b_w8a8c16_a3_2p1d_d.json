@@ -20,6 +20,7 @@
         "expert_gate_up_prefetch": 24,
         "expert_down_prefetch": 12,
         "attn_prefetch": 8,
-        "enable_scale_parallel": true
+        "enable_scale_parallel": true,
+        "use_ascend_cloud_ops": false
     }
 }

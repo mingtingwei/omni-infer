@@ -73,6 +73,10 @@ from omni.adaptors.vllm.utils import get_attr_by_names
 from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
 from omni.layers.attention.layer import attention_init_c8
 
+if model_extra_config.operator_opt_config.use_ascend_cloud_ops:
+    import ascend_cloud
+    from ascend_cloud_graph import rmsnorm_ops
+
 logger = init_logger(__name__)
 SEQ_SPLIT_LENGTH = 4096
 
@@ -241,21 +245,6 @@ class Qwen3MoeAttention(nn.Module):
             qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
         else:
             qkv, _ = self.qkv_proj(hidden_states, is_prefill = is_prefill)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                           self.head_dim)
-        with ConditionalTNGScope(super_kernel=model_extra_config.operator_opt_config.use_super_kernel,
-                                        scope="superkernel_Qwen_attn1"):
-            # 这里开始做 rmsnorm
-            q_by_head = self.q_norm(q_by_head)
-            q = q_by_head.view(q.shape)
-
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                                self.head_dim)
-            # 第二个 rmsnorm
-            k_by_head = self.k_norm(k_by_head)
-            k = k_by_head.view(k.shape)
 
         if attn_metadata is None:
             cos, sin = self.rotary_emb.get_cos_sin(positions)
@@ -263,8 +252,38 @@ class Qwen3MoeAttention(nn.Module):
             cos = attn_metadata.cos
             sin = attn_metadata.sin
 
-        # 这里做ApplyRotaryPosEmb 和 自注意力
-        q, k = self.rotary_emb(positions, q, k, cos, sin)
+        if model_extra_config.operator_opt_config.use_ascend_cloud_ops:
+            q, k, v = torch.ops.ascend_cloud.rmsnorm_rope(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos,
+                sin,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.k_norm.variance_epsilon
+            )
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                            self.head_dim)
+            with ConditionalTNGScope(super_kernel=model_extra_config.operator_opt_config.use_super_kernel,
+                                            scope="superkernel_Qwen_attn1"):
+                # 这里开始做 rmsnorm
+                q_by_head = self.q_norm(q_by_head)
+                q = q_by_head.view(q.shape)
+
+                k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                                    self.head_dim)
+                # 第二个 rmsnorm
+                k_by_head = self.k_norm(k_by_head)
+                k = k_by_head.view(k.shape)
+
+            # 这里做ApplyRotaryPosEmb 和 自注意力
+            q, k = self.rotary_emb(positions, q, k, cos, sin)
+
         attn_output = self.attn(q, k, v)
         if model_extra_config.operator_opt_config.prefill_enable_mla_alltoall:
             attn_output = attn_output.reshape(-1)

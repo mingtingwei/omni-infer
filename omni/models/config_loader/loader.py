@@ -135,7 +135,7 @@ class ModelOperatorOptConfig:
     
     load_rms_bias: bool = False # RMSNorm是否启用bias
     enable_e_score_correction_bias: bool = False # moe部分是否启用e_score_correction_bias
-    use_ascend_cloud_ops: bool = False
+    use_ascend_cloud_ops: bool = False # 是否使用ascend_cloud_ops算子
     skip_mtp_hidden_states: bool = False
     def __post_init__(self):
 

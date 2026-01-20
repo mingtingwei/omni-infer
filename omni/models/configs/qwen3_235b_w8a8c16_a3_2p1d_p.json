@@ -12,6 +12,7 @@
         "control_accept_rate": -1,
         "enable_prefill_micro_batch": true,
         "experts_pruning": false,
-        "enable_scale_parallel": true
+        "enable_scale_parallel": true,
+        "use_ascend_cloud_ops": false
     }
 }
