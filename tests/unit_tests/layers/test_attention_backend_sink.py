@@ -17,7 +17,8 @@ def attention_backend_module(monkeypatch):
         return module
 
     sys.modules.pop("omni.layers.attention.backend.attention", None)
-    sys.modules.pop("omni.layers", None)
+    # Ensure module cleanup is reversible for downstream tests.
+    monkeypatch.delitem(sys.modules, "omni.layers", raising=False)
 
     torch_npu_stub = _install_module("torch_npu")
     torch_npu_stub.npu_scatter_pa_kv_cache = Mock()

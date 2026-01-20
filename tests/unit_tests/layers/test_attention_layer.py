@@ -1,27 +1,54 @@
 import importlib
 import sys
 from pathlib import Path
+import types
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 
+def _mkpkg(name: str) -> types.ModuleType:
+    m = types.ModuleType(name)
+    m.__path__ = []  # mark as package so dotted imports work
+    return m
+
+
+def _mkmod(name: str, **attrs) -> types.ModuleType:
+    m = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    return m
+
+
 @pytest.fixture()
 def attention_module(monkeypatch):
     project_root = Path(__file__).resolve().parents[3]
-    sys.path.append(str(project_root))
+    monkeypatch.syspath_prepend(str(project_root))  # avoid sys.path pollution
 
-    # Base vllm package
-    vllm_root = __import__("types").ModuleType("vllm")
-    monkeypatch.setitem(sys.modules, "vllm", vllm_root)
-    monkeypatch.setitem(sys.modules, "vllm.logger", SimpleNamespace(logger=None))
+    # Force re-import with our stubs (so module-level imports are rebound).
+    sys.modules.pop("omni.layers.attention.layer", None)
 
-    # Mock env constants
-    envs = SimpleNamespace(Q_SCALE_CONSTANT=2.0, K_SCALE_CONSTANT=3.0, V_SCALE_CONSTANT=4.0)
-    monkeypatch.setitem(sys.modules, "vllm.envs", envs)
+    # -----------------------------
+    # Build a minimal fake vllm tree
+    # -----------------------------
+    vllm_pkg = _mkpkg("vllm")
 
-    # Mock selector
+    # vllm.envs constants
+    envs_mod = _mkmod(
+        "vllm.envs",
+        Q_SCALE_CONSTANT=2.0,
+        K_SCALE_CONSTANT=3.0,
+        V_SCALE_CONSTANT=4.0,
+    )
+
+    # vllm.logger
+    logger_mod = _mkmod("vllm.logger", logger=None)
+
+    # vllm.attention (+ selector + layer)
+    attention_pkg = _mkpkg("vllm.attention")
+    attention_pkg.AttentionType = SimpleNamespace(DECODER="decoder")
+
     class FakeImpl:
         def __init__(self, *args, **kwargs):
             self.args = args
@@ -45,20 +72,19 @@ def attention_module(monkeypatch):
     def get_attn_backend(*args, **kwargs):
         return FakeBackend()
 
-    monkeypatch.setitem(
-        sys.modules,
+    selector_mod = _mkmod(
         "vllm.attention.selector",
-        SimpleNamespace(backend_name_to_enum=backend_name_to_enum, get_attn_backend=get_attn_backend),
+        backend_name_to_enum=backend_name_to_enum,
+        get_attn_backend=get_attn_backend,
     )
 
-    # AttentionType mock
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.attention",
-        SimpleNamespace(AttentionType=SimpleNamespace(DECODER="decoder")),
-    )
+    class AttentionBase:
+        def __init__(self, *args, **kwargs):
+            pass
 
-    # Cache config and global config
+    attn_layer_mod = _mkmod("vllm.attention.layer", Attention=AttentionBase)
+
+    # vllm.config
     class CacheConfig:
         def __init__(
             self,
@@ -78,23 +104,18 @@ def attention_module(monkeypatch):
         compilation_config=SimpleNamespace(static_forward_context={}),
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
     )
-    monkeypatch.setitem(
-        sys.modules,
+
+    config_mod = _mkmod(
         "vllm.config",
-        SimpleNamespace(CacheConfig=CacheConfig, get_current_vllm_config=lambda: shared_config),
+        CacheConfig=CacheConfig,
+        get_current_vllm_config=lambda: shared_config,
     )
 
-    # Quantization mocks
+    # vllm.model_executor.layers.linear
     class UnquantizedLinearMethod:
         pass
 
-    class QuantMethod:
-        def __init__(self):
-            self.called_with = None
-
-        def create_weights(self, module, total_num_kv_heads, head_size):
-            self.called_with = (module, total_num_kv_heads, head_size)
-
+    # vllm.model_executor.layers.quantization.base_config
     class QuantizationConfig:
         def __init__(self, quant_method=None):
             self._quant_method = quant_method
@@ -102,18 +123,21 @@ def attention_module(monkeypatch):
         def get_quant_method(self, *_, **__):
             return self._quant_method
 
-    monkeypatch.setitem(
-        sys.modules,
+    model_executor_pkg = _mkpkg("vllm.model_executor")
+    layers_pkg = _mkpkg("vllm.model_executor.layers")
+    quant_pkg = _mkpkg("vllm.model_executor.layers.quantization")
+
+    linear_mod = _mkmod(
         "vllm.model_executor.layers.linear",
-        SimpleNamespace(UnquantizedLinearMethod=UnquantizedLinearMethod),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.model_executor.layers.quantization.base_config",
-        SimpleNamespace(QuantizationConfig=QuantizationConfig),
+        UnquantizedLinearMethod=UnquantizedLinearMethod,
     )
 
-    # Platform helpers
+    base_config_mod = _mkmod(
+        "vllm.model_executor.layers.quantization.base_config",
+        QuantizationConfig=QuantizationConfig,
+    )
+
+    # vllm.platforms
     class BackendHelper:
         device_type = "cpu"
 
@@ -123,33 +147,92 @@ def attention_module(monkeypatch):
         def is_cpu(self):
             return False
 
-    monkeypatch.setitem(
-        sys.modules,
+    platforms_mod = _mkmod(
         "vllm.platforms",
-        SimpleNamespace(_Backend=object, current_platform=BackendHelper()),
+        _Backend=object,
+        current_platform=BackendHelper(),
     )
 
-    # Base Attention class
-    class AttentionBase:
-        def __init__(self, *args, **kwargs):
-            pass
+    # -----------------------------
+    # Wire parent->child attributes
+    # (IMPORTANT for `import vllm.envs as envs`)
+    # -----------------------------
+    vllm_pkg.envs = envs_mod
+    vllm_pkg.logger = logger_mod
+    vllm_pkg.attention = attention_pkg
+    vllm_pkg.config = config_mod
+    vllm_pkg.model_executor = model_executor_pkg
+    vllm_pkg.platforms = platforms_mod
 
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.attention.layer",
-        SimpleNamespace(Attention=AttentionBase),
-    )
+    attention_pkg.selector = selector_mod
+    attention_pkg.layer = attn_layer_mod
+
+    model_executor_pkg.layers = layers_pkg
+    layers_pkg.linear = linear_mod
+    layers_pkg.quantization = quant_pkg
+    quant_pkg.base_config = base_config_mod
+
+    # -----------------------------
+    # Register in sys.modules
+    # -----------------------------
+    for m in [
+        vllm_pkg,
+        envs_mod,
+        logger_mod,
+        attention_pkg,
+        selector_mod,
+        attn_layer_mod,
+        config_mod,
+        model_executor_pkg,
+        layers_pkg,
+        linear_mod,
+        quant_pkg,
+        base_config_mod,
+        platforms_mod,
+    ]:
+        monkeypatch.setitem(sys.modules, m.__name__, m)
 
     # Stub adaptor chain to bypass heavy imports
     adaptor_utils = SimpleNamespace(get_attr_by_names=lambda obj, *names: None)
     monkeypatch.setitem(sys.modules, "omni.adaptors.vllm.utils", adaptor_utils)
-    monkeypatch.setitem(sys.modules, "omni.adaptors.vllm.patches.pangu_patch", SimpleNamespace(patch_pangu=lambda: None))
-    monkeypatch.setitem(sys.modules, "omni.adaptors.vllm.patches.model_patch", SimpleNamespace(model_patch=None))
-    monkeypatch.setitem(sys.modules, "omni.adaptors.vllm.patches", SimpleNamespace(model_patch=None))
+    monkeypatch.setitem(
+        sys.modules,
+        "omni.adaptors.vllm.patches.pangu_patch",
+        SimpleNamespace(patch_pangu=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "omni.adaptors.vllm.patches.model_patch",
+        SimpleNamespace(model_patch=None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "omni.adaptors.vllm.patches",
+        SimpleNamespace(model_patch=None),
+    )
 
+    # Import module under test
     module = importlib.import_module("omni.layers.attention.layer")
+
+    # Force the module under test to use our env constants at runtime.
+    monkeypatch.setattr(module, "envs", envs_mod, raising=False)
+
+    # -----------------------------
+    # Extra stubs exposed for tests
+    # -----------------------------
+    class QuantMethod:
+        def __init__(self):
+            self.called_with = None
+
+        def create_weights(self, module_obj, total_num_kv_heads, head_size):
+            self.called_with = (module_obj, total_num_kv_heads, head_size)
+
+    # Expose to tests exactly as they expect
     module.FakeImpl = FakeImpl
     module.QuantMethod = QuantMethod
+    module.QuantizationConfig = QuantizationConfig
+    module.UnquantizedLinearMethod = UnquantizedLinearMethod
+
     return module
 
 

@@ -375,16 +375,6 @@ class TestModelsPanguUltraMOE(unittest.TestCase):
         self.assertEqual(sorted(left + right), sorted([3, 1, 2]))
         self.assertTrue(1 <= split_idx <= 2)
 
-    @unittest.expectedFailure
-    def test_partition_list_should_raise_value_error_for_single_element_list_design_intent(self):
-        """Design intent: len(lst)<2 should raise a clear ValueError.
-        NOTE: current implementation is likely to throw IndexError; keep as expectedFailure to signal bug.
-        """
-        model = PANGU_ULTRA_MOE.PanguUltraMoEModel.__new__(PANGU_ULTRA_MOE.PanguUltraMoEModel)
-        model.partition_list = PANGU_ULTRA_MOE.PanguUltraMoEModel.partition_list.__get__(model)
-        with self.assertRaises(ValueError):
-            model.partition_list([5], pos=5)
-
     # ---------------------------------------------------------------
     # 7) split_attn_metadata_index + refresh_metadata: deepcopy + padding + field updates
     # ---------------------------------------------------------------

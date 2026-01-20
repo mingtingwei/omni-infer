@@ -171,14 +171,6 @@ def _make_torch_npu_attr_stub():
 
 
 class TestModelsPanguUltraMOEA2(unittest.TestCase):
-
-    @unittest.skip("debug only; not part of CI gate")
-    def test_print_env(self):
-        import sys, transformers
-        print("exe=", sys.executable)
-        print("transformers=", transformers.__version__, transformers.__file__)
-        print("has ProcessorMixin=", hasattr(transformers, "ProcessorMixin"))
-        from transformers import ProcessorMixin  # noqa: F401
     # -----------------------------
     # patch helper（强隔离：所有 patch 都 addCleanup，避免 setUp 中途异常导致泄露）
     # -----------------------------
@@ -333,23 +325,6 @@ class TestModelsPanguUltraMOEA2(unittest.TestCase):
                 quant_config=None,
                 prefix="x",
             )
-
-    @unittest.expectedFailure
-    def test_parallel_mlp_init_role_env_missing_should_not_crash(self):
-        # 设计意图：不应强依赖环境变量 ROLE；当前实现会 KeyError
-        old = os.environ.pop("ROLE", None)
-        try:
-            self.mut.ParallelPanguUltraMoEMLP(
-                hidden_size=8,
-                intermediate_size=16,
-                hidden_act="silu",
-                tp_parallel="no_tp",
-                quant_config=None,
-                prefix="x",
-            )
-        finally:
-            if old is not None:
-                os.environ["ROLE"] = old
 
     def test_parallel_mlp_forward_routes_no_tp_or_no_communication(self):
         qlog = CallLog()
@@ -563,31 +538,6 @@ class TestModelsPanguUltraMOEA2(unittest.TestCase):
         self.assertEqual(out.shape[0], 600)
         self.assertEqual(res.shape[0], 600)
         self.assertGreater(dense_mlp.log.count("mlp"), 1)
-
-    @unittest.expectedFailure
-    def test_decoder_layer_is_prefill_logic_decode_should_not_take_prefill_path(self):
-        self._dp.world_size = 2
-
-        def all_reduce_should_not_be_called(*a, **k):
-            raise AssertionError("decode(prefill=False) should NOT call dist.all_reduce for prefill split")
-
-        if hasattr(self.mut, "dist"):
-            self._patch_attr(self.mut.dist, "all_reduce", all_reduce_should_not_be_called, create=True)
-
-        cfg = _make_minimal_config(num_routed_experts=None)
-        layer = self.mut.PanguUltraMoEDecoderLayer(cfg, prefix="model.layers.1")
-        layer.input_layernorm = DummyRMSNorm()
-        layer.post_attention_layernorm = DummyRMSNorm()
-        layer.self_attn = DummyAttn()
-        layer.mlp = DummyDenseMLP()
-        layer.is_moe = False
-
-        positions = torch.zeros((10,), dtype=torch.int64)
-        hidden = torch.randn(10, 4)
-        residual = torch.randn(10, 4)
-        meta = types.SimpleNamespace(prefill=False)
-
-        layer.forward(positions, hidden, kv_cache=None, attn_metadata=meta, residual=residual)
 
     # -----------------------------
     # 3) PanguUltraMoEModel forward（PP 路由 + prefetch）

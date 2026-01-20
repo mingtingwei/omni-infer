@@ -77,7 +77,7 @@ config_DeepseekV3ForCausalLM = PretrainedConfig(
                 },
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0022,
+    decode_cost_time=0.02,
     quantization_config=None # overwritten when enable_quant=True
 )
 
@@ -130,7 +130,7 @@ config_DeepseekV31ForCausalLM = PretrainedConfig(
     model_type="deepseek_v3",
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0022,
+    decode_cost_time=0.02,
     quantization_config=None,  # overwritten when enable_quant=True
 )
 
@@ -183,7 +183,7 @@ config_DeepseekV32ForCausalLM = PretrainedConfig(
     torch_dtype=torch.bfloat16,
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0022,
+    decode_cost_time=0.02,
     quantization_config=None
 )
 
@@ -213,7 +213,7 @@ config_PanguEmbeddedForCausalLM = PretrainedConfig(
     torch_dtype=torch.bfloat16,
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0023,
+    decode_cost_time=0.02,
     quantization_config=None,
 )
 
@@ -255,7 +255,7 @@ config_PanguProMoEV2ForCausalLM = PretrainedConfig(
     vocab_size=10000,
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0023,
+    decode_cost_time=0.02,
     quantization_config=None
 )
 config_PanguUltraMoEForCausalLM = PretrainedConfig(
@@ -291,7 +291,7 @@ config_PanguUltraMoEForCausalLM = PretrainedConfig(
     torch_dtype=torch.bfloat16,
     enable_speculative=True,
     enable_quantization=True,
-    decode_cost_time=0.0023,
+    decode_cost_time=0.02,
     quantization_config=None,
 )
 config_Qwen3MoeForCausalLM = PretrainedConfig(

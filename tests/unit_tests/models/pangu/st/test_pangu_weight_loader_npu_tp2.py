@@ -29,6 +29,14 @@ class _FusedMoEStub:
         return []
 
 
+def _clear_tensor_attr(t: torch.Tensor, name: str) -> None:
+    if hasattr(t, name):
+        try:
+            delattr(t, name)
+        except Exception:
+            pass
+
+
 def _worker_tp2(rank: int, world_size: int, queue: "mp.Queue"):
     pangu_mod = None
     parallel_state_mod = None
@@ -80,6 +88,9 @@ def _worker_tp2(rank: int, world_size: int, queue: "mp.Queue"):
 
         model.named_parameters = _named_parameters  # type: ignore[assignment]
 
+        # =========================================
+        # First load
+        # =========================================
         w_k_full = torch.tensor([11.0, 22.0], device=npu_device, dtype=torch.float16)
         w_v_full = torch.tensor([33.0, 44.0], device=npu_device, dtype=torch.float16)
         w_kv = torch.tensor([55.0], device=npu_device, dtype=torch.float16)
@@ -98,6 +109,8 @@ def _worker_tp2(rank: int, world_size: int, queue: "mp.Queue"):
         ]
 
         loaded = pangu_mod.PanguProMoEV2ForCausalLM.load_weights(model, weights)
+        if hasattr(torch_npu, "synchronize"):
+            torch_npu.synchronize()
 
         assert "model.layers.0.self_attn.attn.key_antiquant_scale" in loaded
         assert "model.layers.0.self_attn.attn.value_antiquant_scale" in loaded
@@ -119,6 +132,72 @@ def _worker_tp2(rank: int, world_size: int, queue: "mp.Queue"):
 
         assert torch.equal(sink_key.data, expected_sink_k)
         assert torch.equal(sink_value.data, expected_sink_v)
+
+        # Save ptrs
+        key_ptr0 = key_scale.data_ptr()
+        value_ptr0 = value_scale.data_ptr()
+        kv_ptr0 = kv_scale.data_ptr()
+        sink_k_ptr0 = sink_key.data_ptr()
+        sink_v_ptr0 = sink_value.data_ptr()
+
+        # Clear non-idempotent metadata before reload
+        _clear_tensor_attr(key_scale, "is_2_dims")
+        _clear_tensor_attr(value_scale, "is_2_dims")
+        _clear_tensor_attr(kv_scale, "is_2_dims")
+        _clear_tensor_attr(sink_key, "is_2_dims")
+        _clear_tensor_attr(sink_value, "is_2_dims")
+
+        # =========================================
+        # Second load (reload new weights, same structure)
+        # =========================================
+        w_k_full2 = torch.tensor([111.0, 222.0], device=npu_device, dtype=torch.float16)
+        w_v_full2 = torch.tensor([333.0, 444.0], device=npu_device, dtype=torch.float16)
+        w_kv2 = torch.tensor([555.0], device=npu_device, dtype=torch.float16)
+
+        w_sink_k_full2 = torch.tensor([[101.0, 102.0],
+                                       [103.0, 104.0]], device=npu_device, dtype=torch.float16)
+        w_sink_v_full2 = torch.tensor([[201.0, 202.0],
+                                       [203.0, 204.0]], device=npu_device, dtype=torch.float16)
+
+        weights2 = [
+            ("model.layers.0.self_attn.k_proj.kv_cache_scale", w_k_full2),
+            ("model.layers.0.self_attn.v_proj.kv_cache_scale", w_v_full2),
+            ("model.layers.0.self_attn.kv_scale", w_kv2),
+            ("model.layers.0.self_attn.param_sink_key", w_sink_k_full2),
+            ("model.layers.0.self_attn.param_sink_value", w_sink_v_full2),
+        ]
+
+        loaded2 = pangu_mod.PanguProMoEV2ForCausalLM.load_weights(model, weights2)
+        if hasattr(torch_npu, "synchronize"):
+            torch_npu.synchronize()
+
+        assert "model.layers.0.self_attn.attn.key_antiquant_scale" in loaded2
+        assert "model.layers.0.self_attn.attn.value_antiquant_scale" in loaded2
+        assert "model.layers.0.self_attn.attn.kv_scale" in loaded2
+        assert "model.layers.0.self_attn.param_sink_key" in loaded2
+        assert "model.layers.0.self_attn.param_sink_value" in loaded2
+
+        expected_k2 = torch.tensor([111.0], device=npu_device, dtype=torch.float16) if rank == 0 \
+            else torch.tensor([222.0], device=npu_device, dtype=torch.float16)
+        expected_v2 = torch.tensor([333.0], device=npu_device, dtype=torch.float16) if rank == 0 \
+            else torch.tensor([444.0], device=npu_device, dtype=torch.float16)
+
+        assert torch.equal(key_scale.data, expected_k2)
+        assert torch.equal(value_scale.data, expected_v2)
+        assert torch.equal(kv_scale.data, w_kv2)
+
+        expected_sink_k2 = w_sink_k_full2[0:1, :] if rank == 0 else w_sink_k_full2[1:2, :]
+        expected_sink_v2 = w_sink_v_full2[0:1, :] if rank == 0 else w_sink_v_full2[1:2, :]
+
+        assert torch.equal(sink_key.data, expected_sink_k2)
+        assert torch.equal(sink_value.data, expected_sink_v2)
+
+        # data_ptr must remain stable (in-place reload)
+        assert key_scale.data_ptr() == key_ptr0
+        assert value_scale.data_ptr() == value_ptr0
+        assert kv_scale.data_ptr() == kv_ptr0
+        assert sink_key.data_ptr() == sink_k_ptr0
+        assert sink_value.data_ptr() == sink_v_ptr0
 
         queue.put(("ok", rank))
 
