@@ -1,11 +1,66 @@
 """
-测试时只需要运行 pytest -sv test_ct_runner.py
+本测试用例用于验证分布式启动、并行参数传递及测试协议本身是否正确，
+不验证模型运行时（runtime）或通信算子的完整功能。
 
-Goals:
-- Run 4 fixed scenarios: tp2 / pp2 / ep2 / tp2_pp2
-- Parse ONLY the worker structured results blocks (from rank logs first).
-- runner_stdout.txt contains ONLY clean runner summary (no pytest header noise).
-- Skip reasons are categorized into: env / topology / not-supported
+运行方式：
+    pytest -sv test_ct_runner.py
+
+──────────────────────────────────────────────────────────────────────────────
+测试场景
+──────────────────────────────────────────────────────────────────────────────
+本测试固定运行以下 4 种并行配置场景：
+
+    - tp2        : Tensor Parallel = 2
+    - pp2        : Pipeline Parallel = 2
+    - ep2        : Expert Parallel = 2
+    - tp2_pp2   : Tensor Parallel = 2, Pipeline Parallel = 2
+
+每个场景对应固定的 world_size（由 nproc 控制）。
+
+──────────────────────────────────────────────────────────────────────────────
+PASS 语义
+──────────────────────────────────────────────────────────────────────────────
+- parallel_groups_basic 必须 PASS  
+  仅验证：
+    - torch.distributed 初始化成功
+    - world_size / rank 与期望一致
+
+该测试失败意味着环境或启动层存在问题。
+
+──────────────────────────────────────────────────────────────────────────────
+SKIP 语义（设计行为）
+──────────────────────────────────────────────────────────────────────────────
+以下测试在 CT 阶段允许并期望 SKIP：
+    - local_all_to_all
+    - reduce_scatter_two_stage
+    - ...
+
+原因是当前测试：
+    - 不加载模型
+    - 不启动模型 runtime
+    - 不执行真实 forward / prefill / decode
+
+因此无法保证相关通信 group 被构造。
+此类 SKIP 属于正常行为，而非功能缺失。
+
+SKIP 分类说明：
+    - env           : 环境或分布式初始化问题
+    - topology      : 当前并行配置不满足测试前提
+    - not-supported : 未进入模型 runtime
+
+──────────────────────────────────────────────────────────────────────────────
+如何避免 SKIP
+──────────────────────────────────────────────────────────────────────────────
+要使上述测试 PASS，必须：
+    - 启动真实模型 runtime
+    - 完成 initialize_model_parallel
+    - 执行至少一次真实算子路径
+
+──────────────────────────────────────────────────────────────────────────────
+总结
+──────────────────────────────────────────────────────────────────────────────
+当前测试结果中：
+    - 1 PASS + 若干 SKIP 是正确且预期的状态
 """
 
 from __future__ import annotations
@@ -68,7 +123,6 @@ EXPECTED = {
     },
 }
 
-
 def _now_ts() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
@@ -85,7 +139,6 @@ def _read_text_safely(p: Path) -> str:
             return p.read_text(errors="ignore")  # type: ignore[arg-type]
         except Exception:
             return ""
-
 
 def _strip_torchrun_prefix(line: str) -> str:
     # torchrun --tee may prefix: [default0]: ...
