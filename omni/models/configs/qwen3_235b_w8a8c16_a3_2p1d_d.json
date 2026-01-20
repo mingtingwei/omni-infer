@@ -2,7 +2,8 @@
     "model_parallel_config": {
         "dense_mlp_tp_size": 4,
         "o_proj_tp_size": 1,
-        "dp_size": 32
+        "dp_size": 32,
+        "eh_proj_tp_size": 16
     },
     "operator_optimization_config": {
         "enable_kv_rmsnorm_rope_cache": true,

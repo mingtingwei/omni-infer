@@ -25,6 +25,7 @@ import torch_npu
 import torchair as tng
 from dataclasses import dataclass
 from enum import Enum
+from itertools import accumulate
 from typing import Any, Dict, List, Optional, Tuple, Type
 import torch.nn.functional as F
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -418,13 +419,19 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'
+        if os.getenv('ROLE',None)=='prefill':
+            query_lens_list=query_lens.tolist()
+            seq_lens_list=seq_lens.tolist()
+        else:
+            query_lens_list=None
+            seq_lens_list=None
 
         attn_metadata = AscendMetadata(num_actual_tokens=num_actual_tokens,
                                        block_tables=block_table,
                                        query_lens=query_lens,
-                                       query_lens_list=query_lens.tolist(),
+                                       query_lens_list=query_lens_list,
                                        seq_lens=seq_lens,
-                                       seq_lens_list=seq_lens.tolist(),
+                                       seq_lens_list=seq_lens_list,
                                        max_query_len=max_query_len,
                                        slot_mapping=slot_mapping,
                                        slot_indices=slot_indices,
@@ -1024,8 +1031,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_size=block_size,
                 sparse_mode=3,
                 atten_mask=AscendAttentionBackendImpl.SHARE_MASK_TRIL_SPARSE,
-                actual_seq_qlen=attn_metadata.query_lens.cumsum(dim=0),
-                actual_seq_kvlen=attn_metadata.seq_lens,
+                actual_seq_qlen=list(accumulate(attn_metadata.query_lens_list)),
+                actual_seq_kvlen=attn_metadata.seq_lens_list,
             )[0]
 
         output = output.view_as(attn_output)

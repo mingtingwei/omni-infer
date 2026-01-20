@@ -55,6 +55,7 @@ from omni.adaptors.vllm.distributed.parallel_state import(
 )
 
 from omni.models.config_loader.loader import model_extra_config
+from omni.layers.utils import ConditionalTNGScope
 
 SUPPORTED_KV_QUANT_STRATEGY = ["channel"]
 logger = init_logger(__name__)
@@ -553,87 +554,92 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 if self.w2_prefetch_size > 0:
                     torch_npu.npu_prefetch(layer.w2_weight, flag_expert_prefetch, self.w2_prefetch_size)
 
-            tp_world_size = 1
-            expand_x, dynamic_scales, expand_idx, expert_token_nums, ep_recv_counts, tp_recv_counts, expand_scales = torch_npu.npu_moe_distribute_dispatch_v2(
-                x=x,
-                expert_ids=topk_ids,
-                group_ep=layer.moe_all_to_all_group_name,
-                group_tp=layer.moe_rs_group_name,
-                ep_world_size=layer.all2all_world_size,
-                tp_world_size=tp_world_size,
-                ep_rank_id=layer.all2all_global_rank // tp_world_size,
-                tp_rank_id=layer.all2all_global_rank % tp_world_size,
-                expert_shard_type=0,
-                shared_expert_rank_num=0,
-                moe_expert_num=global_num_experts,
-                scales=None,
-                quant_mode=2,  # 0: 非量化; 1: 静态量化; 2: 动态量化
-                global_bs=0
-            )
-            group_list = expert_token_nums.to(torch.int64)
+            super_kernel = not is_prefill and model_extra_config.operator_opt_config.use_super_kernel
+            with ConditionalTNGScope(super_kernel=super_kernel, scope="superkernel_decode_layer"):
 
-            if model_extra_config.task_config.enable_omni_placement:
-                layer.planner.record_activation(
-                    layer.moe_layer_idx,
-                    group_list,
-                    support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune and (not is_prefill)
+                tp_world_size = 1
+                expand_x, dynamic_scales, expand_idx, expert_token_nums, ep_recv_counts, tp_recv_counts, expand_scales = torch_npu.npu_moe_distribute_dispatch_v2(
+                    x=x,
+                    expert_ids=topk_ids,
+                    group_ep=layer.moe_all_to_all_group_name,
+                    group_tp=layer.moe_rs_group_name,
+                    ep_world_size=layer.all2all_world_size,
+                    tp_world_size=tp_world_size,
+                    ep_rank_id=layer.all2all_global_rank // tp_world_size,
+                    tp_rank_id=layer.all2all_global_rank % tp_world_size,
+                    expert_shard_type=0,
+                    shared_expert_rank_num=0,
+                    moe_expert_num=global_num_experts,
+                    scales=None,
+                    quant_mode=2,  # 0: 非量化; 1: 静态量化; 2: 动态量化
+                    x_active_mask=layer.mc2_mask,
+                    global_bs=0
+                )
+                group_list = expert_token_nums.to(torch.int64)
+
+                if model_extra_config.task_config.enable_omni_placement:
+                    layer.planner.record_activation(
+                        layer.moe_layer_idx,
+                        group_list,
+                        support_multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune and (not is_prefill)
+                    )
+
+                gate_up_proj = torch_npu.npu_grouped_matmul(
+                    [expand_x],
+                    [layer.w13_weight],
+                    bias=None,
+                    group_list=group_list,
+                    split_item=3,
+                    output_dtype=torch.int32,
+                    group_type=0,
+                    group_list_type=1
+                )[0]
+
+                inter_states, inter_states_scale = torch_npu.npu_dequant_swiglu_quant(
+                    gate_up_proj,
+                    weight_scale=layer.w13_weight_scale,
+                    activation_scale=dynamic_scales,
+                    bias=None,
+                    quant_scale=self.ones_scale,
+                    quant_offset=None,
+                    group_index=group_list,
+                    activate_left=True,
+                    quant_mode=1
+                )
+                hidden_states_ordered_by_experts = torch_npu.npu_grouped_matmul(
+                    [inter_states],
+                    [layer.w2_weight],
+                    scale=[layer.w2_weight_scale],
+                    per_token_scale=[inter_states_scale],
+                    bias=None,
+                    group_list=group_list,
+                    split_item=3,
+                    output_dtype=x.dtype,
+                    group_type=0,
+                    group_list_type=1
+                )[0]
+
+                output_combine = torch_npu.npu_moe_distribute_combine_v2(
+                    expand_x=hidden_states_ordered_by_experts,
+                    expert_ids=topk_ids,
+                    assist_info_for_combine=expand_idx,
+                    ep_send_counts=ep_recv_counts,
+                    tp_send_counts=tp_recv_counts,
+                    expert_scales=topk_weights.to(torch.float32),
+                    group_ep=layer.moe_all_to_all_group_name,
+                    group_tp=layer.moe_rs_group_name,
+                    ep_world_size=layer.all2all_world_size,
+                    tp_world_size=tp_world_size,
+                    ep_rank_id=layer.all2all_global_rank // tp_world_size,
+                    tp_rank_id=layer.all2all_global_rank % tp_world_size,
+                    expert_shard_type=0,
+                    shared_expert_rank_num=0,
+                    moe_expert_num=global_num_experts,
+                    x_active_mask=layer.mc2_mask,
+                    global_bs=0,
                 )
 
-            gate_up_proj = torch_npu.npu_grouped_matmul(
-                [expand_x],
-                [layer.w13_weight],
-                bias=None,
-                group_list=group_list,
-                split_item=3,
-                output_dtype=torch.int32,
-                group_type=0,
-                group_list_type=1
-            )[0]
-
-            inter_states, inter_states_scale = torch_npu.npu_dequant_swiglu_quant(
-                gate_up_proj,
-                weight_scale=layer.w13_weight_scale,
-                activation_scale=dynamic_scales,
-                bias=None,
-                quant_scale=self.ones_scale,
-                quant_offset=None,
-                group_index=group_list,
-                activate_left=True,
-                quant_mode=1
-            )
-            hidden_states_ordered_by_experts = torch_npu.npu_grouped_matmul(
-                [inter_states],
-                [layer.w2_weight],
-                scale=[layer.w2_weight_scale],
-                per_token_scale=[inter_states_scale],
-                bias=None,
-                group_list=group_list,
-                split_item=3,
-                output_dtype=x.dtype,
-                group_type=0,
-                group_list_type=1
-            )[0]
-
-            output_combine = torch_npu.npu_moe_distribute_combine_v2(
-                expand_x=hidden_states_ordered_by_experts,
-                expert_ids=topk_ids,
-                assist_info_for_combine=expand_idx,
-                ep_send_counts=ep_recv_counts,
-                tp_send_counts=tp_recv_counts,
-                expert_scales=topk_weights.to(torch.float32),
-                group_ep=layer.moe_all_to_all_group_name,
-                group_tp=layer.moe_rs_group_name,
-                ep_world_size=layer.all2all_world_size,
-                tp_world_size=tp_world_size,
-                ep_rank_id=layer.all2all_global_rank // tp_world_size,
-                tp_rank_id=layer.all2all_global_rank % tp_world_size,
-                expert_shard_type=0,
-                shared_expert_rank_num=0,
-                moe_expert_num=global_num_experts,
-                global_bs=0,
-            )
-
-            return output_combine
+                return output_combine
 
     def apply_ag_rs(
         self,
@@ -670,7 +676,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
 
         x_int8, x_scale = torch_npu.npu_dynamic_quant(x)
 
-        if is_prefill:
+        if is_prefill and get_dp_group().world_size > 1:
             assert len(x_int8.shape) == 2
             n_tokens = x_int8.shape[0]
             n_tokens_tensor = torch.Tensor([n_tokens]).int().npu()
@@ -717,7 +723,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 quant_mode=-1,
                 row_idx_type=0
         )
-        expanded_x_idx = torch.clamp(expanded_x_idx, min=0, max=expanded_x_idx.shape[0] - 1)
+
         gate_up_proj = torch_npu.npu_grouped_matmul(
             [sorted_tokens],
             [layer.w13_weight],
@@ -752,22 +758,18 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             group_list_type=1
         )[0]
 
-        # 将不在本rank的专家的topk_weights置为0
-        valid_mask = (topk_ids >= expert_range[0]) & (topk_ids < expert_range[1])
-        topk_weights = topk_weights * valid_mask.to(topk_weights.dtype)
-
         y = torch_npu.npu_moe_finalize_routing(
-            y.float(),
+            y.unsqueeze(1).to(torch.bfloat16),
             None,
             None,
             None,
-            topk_weights.float(),  # 数据类型要求与y一致
+            topk_weights.to(torch.bfloat16),  # 数据类型要求与y一致
             expanded_x_idx,
             topk_ids,
-            drop_pad_mode=2
+            drop_pad_mode=3
         ).to(x.dtype)
 
-        if is_prefill:
+        if is_prefill and get_dp_group().world_size > 1:
             assert len(y.shape) == 2
             y_list = list(torch.split(y, n_tokens_list))
             y_output = torch.empty((n_tokens, y.shape[1]), dtype=y.dtype, device=y.device)
