@@ -280,10 +280,12 @@ class AscendSamplerV1(SamplerV1):
 
             if do_sample:
                 res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
+                self.sampler_preparing_stream.wait_stream(torch.npu.default_stream())
                 return res[0]
             else:
                 logits += 20 # TODO: dirty hack, remove npu_top_k_top_p_sample bug fixed
                 res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q, is_need_logits=True)
+                self.sampler_preparing_stream.wait_stream(torch.npu.default_stream())
                 return torch.nn.functional.softmax(res[1], dim=-1), None
         else:
             if do_sample:
@@ -331,6 +333,7 @@ class AscendSamplerV1(SamplerV1):
             probs, sampling_metadata, spec_metadata,
         )
         res = probs.div_(q).argmax(dim=-1).view(-1)
+        self.sampler_preparing_stream.wait_stream(torch.npu.default_stream())
         if idx == None:
             return res
         else:
