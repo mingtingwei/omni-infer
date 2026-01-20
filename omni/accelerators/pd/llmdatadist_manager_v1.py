@@ -130,7 +130,13 @@ class LLMDataDistConfig:
                                                                        num_mtp_layers,
                                                                        self.kv_transfer_config.kv_connector_extra_config.get("kv_producer_pp_partitions", None))
 
-        host_ip_list = self._get_worker_ips()
+        p_node_list = self.kv_transfer_config.kv_connector_extra_config.get("p_node_list")
+        if self.is_prefill and p_node_list and isinstance(p_node_list, list) and len(p_node_list) > 0:
+            host_ip_list = p_node_list
+        else:
+            if p_node_list and not isinstance(p_node_list, list):
+                logger.warning(f"Invalid p_node_list {p_node_list}, using local host ip.")
+            host_ip_list = [self.local_host_ip]
         self.host_ip_list = host_ip_list
 
         timestamp_ms = round(time.monotonic() * 1_000)
@@ -142,62 +148,6 @@ class LLMDataDistConfig:
         
         # (timestamp_ms, ip1_int, ip2_int, ip3_int, ...)
         self.host_cluster_id = (timestamp_ms, *ip_integers)
-
-    # get all node ips in a TP group
-    def _get_worker_ips(self):
-        """Return worker IPs. Only query Ray when Ray is actually available/running.
-        
-        Behavior:
-        - If self.is_prefill is False: return [self.local_host_ip].
-        - If Ray is not installed: log and return [self.local_host_ip].
-        - If Ray is installed but no cluster is reachable: log and return [self.local_host_ip].
-        - If a Ray cluster is reachable: return all Alive nodes' NodeManagerAddress,
-          with head node (if detected) placed first.
-        """
-        # default fallback
-        worker_ips = [self.local_host_ip]
-        
-        if not self.is_prefill:
-            return worker_ips
-            
-        try:
-            import ray
-        except ImportError:
-            logger.debug("Ray is not installed; skipping Ray cluster discovery.")
-            return worker_ips
-
-        try:
-            if not ray.is_initialized():
-                ray.init(address="auto", ignore_reinit_error=True)
-            nodes = ray.nodes()
-        except Exception as e:
-            logger.warning(f"Failed to connect/list Ray nodes (address='auto'): {e}. Using local_host_ip.")
-            return worker_ips
-        
-        ips = []
-        head_ip = None
-
-        for node in nodes:
-            if node.get("Alive"):
-                addr = node.get("NodeManagerAddress")
-                if addr:
-                    ips.append(addr)
-                    gcs_addr = node.get("GcsAddress", "")
-                    if addr in gcs_addr:
-                        head_ip = addr
-            else:
-                logger.error("Detected dead node in the Ray cluster. Please check machines' health.")
-
-        if not ips:
-            return worker_ips
-
-        if head_ip and head_ip in ips:
-            ips.remove(head_ip)
-            worker_ips = [head_ip] + ips
-        else:
-            worker_ips = ips
-        
-        return worker_ips
 
     @cached_property
     def role(self):

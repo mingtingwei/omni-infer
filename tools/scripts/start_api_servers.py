@@ -58,7 +58,6 @@ def find_available_port(base_port, max_attempts=10, host="0.0.0.0"):
 
     raise RuntimeError(f"No available port found between {base_port} and {base_port + max_attempts - 1}")
 
-
 class ProcessManager:
     """Class to hold processes and enable weakref.finalize."""
     def __init__(self, processes):
@@ -132,6 +131,9 @@ def start_single_node_api_servers(
             f"Port {base_api_port} is not available. "
             "Use --base_api_port to specify a different port, or terminate the process using this port."
         )
+    
+    api_port_start = base_api_port
+    servers_api_ports = {}
 
     for rank in range(num_servers):
         # Set environment variables for each server
@@ -144,12 +146,13 @@ def start_single_node_api_servers(
 
         # Find an available port
         try:
-            port = find_available_port(base_api_port + rank, max_attempts=max_port_attempts)
+            port = find_available_port(api_port_start, max_attempts=max_port_attempts)
         except RuntimeError as e:
             print(f"Error: {e}")
             cleanup_processes(processes)
             sys.exit(1)
-
+        servers_api_ports[f"server_{rank}"] = port
+        api_port_start = port + 1
         # Construct the vllm serve command
         cmd = [
             "vllm", "serve", model_path,
@@ -256,6 +259,13 @@ def start_single_node_api_servers(
 
     process_manager = ProcessManager(processes)
 
+    # this file records the API ports assigned to each server instance for RL
+    rl_service_mode = os.getenv("RL_SERVICE_MODE", "0") == "1"
+    if rl_service_mode:
+        ports_config_file = os.path.join(log_dir, f"servers_api_ports.json")
+        with open(ports_config_file, "w") as f:
+            json.dump(servers_api_ports, f)
+
     # Define cleanup function for weakref.finalize
     def cleanup_processes():
         for i, (proc, log) in enumerate(process_manager.processes):
@@ -269,6 +279,11 @@ def start_single_node_api_servers(
                     print(f"API Server {i} did not terminate gracefully, killed")
             log.close()
             print(f"Closed log file for server {i}")
+        # remove the existing ports config to avoid conflicts.
+        ports_config_file = os.path.join(log_dir, f"servers_api_ports.json")
+        if os.path.exists(ports_config_file):
+            print("clean up temp file...")
+            os.remove(ports_config_file)
 
     # Set up finalizer for garbage collection
     weakref.finalize(process_manager, cleanup_processes)

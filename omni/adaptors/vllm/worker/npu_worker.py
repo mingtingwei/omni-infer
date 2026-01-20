@@ -576,9 +576,7 @@ class RLNPUWorker(NPUWorker):
         
         gc.collect()
         torch.npu.empty_cache()
-     
-        from vllm.distributed.parallel_state import get_tp_group
-        get_tp_group().all_reduce(torch.ones(1).npu())
+
         torch.npu.synchronize()
 
         free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
@@ -602,10 +600,6 @@ class RLNPUWorker(NPUWorker):
                     kv_caches_i_j.untyped_storage().resize_(self.kv_nbytes[i][j])
 
             self.model_runner.reregister_kv_caches()
-            from vllm.distributed.parallel_state import get_tp_group, get_dp_group
-            get_tp_group().all_reduce(torch.ones(1).npu())
-            if get_dp_group().world_size > 1:
-                get_dp_group().all_reduce(torch.ones(1).npu())
             torch.npu.synchronize()
 
 
