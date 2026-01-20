@@ -10,6 +10,8 @@
         "gmm_nz": true,
         "load_rms_bias": true,
         "decode_moe_dispatch_combine": false,
+        "use_ascend_cloud_ops": true,
+        "skip_mtp_hidden_states": true,
         "enable_e_score_correction_bias": true
     }
 }

@@ -13,6 +13,8 @@
         "decode_moe_dispatch_combine": true,
         "cast_w2_scale_f32": true,
         "load_rms_bias": true,
+        "use_ascend_cloud_ops": true,
+        "skip_mtp_hidden_states": true,
         "enable_e_score_correction_bias": true
     }
 }

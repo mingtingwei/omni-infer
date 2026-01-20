@@ -27,7 +27,9 @@ from collections.abc import Iterable
 from typing import Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from transformers import PretrainedConfig
+from vllm.platforms import current_platform
 from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -153,13 +155,30 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         if self.eh_tp_size > 1:
             hidden_states = get_eh_proj_tp_group().all_to_all(hidden_states)
 
+        global_max_length = hidden_states.shape[0]
+        if is_prefill:
+            reduce_length = torch.tensor(hidden_states.shape[0], dtype=torch.int64, device=current_platform.device_type)
+            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+            global_max_length = reduce_length.item()
+
+        if attn_metadata is None:
+            cos, sin = self.mtp_block.self_attn.rotary_emb.get_cos_sin(positions)
+        else:
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[next(iter(attn_metadata))]
+            cos = attn_metadata.cos
+            sin = attn_metadata.sin
+
         encoded_states, residual = self.mtp_block(
             positions=positions,
             kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
+            cos=cos,
+            sin=sin,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
             residual=None,
-            layer_id=None
+            layer_id=None,
+            global_max_length=global_max_length
         )
 
         hidden_states, _ = self.shared_head.norm(encoded_states, residual)
@@ -291,6 +310,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         self.model = Glm4MoeMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.n_predictor = self.config.num_nextn_predict_layers
 
         self.expert_weights = []
 
@@ -334,7 +354,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
             attn_metadata=attn_metadata,
             previous_hidden_states=previous_hidden_states,
             selected_indices=selected_indices,
-            mtp_layer_idx=mtp_layer_idx,
+            mtp_layer_idx=min(self.n_predictor - 1, mtp_layer_idx),
         )
 
     def compute_logits(

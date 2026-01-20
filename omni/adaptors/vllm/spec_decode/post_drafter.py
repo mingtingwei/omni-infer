@@ -268,7 +268,8 @@ class PostDrafter(EagleProposer):
                             input_ids[last_accepted_index] = draft_forward_tokens
                         else: # prefill
                             input_ids[sample_indices] = draft_forward_tokens
-                    previous_hidden_states = next_hidden_states
+                    if not model_extra_config.operator_opt_config.skip_mtp_hidden_states:
+                        previous_hidden_states = next_hidden_states
             if is_dummy:
                 return None
             else:

@@ -62,8 +62,11 @@ from omni.layers.linear import (
 )
 from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.models.config_loader.loader import model_extra_config
-logger = init_logger(__name__)
+if model_extra_config.operator_opt_config.use_ascend_cloud_ops:
+    import ascend_cloud
+    from ascend_cloud_graph import rmsnorm_rope
 
+logger = init_logger(__name__)
 SEQ_SPLIT_LENGTH = 4096
 
 class RMSNormGLM(RMSNorm):
@@ -234,21 +237,37 @@ class Glm4MoeAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata
+        attn_metadata: AttentionMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
                     (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill=is_prefill)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.use_qk_norm:
-            q = self.q_norm(q.reshape(-1, self.num_heads, self.head_dim)).reshape(
-                q.shape
-            )
-            k = self.k_norm(k.reshape(-1, self.num_kv_heads, self.head_dim)).reshape(
-                k.shape
-            )
 
-        q, k = self.rotary_emb(positions, q, k)
+        if model_extra_config.operator_opt_config.use_ascend_cloud_ops:
+            q, k, v = torch.ops.ascend_cloud.rmsnorm_rope(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos,
+                sin,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.k_norm.variance_epsilon,
+            )
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            if self.use_qk_norm:
+                q = self.q_norm(q.reshape(-1, self.num_heads, self.head_dim)).reshape(
+                    q.shape
+                )
+                k = self.k_norm(k.reshape(-1, self.num_kv_heads, self.head_dim)).reshape(
+                    k.shape
+                )
+
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output, reduce_type='RS', is_prefill=is_prefill)
         return output
@@ -320,9 +339,12 @@ class Glm4MoeDecoderLayer(nn.Module):
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
             kv_cache: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
             attn_metadata: AttentionMetadata,
             residual: Optional[torch.Tensor],
-            layer_id: Optional[int] = None
+            layer_id: Optional[int] = None,
+            global_max_length: Optional[int] = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
@@ -331,18 +353,15 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states, attn_metadata=attn_metadata)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states, attn_metadata=attn_metadata, \
+                                       cos=cos,sin=sin)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
                     (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
         if is_prefill:
-            reduce_length = torch.tensor(hidden_states.shape[0], dtype=torch.int64, device=current_platform.device_type)
             local_length = hidden_states.shape[0]
-            # global_max_length = torch.tensor(0, dtype=torch.int64)
-            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
-            global_max_length = reduce_length.item()
-            pad_size = global_max_length - hidden_states.shape[0]
+            pad_size = global_max_length - local_length
             hidden_states = torch.nn.functional.pad(
                 hidden_states, (0, 0, 0, pad_size)
             )
@@ -351,14 +370,21 @@ class Glm4MoeDecoderLayer(nn.Module):
             )
             hidden_states_list = hidden_states.split(SEQ_SPLIT_LENGTH)
             residual_list = residual.split(SEQ_SPLIT_LENGTH)
-            hidden_state_out = []
-            residual_out = []
+            hidden_state_out = torch.empty((global_max_length, hidden_states.shape[-1]),
+                                           dtype=hidden_states.dtype,
+                                           device=hidden_states.device)
+            residual_out = torch.empty((global_max_length, hidden_states.shape[-1]),
+                                        dtype=hidden_states.dtype,
+                                        device=hidden_states.device)
+            start_idx = 0
             for i in range(len(hidden_states_list)):
-                hidden_states, residual = self.mlp(hidden_states_list[i], residual_list[i], attn_metadata, layer_id)
-                hidden_state_out.append(hidden_states)
-                residual_out.append(residual)
-            hidden_states = torch.cat(hidden_state_out)[:local_length]
-            residual = torch.cat(residual_out)[:local_length]
+                end_idx = start_idx + hidden_states_list[i].shape[0]
+                hidden_state_out[start_idx:end_idx], residual_out[start_idx:end_idx] = self.mlp(
+                    hidden_states_list[i], residual_list[i], attn_metadata, layer_id
+                )
+                start_idx = end_idx
+            hidden_states = hidden_state_out[:local_length]
+            residual = residual_out[:local_length]
         else:
             if self.is_moe == True:
                 hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id)
@@ -431,6 +457,22 @@ class Glm4MoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        global_max_length = 0
+        if attn_metadata is None:
+            cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(positions)
+            is_prefill = True
+        else:
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[next(iter(attn_metadata))]
+            cos = attn_metadata.cos
+            sin = attn_metadata.sin
+            is_prefill = (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
+                         (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
+        if is_prefill:
+            reduce_length = torch.tensor(hidden_states.shape[0], dtype=torch.int64, device=current_platform.device_type)
+            dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+            global_max_length = reduce_length.item()
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             layer_id = i - self.first_k_dense_replace
@@ -438,9 +480,12 @@ class Glm4MoeModel(nn.Module):
             hidden_states, residual = layer(positions,
                                             hidden_states,
                                             kv_caches[i - self.start_layer] if kv_caches is not None else None,
+                                            cos,
+                                            sin,
                                             attn_metadata,
                                             residual,
-                                            layer_id)
+                                            layer_id,
+                                            global_max_length)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
