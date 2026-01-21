@@ -39,6 +39,8 @@ typedef struct
     ngx_uint_t schedule_algo;
     ngx_uint_t prefill_pod_size;
     ngx_uint_t decode_pod_size;
+    ngx_array_t *prefill_groups;
+    ngx_array_t *decode_groups;
     ngx_prefill_stream_op_e stream_ops;
 } ngx_http_omni_loc_conf_t;
 

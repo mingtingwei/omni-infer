@@ -1,5 +1,6 @@
 import os
 import sys
+import signal
 import subprocess
 from pathlib import Path
 import port_manager
@@ -11,7 +12,8 @@ proxy_script_path = f"{CUR_DIR}/../../../omni/accelerators/sched/omni_proxy/omni
 def generate_proxy_endpoints(port_list) -> str:
     return ",".join(f"127.0.0.1:{port}" for port in port_list)
 
-def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None):
+def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None,
+                prefill_groups=None, decode_groups=None, dry_run=False):
     env = os.environ.copy()
     env['PYTHONHASHSEED'] = '123'
 
@@ -32,6 +34,12 @@ def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None):
             "--omni-proxy-model-path", f"{CUR_DIR}/mock_model",
             "--no-reuseport"
         ]
+        if prefill_groups:
+            cmd.extend(["--omni-proxy-prefill-groups", prefill_groups])
+        if decode_groups:
+            cmd.extend(["--omni-proxy-decode-groups", decode_groups])
+        if dry_run:
+            cmd.extend(["--dry-run"])
         print(f"\n[SETUP] Starting proxy with command: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
@@ -41,7 +49,7 @@ def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None):
             check=True
         )
         print(f"[SETUP] Script succeeded. Output:\n{result.stdout}")
-        return 0
+        return result
     except subprocess.CalledProcessError as e:
         error_msg = (
             f"Setup script failed with exit code {e.returncode}.\n"
@@ -49,7 +57,7 @@ def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None):
             f"STDOUT: {e.stdout}"
         )
         print(error_msg)
-        return 1
+        return -1
 
 def teardown_proxy():
     try:
@@ -73,6 +81,23 @@ def teardown_proxy():
         )
         print(error_msg)
 
+def graceful_quit_proxy(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        raise ValueError("PID must be positive")
+
+    try:
+        os.kill(pid, signal.SIGQUIT)
+        logger.info(f"send SIGQUIT to PID {pid}, graceful quit nginx")
+        return True
+    except PermissionError:
+        logger.error(f"no permission to send SIGQUIT to PID {pid}")
+        return False
+    except ProcessLookupError:
+        logger.warning(f"PID {pid} has already exited")
+        return False
+    except Exception as e:
+        logger.error(f"Exception when sending SIGQUIT to PID {pid}: {e}")
+        return False
 
 if __name__ == "__main__":
     args = sys.argv[1:]

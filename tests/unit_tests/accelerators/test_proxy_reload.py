@@ -37,7 +37,7 @@ def reload_env():
     decode_ports = ports["decode"]
 
     ret = setup_proxy(proxy_port, prefill_ports, decode_ports)
-    if ret != 0:
+    if ret == -1:
         pytest.fail("Start proxy fail")
 
     wait_proxy_health(proxy_port)

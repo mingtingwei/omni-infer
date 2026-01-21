@@ -24,6 +24,8 @@ prefill_pod_size="1"
 decode_pod_size="1"
 stream_ops="off"
 omni_proxy_max_tokens_weight=""
+omni_proxy_prefill_groups=""
+omni_proxy_decode_groups=""
 no_reuseport=false
 dry_run=false
 stop=false
@@ -56,6 +58,8 @@ print_help() {
     echo "  --omni-proxy-prefill-starvation-timeout <N> prefill_starvation_timeout (default: 400)"
     echo "  --prefill-pod-size <N>          Number of machines per prefill instance (default: 1)"
     echo "  --decode-pod-size <N>           Number of machines per decode instance (default: 1)"
+    echo "  --omni-proxy-prefill-groups <list> Group list for prefill upstreams (e.g. \"0:1,1:1\")"
+    echo "  --omni-proxy-decode-groups <list>  Group list for decode upstreams (e.g. \"0:1,1:1\")"
     echo "  --dry-run                       Only generate nginx config, do not start nginx"
     echo "  --stop                          Stop nginx"
     echo "  --reload                        Reload nginx config without restarting"
@@ -72,7 +76,9 @@ print_help() {
     echo "      --prefill-endpoints 127.0.0.1:9000,127.0.0.2:9001 \\"
     echo "      --decode-endpoints 127.0.0.3:9100,127.0.0.3:9101 \\"
     echo "      --omni-proxy-pd-policy  sequential \\"
-    echo "      --omni-proxy-model-path /data/models/deepseek"
+    echo "      --omni-proxy-model-path /data/models/deepseek \\"
+    echo "      --omni-proxy-prefill-groups \"0:1,1:1\" \\"
+    echo "      --omni-proxy-decode-groups \"0:1,1:1\""
     exit 0
 }
 
@@ -144,6 +150,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --omni-proxy-prefill-starvation-timeout)
             omni_proxy_prefill_starvation_timeout="$2"
+            shift 2
+            ;;
+        --omni-proxy-prefill-groups)
+            omni_proxy_prefill_groups="$2"
+            shift 2
+            ;;
+        --omni-proxy-decode-groups)
+            omni_proxy_decode_groups="$2"
             shift 2
             ;;
         --prefill-pod-size)
@@ -360,6 +374,18 @@ function generate_nginx_conf() {
         omni_proxy_max_tokens_weight_directive="            omni_proxy_max_tokens_weight $omni_proxy_max_tokens_weight;"
     fi
 
+    local omni_proxy_prefill_groups_directive=""
+    if [[ -n "$omni_proxy_prefill_groups" ]]; then
+        local normalized_prefill_groups="${omni_proxy_prefill_groups//,/ }"
+        omni_proxy_prefill_groups_directive="            omni_proxy_prefill_groups ${normalized_prefill_groups};"
+    fi
+
+    local omni_proxy_decode_groups_directive=""
+    if [[ -n "$omni_proxy_decode_groups" ]]; then
+        local normalized_decode_groups="${omni_proxy_decode_groups//,/ }"
+        omni_proxy_decode_groups_directive="            omni_proxy_decode_groups ${normalized_decode_groups};"
+    fi
+
     cat > "$nginx_conf_file" <<EOF
 load_module /usr/local/nginx/modules/ngx_http_omni_proxy_module.so;
 load_module /usr/local/nginx/modules/ngx_http_set_request_id_module.so;
@@ -427,6 +453,8 @@ EOF
             decode_pod_size $decode_pod_size;
 ${omni_proxy_schedule_algo_directive}
 ${omni_proxy_max_tokens_weight_directive}
+${omni_proxy_prefill_groups_directive}
+${omni_proxy_decode_groups_directive}
 EOF
 
     if [[ -n "$omni_proxy_model_path" ]]; then

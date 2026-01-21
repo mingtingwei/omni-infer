@@ -167,7 +167,7 @@ static omni_req_t *omni_req_init(ngx_http_request_t *r)
 static void omni_req_free(omni_req_t *req)
 {
     ngx_http_request_t *r = omni_get_http_request(req);
-    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Free Req:%d, at:%x",
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Free Req:%d, at:%u",
                   req->slot_index, req->phase_state);
     omni_free_request(&g_state->request_pool, req);
 }
@@ -247,13 +247,15 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
                                                             req->tokenizer_req.block_hashes_len);
         }
         local_prefill_match_depths[i] = (uint32_t)match_depth;
-        ngx_log_error(NGX_LOG_INFO,
-                      omni_get_http_request(req)->connection->log,
-                      0,
-                      "[APC_MATCHING-%d] prefill[%ui] match_depth=%ui",
-                      req->slot_index,
-                      i,
-                      local_prefill_match_depths[i]);
+        if (match_depth > 0) {
+            ngx_log_error(NGX_LOG_INFO,
+                          omni_get_http_request(req)->connection->log,
+                          0,
+                          "[APC_MATCHING-%d] prefill[%ui] match_depth=%ui",
+                          req->slot_index,
+                          i,
+                          local_prefill_match_depths[i]);
+        }
 
         if ((ngx_uint_t)match_depth > computed_max_prefill)
             computed_max_prefill = match_depth;
@@ -266,7 +268,7 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
                   req->slot_index,
                   num_prefill,
                   computed_max_prefill);
-    
+
     // Decode Matching
     uint32_t local_decode_match_depths[MAX_DECODE_UPSTREAMS];
     ngx_uint_t computed_max_decode = 0;
@@ -280,13 +282,15 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
                                                             req->tokenizer_req.block_hashes_len);
         }
         local_decode_match_depths[i] = (uint32_t)match_depth;
-        ngx_log_error(NGX_LOG_INFO,
-                      omni_get_http_request(req)->connection->log,
-                      0,
-                      "[APC_MATCHING-%d] decode[%ui] match_depth=%ui",
-                      req->slot_index,
-                      i,
-                      local_decode_match_depths[i]);
+        if (match_depth > 0) {
+            ngx_log_error(NGX_LOG_INFO,
+                          omni_get_http_request(req)->connection->log,
+                          0,
+                          "[APC_MATCHING-%d] decode[%ui] match_depth=%ui",
+                          req->slot_index,
+                          i,
+                          local_decode_match_depths[i]);
+        }
 
         if ((ngx_uint_t)match_depth > computed_max_decode)
             computed_max_decode = match_depth;
@@ -1013,6 +1017,7 @@ static void omni_proxy_req_prefill_resched(omni_req_t *req, ngx_uint_t new_idx)
     g_state->prefill_states[new_idx].num_tokens += req->metrics.prompt_num_tokens;
 
     req->prefill_upstream_endpoint_idx = new_idx;
+    req->prefill_group_id = g_state->prefill_states[new_idx].comm.group_id;
     ngx_atomic_fetch_add(&g_state->prefill_states[new_idx].comm.ref, 1);
 }
 
@@ -1105,7 +1110,7 @@ static ngx_int_t omni_proxy_upstream_init(ngx_http_request_t *r, ngx_http_upstre
 {
 
     omni_req_t *req = omni_get_req(r);
-    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[-%d] init upstream at phase: %x",
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[-%d] init upstream at phase: %u",
                   req->slot_index, req->phase_state);
 
     ngx_http_upstream_t *u = r->upstream;
@@ -1829,6 +1834,8 @@ static void *ngx_http_omni_create_loc_conf(ngx_conf_t *cf)
     conf->decode_pod_size = NGX_CONF_UNSET_UINT;
     conf->health_status_enabled = NGX_CONF_UNSET;
     conf->stream_ops = (ngx_prefill_stream_op_e) NGX_CONF_UNSET_UINT;
+    conf->prefill_groups = NULL;
+    conf->decode_groups = NULL;
 
     return conf;
 }
@@ -1860,7 +1867,7 @@ static char *ngx_http_omni_merge_loc_conf(ngx_conf_t *cf, void *parent, void *ch
     ngx_conf_merge_uint_value(conf->schedule_algo, prev->schedule_algo, 0);
 
     ngx_conf_merge_uint_value(conf->prefill_pod_size, prev->prefill_pod_size, 1);
-    ngx_conf_merge_uint_value(conf->decode_pod_size, prev->decode_pod_size, 1);    
+    ngx_conf_merge_uint_value(conf->decode_pod_size, prev->decode_pod_size, 1);
 
     if (conf->metrics_enabled == NGX_CONF_UNSET)
     {
@@ -1869,7 +1876,16 @@ static char *ngx_http_omni_merge_loc_conf(ngx_conf_t *cf, void *parent, void *ch
 
     ngx_conf_merge_value(conf->health_status_enabled, prev->health_status_enabled, 0);
 
-    if (conf->model_path.len != 0 || conf->vllm_kv_port_offset != NGX_CONF_UNSET || conf->pd_policy != NGX_CONF_UNSET)
+    if (conf->prefill_groups == NULL) {
+        conf->prefill_groups = prev->prefill_groups;
+    }
+
+    if (conf->decode_groups == NULL) {
+        conf->decode_groups = prev->decode_groups;
+    }
+
+    if (conf->model_path.len != 0 || conf->vllm_kv_port_offset != NGX_CONF_UNSET ||
+        conf->pd_policy != NGX_CONF_UNSET || conf->prefill_groups != NULL || conf->decode_groups != NULL)
     {
         local_state.loc_conf = conf;
     }
@@ -1887,6 +1903,86 @@ static char *ngx_http_omni_merge_loc_conf(ngx_conf_t *cf, void *parent, void *ch
     }
 
     return NGX_CONF_OK;
+}
+
+static ngx_int_t omni_proxy_parse_group_token(ngx_conf_t *cf, ngx_command_t *cmd, ngx_str_t *token,
+    ngx_uint_t *group_id, ngx_uint_t *repeat)
+{
+    u_char *sep = ngx_strlchr(token->data, token->data + token->len, ':');
+    if (sep == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_str_t left;
+    ngx_str_t right;
+    left.data = token->data;
+    left.len = (size_t)(sep - token->data);
+    right.data = sep + 1;
+    right.len = (size_t)((token->data + token->len) - right.data);
+
+    ngx_int_t gid = ngx_atoi(left.data, left.len);
+    ngx_int_t cnt = ngx_atoi(right.data, right.len);
+    if (gid == NGX_ERROR || gid < 0 || cnt == NGX_ERROR || cnt <= 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid group segment \"%V\" in \"%V\" directive",
+                           token, &cmd->name);
+        return NGX_ERROR;
+    }
+    *group_id = (ngx_uint_t) gid;
+    *repeat = (ngx_uint_t) cnt;
+    return NGX_OK;
+}
+
+static char *omni_proxy_set_groups(ngx_conf_t *cf, ngx_command_t *cmd, ngx_array_t **groups)
+{
+    ngx_str_t *value = cf->args->elts;
+    ngx_uint_t count = cf->args->nelts;
+
+    if (*groups != NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"%V\" directive is duplicate", &cmd->name);
+        return NGX_CONF_ERROR;
+    }
+
+    if (count < 2) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid number of arguments in \"%V\" directive", &cmd->name);
+        return NGX_CONF_ERROR;
+    }
+
+    *groups = ngx_array_create(cf->pool, count - 1, sizeof(ngx_uint_t));
+    if (*groups == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    for (ngx_uint_t i = 1; i < count; i++) {
+        ngx_uint_t group_id = 0;
+        ngx_uint_t repeat = 0;
+        if (omni_proxy_parse_group_token(cf, cmd, &value[i], &group_id, &repeat) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
+        for (ngx_uint_t r = 0; r < repeat; r++) {
+            ngx_uint_t *slot = ngx_array_push(*groups);
+            if (slot == NULL) {
+                return NGX_CONF_ERROR;
+            }
+            *slot = group_id;
+        }
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *omni_proxy_set_prefill_groups(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_omni_loc_conf_t *olcf = conf;
+    return omni_proxy_set_groups(cf, cmd, &olcf->prefill_groups);
+}
+
+static char *omni_proxy_set_decode_groups(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_omni_loc_conf_t *olcf = conf;
+    return omni_proxy_set_groups(cf, cmd, &olcf->decode_groups);
 }
 
 static char *ngx_conf_set_omni_stream_ops(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -1951,6 +2047,28 @@ static void omni_upstream_addr_set(omni_upstream_address_t *addr, ngx_http_upstr
     }
 }
 
+static int32_t omni_proxy_get_group_id(ngx_cycle_t *cycle, bool is_prefill, ngx_uint_t idx)
+{
+    if (local_state.loc_conf == NULL) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "local_state.loc_conf is NULL");
+        return -1;
+    }
+
+    ngx_array_t *groups = is_prefill ? local_state.loc_conf->prefill_groups : local_state.loc_conf->decode_groups;
+    if (groups == NULL) {
+        return 0;
+    }
+
+    if (idx >= groups->nelts) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "idx %ui larger than %s group nelts:%ui",
+            idx, is_prefill ? "Prefill" : "Decode", groups->nelts);
+        return -1;
+    }
+
+    ngx_uint_t *ids = groups->elts;
+    return ids[idx];
+}
+
 static void omni_upstream_disable(bool is_prefill, omni_upstream_status_t from, omni_upstream_status_t to)
 {
     ngx_uint_t i;
@@ -2000,6 +2118,11 @@ static ngx_int_t omni_upstream_add(bool is_prefill, ngx_cycle_t *cycle, ngx_http
     ngx_http_upstream_rr_peer_t *peer;
     for (peer = peers->peer; peer != NULL; peer = peer->next) {
         ngx_http_upstream_rr_peer_lock(peers, peer);
+        int32_t group_id = omni_proxy_get_group_id(cycle, is_prefill, cnt);
+        if (group_id < 0) {
+            ngx_http_upstream_rr_peer_unlock(peers, peer);
+            return NGX_ERROR;
+        }
         omni_upstream_common_t *comm;
         ngx_int_t abandon_idx = -1;
         ngx_uint_t j;
@@ -2057,8 +2180,9 @@ static ngx_int_t omni_upstream_add(bool is_prefill, ngx_cycle_t *cycle, ngx_http
             }
         }
 
-        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "Add %s peer %ui in endpoint[%ui] -> %s:%d",
-                     is_prefill ? "Prefill" : "Decode", cnt, j, comm->address.ip, comm->address.port);
+        comm->group_id = (uint32_t)group_id;
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "Add %s peer %ui in endpoint[%ui] -> %s:%d (group=%uD)",
+                     is_prefill ? "Prefill" : "Decode", cnt, j, comm->address.ip, comm->address.port, comm->group_id);
         cnt++;
         ngx_http_upstream_rr_peer_unlock(peers, peer);
     }
@@ -2185,8 +2309,163 @@ static ngx_int_t ngx_http_omni_proxy_metrics_handler(ngx_http_request_t *r)
     return ngx_http_output_filter(r, &out);
 }
 
+static int ngx_uint_cmp(const void *a, const void *b)
+{
+    ngx_uint_t x = *(ngx_uint_t *)a;
+    ngx_uint_t y = *(ngx_uint_t *)b;
+    if (x < y) {
+        return -1;
+    }
+    if (x > y) {
+        return 1;
+    }
+    return 0;
+}
+
+static ngx_uint_t dedup_sorted_uint_array(ngx_uint_t *arr, ngx_uint_t n)
+{
+    if (n == 0) {
+        return 0;
+    }
+
+    ngx_uint_t write_idx = 1;
+    for (ngx_uint_t i = 1; i < n; i++) {
+        if (arr[i] != arr[i - 1]) {
+            arr[write_idx++] = arr[i];
+        }
+    }
+    return write_idx;
+}
+
+static ngx_int_t omni_groups_equal_unique(ngx_conf_t *cf, ngx_array_t *prefill_group, ngx_array_t *decode_group)
+{
+    ngx_uint_t *prefill_group_set = NULL;
+    ngx_uint_t *decode_group_set = NULL;
+    ngx_uint_t prefill_group_num = prefill_group->nelts;
+    ngx_uint_t decode_group_num = decode_group->nelts;
+
+    if (prefill_group_num == 0 || decode_group_num == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "prefill_group_num or decode_group_num should not be 0");
+        return NGX_ERROR;
+    }
+
+    prefill_group_set = ngx_palloc(cf->pool, prefill_group_num * sizeof(ngx_uint_t));
+    decode_group_set = ngx_palloc(cf->pool, decode_group_num * sizeof(ngx_uint_t));
+    if (prefill_group_set == NULL || decode_group_set == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "prefill_group_set or decode_group_set ngx_palloc failed");
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(prefill_group_set, prefill_group->elts, prefill_group_num * sizeof(ngx_uint_t));
+    ngx_memcpy(decode_group_set, decode_group->elts, decode_group_num * sizeof(ngx_uint_t));
+
+    ngx_qsort(prefill_group_set, prefill_group_num, sizeof(ngx_uint_t), ngx_uint_cmp);
+    ngx_qsort(decode_group_set, decode_group_num, sizeof(ngx_uint_t), ngx_uint_cmp);
+
+    ngx_uint_t dedup_prefill_group_num = dedup_sorted_uint_array(prefill_group_set, prefill_group_num);
+    ngx_uint_t dedup_decode_group_num = dedup_sorted_uint_array(decode_group_set, decode_group_num);
+
+    if (dedup_prefill_group_num != dedup_decode_group_num) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "dedup_prefill_group_num %ui and dedup_prefill_group_num %ui do not match");
+        return NGX_ERROR;
+    }
+
+    for (ngx_uint_t i = 0; i < dedup_prefill_group_num; i++) {
+        if (prefill_group_set[i] != decode_group_set[i]) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                "elements of prefill_group_set and decode_group_set do not match");
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t omni_proxy_check_upstream_group_setting(ngx_conf_t *cf)
+{
+    ngx_http_omni_loc_conf_t *olcf = local_state.loc_conf;
+
+    if (olcf->prefill_groups == NULL && olcf->decode_groups != NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "omni_proxy_decode_groups is set but omni_proxy_prefill_groups is missing");
+        return NGX_ERROR;
+    }
+
+    if (olcf->prefill_groups != NULL && olcf->decode_groups == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "omni_proxy_prefill_groups is set but omni_proxy_decode_groups is missing");
+        return NGX_ERROR;
+    }
+
+    if (olcf->prefill_groups == NULL && olcf->decode_groups == NULL) {
+        return NGX_OK;
+    }
+
+    if (omni_groups_equal_unique(cf, olcf->prefill_groups, olcf->decode_groups) != NGX_OK) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "omni_proxy_prefill_groups and omni_proxy_decode_groups must contain the same unique group IDs");
+        return NGX_ERROR;
+    }
+
+    ngx_uint_t i;
+    ngx_uint_t j;
+    ngx_http_upstream_main_conf_t *umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
+    if (umcf == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_array_t *upstreams = &umcf->upstreams;
+    ngx_uint_t nupstreams = upstreams->nelts;
+    ngx_http_upstream_srv_conf_t **uscfp = upstreams->elts;
+
+    for (i = 0; i < nupstreams; i++) {
+        ngx_http_upstream_srv_conf_t *uscf = uscfp[i];
+        if (uscf == NULL) {
+            continue;
+        }
+
+        ngx_http_upstream_rr_peers_t *peers = uscf->peer.data;
+        if (peers == NULL) {
+            ngx_log_error(NGX_LOG_WARN, cf->log, 0,
+                         "No peers found for upstream %V", &uscf->host);
+            continue;
+        }
+
+        ngx_http_upstream_rr_peers_rlock(peers);
+
+        if (ngx_strncmp(uscf->host.data, PREFILL_ENDPOINTS, sizeof(PREFILL_ENDPOINTS) - 1) == 0) {
+            if (peers->number != olcf->prefill_groups->nelts) {
+                ngx_http_upstream_rr_peers_unlock(peers);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                    "number of prefill upstream server %ui and group %ui not equal", peers->number, olcf->prefill_groups->nelts);
+                return NGX_ERROR;
+            }
+        } else if (ngx_strncmp(uscf->host.data, DECODE_ENDPOINTS, sizeof(DECODE_ENDPOINTS) - 1) == 0) {
+            if (peers->number != olcf->decode_groups->nelts) {
+                ngx_http_upstream_rr_peers_unlock(peers);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                    "number of decode upstream server %ui and group %ui not equal", peers->number, olcf->decode_groups->nelts);
+                return NGX_ERROR;
+            }
+        } else {
+            ngx_http_upstream_rr_peers_unlock(peers);
+            continue;
+        }
+        ngx_http_upstream_rr_peers_unlock(peers);
+    }
+
+    return NGX_OK;
+}
+
 static ngx_int_t omni_proxy_post_config(ngx_conf_t *cf)
 {
+    if (omni_proxy_check_upstream_group_setting(cf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
     if (omni_proxy_init_global_state(cf) != NGX_OK)
     {
         return NGX_ERROR;
@@ -2412,7 +2691,7 @@ static void omni_proxy_kv_event_handler(struct omni_zmq_handler_s *handler,
                         } else {
                             ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                                 "Removed block hash %" PRIu64 " from radix tree (decode %d)",
-                                h, handler->index - MAX_PREFILL_UPSTREAMS);                           
+                                h, handler->index - MAX_PREFILL_UPSTREAMS);
                         }
                     }
                     else
@@ -2538,7 +2817,7 @@ static ngx_int_t omni_proxy_init_kv_listener(ngx_cycle_t *cycle)
             printf("address: %s\n", buf);
             ngx_str_t addr = {last - buf, buf};
 
-            ngx_str_t topic = ngx_string(""); 
+            ngx_str_t topic = ngx_string("");
             omni_zmq_handler_t *kv_handler = ngx_pcalloc(cycle->pool, sizeof(omni_zmq_handler_t));
             if (kv_handler == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "kv_handler alloc fail, idx=%d", MAX_PREFILL_UPSTREAMS + i);
@@ -3031,14 +3310,14 @@ static ngx_command_t omni_proxy_commands[] = {
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, schedule_algo),
      ngx_http_omni_schedule_algos},
-    
+
     {ngx_string("prefill_pod_size"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_num_slot,
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, prefill_pod_size),
      NULL},
-    
+
     {ngx_string("decode_pod_size"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      ngx_conf_set_num_slot,
@@ -3051,6 +3330,20 @@ static ngx_command_t omni_proxy_commands[] = {
      ngx_conf_set_omni_stream_ops,
      NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_omni_loc_conf_t, stream_ops),
+     NULL},
+
+    {ngx_string("omni_proxy_prefill_groups"),
+     NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+     omni_proxy_set_prefill_groups,
+     NGX_HTTP_LOC_CONF_OFFSET,
+     0,
+     NULL},
+
+    {ngx_string("omni_proxy_decode_groups"),
+     NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+     omni_proxy_set_decode_groups,
+     NGX_HTTP_LOC_CONF_OFFSET,
+     0,
      NULL},
 
     ngx_null_command};

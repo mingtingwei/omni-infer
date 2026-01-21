@@ -140,3 +140,50 @@ bash omni_proxy.sh \
 * 在 `omniinfer/tools/scripts/pd_run.sh` 文件中设置 `ENABLE_APC_EVENT=1`，同时在 Ansible 模板文件中设置 `USE_OMNI_PROXY=1`
 * 向 `omni_proxy.sh` 脚本提供模型路径参数：`--omni-proxy-model-path /path/to/DeepSeek`
 
+### 分组调度配置
+
+在nginx配置文件中使用配置项 `omni_proxy_prefill_groups` / `omni_proxy_decode_groups` 将对应upstream的server按顺序分组，并且映射到对应的分组id。配置项写法如下：例如要将`upstream prefill_endpoints`分为3个组，前两个server属于分组0，第三个server属于分组1，第四个server属于分组2，则配置为`omni_proxy_prefill_groups 0:2 1:1 1:1`，`omni_proxy_decode_groups`配置同理。
+
+**注意：**
+
+1. `omni_proxy_prefill_groups` / `omni_proxy_decode_groups`必须同时配置或者不配置，否则会导致proxy启动失败。
+
+2. `omni_proxy_prefill_groups` / `omni_proxy_decode_groups`需要将对应upstream内所有的server都包含在内，否则会自动分配到分组0上。
+
+3. `omni_proxy_prefill_groups` / `omni_proxy_decode_groups`的分组id必须一一对应，假如出现不匹配的分组id会导致proxy启动失败。
+
+```
+http {
+    upstream prefill_endpoints {
+        server 127.0.0.1:8001;
+        server 127.0.0.1:8002;
+        server 127.0.0.1:8003;
+        server 127.0.0.1:8004;
+    }
+    upstream decode_endpoints {
+        server 127.0.0.1:9001;
+        server 127.0.0.1:9002;
+        server 127.0.0.1:9003;
+        server 127.0.0.1:9004;
+        server 127.0.0.1:9005;
+        server 127.0.0.1:9006;
+        server 127.0.0.1:9007;
+        server 127.0.0.1:9008;
+    }
+    server {
+        location /v1 {
+            omni_proxy_prefill_groups 0:2 1:1 1:1;
+            omni_proxy_decode_groups 0:2 1:4 2:2;
+        }
+    }
+}
+```
+
+如果通过 `omni_proxy.sh` 生成配置，则传入入参`--omni-proxy-prefill-groups`和`--omni-proxy-decode-groups`：
+```
+bash omni_proxy.sh \
+  --prefill-endpoints 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003,127.0.0.1:8004 \
+  --decode-endpoints 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004,127.0.0.1:9005,127.0.0.1:9006,127.0.0.1:9007,127.0.0.1:9008 \
+  --omni-proxy-prefill-groups "0:2,1:1,1:1" \
+  --omni-proxy-decode-groups "0:2,1:4,2:2"
+```

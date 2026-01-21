@@ -37,7 +37,7 @@ def setup_teardown():
     decode_port_list = ports["decode"]
 
     ret = setup_proxy(proxy_port, prefill_port_list, decode_port_list)
-    if not ret == 0:
+    if ret == -1:
         pytest.fail(f"Start proxy fail")
 
     processes = strart_vllm_mock(PREFILL_NUM, DECODE_NUM)

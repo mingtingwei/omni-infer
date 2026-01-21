@@ -13,8 +13,8 @@
 #define NUM_DECODE_BATCH_METRICS_HIS 256
 #define OMNI_PREFILL_BATCH_STATS_MAX 64
 #define OMNI_PREFILL_BATCH_STATS_WINDOW 128
-#define MAX_PREFILL_UPSTREAMS 128
-#define MAX_DECODE_UPSTREAMS 1024
+#define MAX_PREFILL_UPSTREAMS 1024
+#define MAX_DECODE_UPSTREAMS 4096
 #define MAX_REQUEST_SLOTS 16384
 #define MAX_WORKERS 320
 #define OMNI_TTFT_BUCKETS_COUNT 23
@@ -81,6 +81,7 @@ typedef struct omni_request_s
     bool has_prefill_sched;
     bool has_decode_sched;
     uint16_t prefill_upstream_endpoint_idx;
+    uint32_t prefill_group_id;
     uint16_t decode_upstream_endpoint_idx;
     omni_request_metrics_t metrics;
     omni_tokenizer_request tokenizer_req;
@@ -169,6 +170,7 @@ typedef struct omni_upstream_common_s
 {
     ngx_atomic_t ref;
     omni_upstream_status_t status;
+    uint32_t group_id;
     omni_upstream_address_t address;
 } omni_upstream_common_t;
 
@@ -236,6 +238,7 @@ typedef struct omni_global_state_s
     bool master_worker_selected;
     omni_upstream_prefill_t prefill_states[MAX_PREFILL_UPSTREAMS];
     omni_upstream_decode_t decode_states[MAX_DECODE_UPSTREAMS];
+    uint32_t group_matched_idx[MAX_DECODE_UPSTREAMS];
 
     ngx_atomic_t ttft_buckets[OMNI_TTFT_BUCKETS_COUNT];
     ngx_atomic_t ttft_sum_ms;

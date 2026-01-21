@@ -61,3 +61,53 @@ bash omni_proxy.sh \
 Note: if you want to turn on the APC-aware scheduling, 
 * Set `ENABLE_APC_EVENT=1` in `omniinfer/tools/scripts/pd_run.sh` and also set `USE_OMNI_PROXY=1` in ansible template file
 * Provide the model path `--omni-proxy-model-path /path/to/DeepSeek` to `omni_proxy.sh`.
+
+### Group-aware scheduling config
+
+In the NGINX configuration file, use the directives `omni_proxy_prefill_groups` and `omni_proxy_decode_groups` to sequentially group the servers in the corresponding upstream block and map them to specific group IDs.
+
+The syntax is as follows:  
+
+For example, to divide the `upstream prefill_endpoints` into three groups, where the first two servers belong to group 0, the third server to group 1, and the fourth server to group 2, the configuration would be: `omni_proxy_prefill_groups 0:2 1:1 2:1;`. Similarly, `omni_proxy_decode_groups` follows the same format.
+
+**Notes:**
+
+1. The directives `omni_proxy_prefill_groups` and `omni_proxy_decode_groups` must either both be configured or both be omitted; otherwise, the proxy will fail to start.
+2. The directives `omni_proxy_prefill_groups` and `omni_proxy_decode_groups` must include **all** servers defined in their respective upstream blocks. Any server not explicitly assigned will be automatically placed into group 0.
+3. Group IDs specified in `omni_proxy_prefill_groups` and `omni_proxy_decode_groups` must **exactly correspond** between prefill and decode configurations. Mismatched group IDs will cause the proxy to fail during startup.
+
+```
+http {
+    upstream prefill_endpoints {
+        server 127.0.0.1:8001;
+        server 127.0.0.1:8002;
+        server 127.0.0.1:8003;
+        server 127.0.0.1:8004;
+    }
+    upstream decode_endpoints {
+        server 127.0.0.1:9001;
+        server 127.0.0.1:9002;
+        server 127.0.0.1:9003;
+        server 127.0.0.1:9004;
+        server 127.0.0.1:9005;
+        server 127.0.0.1:9006;
+        server 127.0.0.1:9007;
+        server 127.0.0.1:9008;
+    }
+    server {
+        location /v1 {
+            omni_proxy_prefill_groups 0:2 1:1 1:1;
+            omni_proxy_decode_groups 0:2 1:4 2:2;
+        }
+    }
+}
+```
+
+If you generate the configuration using `omni_proxy.sh`, pass the arguments `--omni-proxy-prefill-groups` and `--omni-proxy-decode-groups` as follows:
+```
+bash omni_proxy.sh \
+  --prefill-endpoints 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003,127.0.0.1:8004 \
+  --decode-endpoints 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004,127.0.0.1:9005,127.0.0.1:9006,127.0.0.1:9007,127.0.0.1:9008 \
+  --omni-proxy-prefill-groups "0:2,1:1,1:1" \
+  --omni-proxy-decode-groups "0:2,1:4,2:2"
+```

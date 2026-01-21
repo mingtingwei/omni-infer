@@ -87,7 +87,8 @@ void omni_scheduler_record_prefill_batch_stat(omni_global_state_t *gs,
 
 #define OMNI_SCHED_EXEC_TIME_INCREMENT ((ngx_msec_t)50)
 #define OMNI_SCHED_EXEC_MAX_TIME       ((ngx_msec_t)30000)
-#define OMNI_SCHED_INFLITE_TIME       ((ngx_msec_t)30)
+#define OMNI_SCHED_INFLITE_TIME        ((ngx_msec_t)30)
+#define DEFAULT_UPSTREAM_NUM_PER_GROUP (512)
 
 static ngx_msec_t
 omni_scheduler_recent_bucket_average(omni_global_state_t *gs, uint32_t batch_size)
@@ -756,6 +757,7 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
 
         omni_upstream_prefill_t *selected_prefill = &gs->prefill_states[selected];
         req->prefill_upstream_endpoint_idx = selected;
+        req->prefill_group_id = selected_prefill->comm.group_id;
         gs->last_selected_prefill = selected + 1;
 
         if (selected_prefill->num_running == 0)
@@ -781,8 +783,8 @@ void omni_proxy_schedule_prefill(omni_global_state_t *gs, ngx_http_omni_loc_conf
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                             "<<<Action: Enter state P scheduled; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 
-        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0, "[Prefill-%d] Schedule to: %d",
-                      req->slot_index, req->prefill_upstream_endpoint_idx);
+        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0, "[Prefill-%d] Schedule to: %d (group=%uD)",
+                      req->slot_index, req->prefill_upstream_endpoint_idx, req->prefill_group_id);
     }
 
     // TODO: estimated expected next schedule time
@@ -808,8 +810,9 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
         assert(omni_req_is_in_phase(req, PHASE_DECODE_WAITING_SCHEDULE));
 
         uint32_t least_load = UINT32_MAX;
-        uint32_t selected = rand() % gs->num_decode_endpoints;
+        uint32_t selected = UINT32_MAX;
         uint32_t cnt = 0;
+        uint32_t matched_cnt = 0;
 
         uint32_t best_match = 0;
         uint32_t best_load_tokens = UINT32_MAX;
@@ -822,6 +825,9 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
                 continue;
             }
             cnt++;
+            if (gs->decode_states[j].comm.group_id != req->prefill_group_id) {
+                continue;
+            }
             uint32_t m = req->decode_match_depths[j];
 
             uint32_t load_tokens = gs->decode_states[j].num_tokens;
@@ -852,6 +858,13 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
                 continue;
             }
             cnt++;
+            if (decode->comm.group_id != req->prefill_group_id) {
+                continue;
+            }
+
+            gs->group_matched_idx[matched_cnt] = j;
+            matched_cnt++;
+
             if (gs->decode_states[j].num_tokens < least_load && gs->decode_states[j].num_running < olcf->decode_max_num_seqs)
             {
                 least_load = gs->decode_states[j].num_tokens;
@@ -861,6 +874,11 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
                     break;
                 }
             }
+        }
+
+        if (selected == UINT32_MAX) {
+            ngx_uint_t rand_idx = rand() % matched_cnt;
+            selected = gs->group_matched_idx[rand_idx];
         }
 
         req->decode_upstream_endpoint_idx = selected;
@@ -880,9 +898,10 @@ void omni_proxy_schedule_decode(omni_global_state_t *gs, ngx_http_omni_loc_conf_
                             "<<<Action: Enter state D scheduled; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
 
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
-                      "[Decode-%d] Schedule to: %d (load=%ui)",
+                      "[Decode-%d] Schedule to: %d (load=%ui, group=%ui)",
                       req->slot_index,
                       req->decode_upstream_endpoint_idx,
-                      gs->decode_states[selected].num_tokens);
+                      gs->decode_states[selected].num_tokens,
+                      gs->decode_states[selected].comm.group_id);
     }
 }
