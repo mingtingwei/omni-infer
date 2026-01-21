@@ -107,7 +107,8 @@ def start_single_node_api_servers(
     chat_template=None,
     tool_parser_plugin=None,
     dtype=None,
-    print_screen = False
+    print_screen = False,
+    reasoning_config=None,
 ):
     """Start multiple VLLM API servers with specified configurations."""
 
@@ -196,6 +197,8 @@ def start_single_node_api_servers(
             cmd.extend(["--tool-parser-plugin", str(tool_parser_plugin)])
         if dtype:
             cmd.extend(["--dtype", str(dtype)])
+        if reasoning_config:
+            cmd.extend(["--reasoning-config", str(reasoning_config)])
 
         logger_path = os.path.join(log_dir, f"server_{rank}.log")
         existed_logger_files = [f for f in glob.glob(logger_path + "*") if re.search(f"server_{rank}\.log(\.\d+)?$", f)]
@@ -361,6 +364,8 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, help="Data type of model")
     parser.add_argument("--print-screen", default=False, action="store_true")
     parser.add_argument("--load-format", type=str, default="auto", help="load format for VLLM")
+    parser.add_argument("--reasoning-config", type=str, default="", help="kv transfer config for VLLM")
+
     args = parser.parse_args()
     if not args.num_dp:
         args.num_dp = args.num_servers
@@ -388,7 +393,7 @@ if __name__ == "__main__":
         max_port_attempts=args.max_port_attempts,
         kv_transfer_config=args.kv_transfer_config,
         max_tokens=args.max_model_len,
-        load_format=args.load_format, 
+        load_format=args.load_format,
         extra_args=args.extra_args,
         additional_config=args.additional_config,
         enable_mtp=args.enable_mtp,
@@ -400,7 +405,8 @@ if __name__ == "__main__":
         chat_template=args.chat_template,
         tool_parser_plugin=args.tool_parser_plugin,
         dtype=args.dtype,
-        print_screen = args.print_screen
+        print_screen = args.print_screen,
+        reasoning_config = args.reasoning_config
     )
 
     # Register SIGINT handler for Ctrl+C

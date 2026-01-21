@@ -1,0 +1,251 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index 506cf9268..1e0f6fbf5 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -4044,6 +4044,43 @@ class CompilationConfig:
+                 "vllm.unified_attention_with_output",
+             ]
+ 
++@config
++@dataclass
++class ReasoningConfig:
++    """Configuration for reasoning models."""
++    thinking_token_budget: int | None = None
++    """Max thinking size."""
++
++    think_start_token_ids: list[int] | None = None
++    """Token ID that indicates the start of reasoning."""
++
++    think_end_token_ids: list[int] | None = None
++    """Token ID that changes the end of reasoning."""
++
++    think_start_str: str | None = None
++    """Token str that indicates the start of reasoning."""
++
++    think_end_str: str | None = None
++    """Token str that changes the end of reasoning."""
++
++    def compute_hash(self) -> str:
++        """
++        WARNING: Whenever a new field is added to this config,
++        ensure that it is included in the factors list if
++        it affects the computation graph.
++
++        Provide a hash that uniquely identifies all the configs
++        that affect the structure of the computation
++        graph from input ids/embeddings to the final hidden states,
++        excluding anything before input ids/embeddings and after
++        the final hidden states.
++        """
++        # no factors to consider.
++        # this config will not affect the computation graph.
++        factors: list[Any] = []
++        hash_str = hashlib.md5(str(factors).encode(),
++                               usedforsecurity=False).hexdigest()
++        return hash_str
+ 
+ @config
+ @dataclass
+@@ -4108,6 +4145,8 @@ class VllmConfig:
+     you are using. Contents must be hashable."""
+     instance_id: str = ""
+     """The ID of the vLLM instance."""
++    reasoning_config: Optional[ReasoningConfig] = None
++    """The reasoning config."""
+ 
+     def compute_hash(self) -> str:
+         """
+@@ -4185,6 +4224,8 @@ class VllmConfig:
+             vllm_factors.append("None")
+         if self.kv_transfer_config:
+             vllm_factors.append(self.kv_transfer_config.compute_hash())
++        if self.reasoning_config:
++            vllm_factors.append(self.reasoning_config.compute_hash())
+         else:
+             vllm_factors.append("None")
+         if self.additional_config:
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index c18cb0dfd..f63c6c5b6 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -28,7 +28,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
+                          PrefixCachingHashAlgo, PromptAdapterConfig,
+                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                          TaskOption, TokenizerMode, TokenizerPoolConfig,
+-                         VllmConfig, get_attr_docs, get_field)
++                         VllmConfig, get_attr_docs, get_field, ReasoningConfig)
+ from vllm.executor.executor_base import ExecutorBase
+ from vllm.logger import init_logger
+ from vllm.model_executor.layers.quantization import QuantizationMethods
+@@ -422,6 +422,7 @@ class EngineArgs:
+ 
+     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+     pt_load_map_location: str = LoadConfig.pt_load_map_location
++    reasoning_config: Optional[ReasoningConfig] = None
+ 
+     def __post_init__(self):
+         # support `EngineArgs(compilation_config={...})`
+@@ -842,6 +843,8 @@ class EngineArgs:
+                                 **vllm_kwargs["compilation_config"])
+         vllm_group.add_argument("--additional-config",
+                                 **vllm_kwargs["additional_config"])
++        vllm_group.add_argument("--reasoning-config",
++                                **vllm_kwargs["reasoning_config"])
+ 
+         # Other arguments
+         parser.add_argument('--use-v2-block-manager',
+@@ -1194,6 +1197,7 @@ class EngineArgs:
+             kv_transfer_config=self.kv_transfer_config,
+             kv_events_config=self.kv_events_config,
+             additional_config=self.additional_config,
++            reasoning_config=self.reasoning_config,
+         )
+ 
+         return config
+diff --git a/vllm/sequence.py b/vllm/sequence.py
+index 50c6b8da4..1e16a6dd2 100644
+--- a/vllm/sequence.py
++++ b/vllm/sequence.py
+@@ -187,23 +187,12 @@ class SequenceData(msgspec.Struct,
+ 
+     # It is used to compute mrope_position_ids.
+     _mrope_position_delta: Optional[int] = None
+-    
++
+     is_think_finished: bool = False
+     is_think_started: bool = False
+-    thinking_budget: int = None
+-    stop_length: int = None
+-    stop_type: str = None
++    thinking_token_budget: int = None
+     seq_id: int = None
+-    prompt: str = None
+-    output_text: str = ""
+-    output_cursor: int = 0
+-    prev_think_checking_pos: int = 0 # record each request checking status
+     cur_seq_length: int = 0 # record each request generation length
+-    subsequences: list = []
+-    reward_scores: dict = {}
+-    reward_in_progress: dict = {}
+-    valid_reasoning_chains: dict = {}
+-    valid_reasoning_in_progress: dict = {}
+ 
+     @staticmethod
+     def from_prompt_token_counts(
+diff --git a/vllm/v1/worker/gpu_input_batch.py b/vllm/v1/worker/gpu_input_batch.py
+index 4ccaa00aa..c9c85f4f6 100644
+--- a/vllm/v1/worker/gpu_input_batch.py
++++ b/vllm/v1/worker/gpu_input_batch.py
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # Datastructures defining an input batch
+-
++import os
+ from dataclasses import dataclass
+ from typing import Optional, cast
+ 
+@@ -18,7 +18,7 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
+ from omni.accelerators.reasoning_compression.config import ThinkCompressDict
+ import array
+ from vllm.sequence import SequenceData
+-
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
+ _SAMPLING_EPS = 1e-5
+ 
+ 
+@@ -243,9 +243,9 @@ class InputBatch:
+         
+         # save req_id to sequence data
+         self.sequence_data: dict[str, SequenceData] = {}
+-        
+-        # patch for thinking budget control for each request. req_index -> thinking_budget
+-        self.thinking_budget: dict[int, int] = {}
++
++        # save reuse prefill token
++        self.reuse_prefill_token = None
+ 
+     @property
+     def req_ids(self) -> list[str]:
+@@ -270,6 +270,10 @@ class InputBatch:
+             self._req_ids[req_index] = req_id
+             self.req_output_token_ids[req_index] = request.output_token_ids
+ 
++        if reuse_prefilled_tokens:
++            if request.sampling_params.extra_args is not None and "kv_transfer_params" in  request.sampling_params.extra_args and request.sampling_params.extra_args['kv_transfer_params'] and "prefilled_token" in request.sampling_params.extra_args['kv_transfer_params']:
++                self.reuse_prefill_token = request.sampling_params.extra_args['kv_transfer_params']['prefilled_token']
++
+         self.req_id_to_index[req_id] = req_index
+ 
+         if request.sampling_params.guided_decoding is not None:
+@@ -336,13 +340,6 @@ class InputBatch:
+             self.top_n_sigma_reqs.add(req_id)
+         else:
+             self.top_n_sigma_cpu[req_index] = -1
+-            
+-        # patch for thinking budget control for each request
+-        if sampling_params.extra_args and "thinking_budget" in sampling_params.extra_args and\
+-            sampling_params.extra_args["thinking_budget"] > 0:
+-            self.thinking_budget[req_index] = sampling_params.extra_args["thinking_budget"]
+-        else:
+-            self.thinking_budget[req_index] = None
+ 
+         # NOTE(woosuk): self.generators should not include the requests that
+         # do not have their own generator.
+@@ -414,7 +411,6 @@ class InputBatch:
+         self.num_logprobs.pop(req_id, None)
+         self.num_prompt_logprobs.pop(req_id, None)
+         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+-        self.thinking_budget.pop(req_index, None)
+         # patch top_n_sigma
+         self.top_n_sigma_reqs.discard(req_id)
+ 
+@@ -467,9 +463,8 @@ class InputBatch:
+             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+             self.min_p_cpu[i2], self.min_p_cpu[i1]
+-            
+-            
+-        swap_dict_values(self.thinking_budget, i1, i2)
++
++
+         # patch top_n_sigma
+         self.top_n_sigma_cpu[i1], self.top_n_sigma_cpu[i2] =\
+             self.top_n_sigma_cpu[i2], self.top_n_sigma_cpu[i1]
+@@ -552,12 +547,8 @@ class InputBatch:
+             self.repetition_penalties_cpu[
+                 empty_index] = self.repetition_penalties_cpu[last_req_index]
+             self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
+-            
+-            thinking_budget = self.thinking_budget.pop(last_req_index, None)
+-            if thinking_budget is not None:
+-                self.thinking_budget[empty_index] = thinking_budget
+-            
+-            # patch top_n_sigma 
++
++            # patch top_n_sigma
+             self.top_n_sigma_cpu[
+                 empty_index] = self.top_n_sigma_cpu[last_req_index]
+                 
+@@ -664,7 +655,7 @@ class InputBatch:
+         
+     def _handle_early_think_stopping(self, num_reqs):
+         all_seq_data = [None] * num_reqs
+-        if ThinkCompressDict.reasoner_early_think_stopping_enabled == 1:
++        if ThinkCompressDict.reasoner_early_think_stopping_enabled:
+             if num_reqs > 0:
+                 max_prompt_len = self.num_prompt_tokens[: self.num_reqs].max()
+                 prompt_token_ids_list = self.token_ids_cpu[:num_reqs, :max_prompt_len].tolist()
+@@ -678,11 +669,12 @@ class InputBatch:
+                                 prompt_token_ids_list[index][: self.num_prompt_tokens[index]],
+                             ),
+                             seq_id=req_id,
+-                            thinking_budget=self.thinking_budget[index]
+                         )
+                         self.sequence_data[req_id] = seq_data
+ 
+                     seq_data._output_token_ids = array.array("l", self.req_output_token_ids[index])
++                    if self.reuse_prefill_token is not None:
++                        seq_data._output_token_ids.extend(self.reuse_prefill_token)
+                     all_seq_data[index] = seq_data
+         return all_seq_data
+ 
