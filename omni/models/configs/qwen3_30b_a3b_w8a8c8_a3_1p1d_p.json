@@ -10,7 +10,7 @@
         "merge_qkv": false,
         "gmm_nz": true,
         "unquant_bmm_nz": true,
-        "enable_c8": true,
+        "enable_c8": false,
         "use_tnd_pa":true,
         "control_accept_rate": -1,
         "enable_prefill_micro_batch": false,
