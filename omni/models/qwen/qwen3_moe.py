@@ -75,7 +75,7 @@ from omni.layers.attention.layer import attention_init_c8
 
 if model_extra_config.operator_opt_config.use_ascend_cloud_ops:
     import ascend_cloud
-    from ascend_cloud_graph import rmsnorm_ops
+    from ascend_cloud_graph import rmsnorm_rope
 
 logger = init_logger(__name__)
 SEQ_SPLIT_LENGTH = 4096
