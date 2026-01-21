@@ -230,6 +230,18 @@ class NPUWorker(WorkerBase):
             enable_attn_ffn_disaggregation=enable_attn_ffn_disaggregation,
             low_latency=low_latency
         )
+        
+        if model_extra_config.parall_config.attn_sp_size > 1 and model_extra_config.operator_opt_config.use_mlaprolog:
+            sp_size = model_extra_config.parall_config.attn_sp_size
+            processed_gear_list = []
+            for value in self.decode_gear_list:
+                if sp_size > 1 and value % sp_size != 0:
+                    value = ((value + sp_size - 1) // sp_size) * sp_size
+                processed_gear_list.append(value)
+            self.decode_gear_list = sorted(list(set(processed_gear_list)))
+            model_extra_config.task_config.decode_gear_list = self.decode_gear_list
+            self.vllm_config.npu_compilation_config.decode_gear_list = self.decode_gear_list
+            logger.info(f"Final task_config decode gear list: {self.decode_gear_list}")
     
     def _init_omni_placement_configs(self)-> None:
         if self.vllm_config.additional_config is None:

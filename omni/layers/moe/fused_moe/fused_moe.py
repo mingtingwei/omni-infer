@@ -17,7 +17,8 @@ from vllm.forward_context import get_forward_context
 from vllm.distributed import (
     get_world_group,
     get_dp_group,
-    get_ep_group
+    get_ep_group,
+    get_tensor_model_parallel_rank
 )
 from omni.models.config_loader.loader import model_extra_config
 
@@ -971,6 +972,12 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
         
         if model_extra_config.task_config.enable_attn_ffn_disaggregation and global_rank < ffn_dies:
             mc2_mask = torch.zeros([hidden_states.shape[0]], dtype=torch.bool, device=hidden_states.device)
+
+        sp_size = model_extra_config.parall_config.attn_sp_size
+        if sp_size > 1 and model_extra_config.operator_opt_config.use_mlaprolog:
+            cur_rank = get_tensor_model_parallel_rank()
+            split_size = mc2_mask.size(0) // sp_size
+            mc2_mask = torch.split(mc2_mask, split_size, dim=0)[cur_rank % sp_size]
 
         kwargs.update({
             "scales": None,  # Quantization coefficient

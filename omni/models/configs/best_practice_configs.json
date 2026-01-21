@@ -294,6 +294,16 @@
       "decode_config_file": "ds_v3.2_w8a8c16_a2_1p1d_d.json"
    },
    {
+      "model": "deepseek_v32",
+      "hardware": "A3",
+      "precision": "w8a8",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": false,
+      "prefill_config_file": "ds_v3.2_w8a8_a3_hybrid.json",
+      "decode_config_file": "ds_v3.2_w8a8_a3_hybrid.json"
+   },
+   {
       "model": "kimi-k2",
       "hardware": "A3",
       "precision": "w4a8",

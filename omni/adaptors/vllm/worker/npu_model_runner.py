@@ -311,6 +311,16 @@ class NPUModelRunner(GPUModelRunner):
         if self.decode_gear_list is None:
             self.decode_gear_list = []
             self.decode_gear_list.append(self.max_batch_size)
+        if model_extra_config.parall_config.attn_sp_size > 1 and model_extra_config.operator_opt_config.use_mlaprolog:
+            sp_size = model_extra_config.parall_config.attn_sp_size
+            processed_gear_list = []
+            for value in self.decode_gear_list:
+                if sp_size > 1 and value % sp_size != 0:
+                    value = ((value + sp_size - 1) // sp_size) * sp_size
+                processed_gear_list.append(value)
+            self.decode_gear_list = sorted(list(set(processed_gear_list)))
+            if len(self.decode_gear_list) == 1:
+                self.max_batch_size = self.decode_gear_list[0]
 
     def _calc_spec_decode_metadata_same_num(
         self,
@@ -539,7 +549,7 @@ class NPUModelRunner(GPUModelRunner):
                 raise RuntimeError("num_reqs is bigger than max_batch_size")
             graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
         elif self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill:
-            graph_pad_size = self.max_batch_size - total_num_scheduled_tokens    
+            graph_pad_size = self.max_batch_size - total_num_scheduled_tokens
         else:
             # The reduce_scatter in the TP communication domain after embedding, P goes through this
             graph_pad_size = _get_pad_size(num_input_tokens)
@@ -603,7 +613,7 @@ class NPUModelRunner(GPUModelRunner):
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
 
-        if model_extra_config.parall_config.attn_sp_size > 1:
+        if model_extra_config.parall_config.attn_sp_size > 1 and attn_state != AscendAttentionState.DecodeOnly:
             sp_size = model_extra_config.parall_config.attn_sp_size * 2
             cu_num_tokens = np.empty_like(num_scheduled_tokens)
             cu_num_tokens[0] = num_scheduled_tokens[0]

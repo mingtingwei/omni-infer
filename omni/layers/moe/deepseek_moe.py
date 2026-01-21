@@ -39,6 +39,7 @@ from vllm.distributed import (
     get_pp_group,
     get_dp_group,
     get_world_group,
+    get_tensor_model_parallel_rank
 )
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
@@ -644,6 +645,11 @@ class DeepseekMoE(nn.Module):
 
         best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
         mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        sp_size = model_extra_config.parall_config.attn_sp_size
+        if sp_size > 1:
+           cur_rank = get_tensor_model_parallel_rank()
+           split_size = mc2_mask.size(0) // sp_size
+           mc2_mask = torch.split(mc2_mask, split_size, dim=0)[cur_rank % sp_size]
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
 
         layer = self.experts

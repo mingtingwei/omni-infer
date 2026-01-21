@@ -396,14 +396,14 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         return torch.Tensor(cur_topk_list).to(dtype=torch.int32, device=current_platform.device_type, non_blocking=True).view(batch_size // world_size, -1)
 
     def _get_graph_runner_block_tables(
-            self, num_decode_tokens: int, block_tables: torch.Tensor) -> torch.Tensor:
+            self, num_decode_tokens: int, block_tables: torch.Tensor, total_tokens:int) -> torch.Tensor:
 
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
         if max_batch_size < num_decode_tokens:
             raise RuntimeError("max_batch_size must be greater than or equal to num_decode_tokens")
 
         if isinstance(self.runner.graph_block_tables, np.ndarray):
-            graph_block_tables = torch.zeros((max_batch_size, max_blocks),
+            graph_block_tables = torch.zeros((total_tokens, max_blocks),
                                              dtype=block_tables.dtype,
                                              device=block_tables.device)
         else:
@@ -699,7 +699,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                                             device=block_table.device)],
                                         dim=0)
                 block_table = self._get_graph_runner_block_tables(
-                    self._num_decode_tokens, block_table)
+                    self._num_decode_tokens, block_table, num_actual_tokens + graph_pad_size)
 
                 self.generate_activate_mask(num_actual_tokens, num_actual_tokens + graph_pad_size)
                 first_layer_ind = self.runner.model.model.start_layer

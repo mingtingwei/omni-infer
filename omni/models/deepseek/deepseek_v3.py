@@ -262,11 +262,26 @@ class DeepseekDecoderLayer(nn.Module):
             residual = torch.cat(residual_out)[:local_length]
         else:
             if self.is_moe == True:
+                # Split hidden_states by global rank, ensure divisible by sp_size
+                sp_size = model_extra_config.parall_config.attn_sp_size
+                if sp_size > 1 and not is_prefill:
+                    current_rank = get_tensor_model_parallel_rank()
+                    split_size = hidden_states.size(0) // sp_size
+                    hidden_states = torch.split(hidden_states, split_size, dim=0)[current_rank % sp_size]
+                    if residual is not None:
+                        residual = torch.split(residual, split_size, dim=0)[current_rank % sp_size]
+
                 # omni placement do not support super kernel
                 hidden_states, residual = self.mlp(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
                 if isinstance(hidden_states, (tuple, list)):
                     assert len(hidden_states) == 2
                     hidden_states = hidden_states[0] + hidden_states[1]
+
+                # Restore hidden_states after sp_size split
+                if sp_size > 1 and not is_prefill:
+                    hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+                    if residual is not None:
+                        residual = tensor_model_parallel_all_gather(residual, dim=0)
             elif self.is_ffn_die:
                 pass
             else:
@@ -523,12 +538,14 @@ class DeepseekV3Model(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
             hidden_states = self.norm(hidden_states)
+            
+        if is_prefill:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         if model_extra_config.operator_opt_config.use_prefetch and lm_head is not None:
             torch_npu.npu_prefetch(lm_head.weight, hidden_states, model_extra_config.operator_opt_config.lm_head_prefetch * 1024 * 1024)
 
-        if model_extra_config.parall_config.attn_sp_size > 1 and attn_metadata_first is not None:
+        if model_extra_config.parall_config.attn_sp_size > 1 and attn_metadata_first is not None and is_prefill:
             # reverse sp split
             prefill_meta = attn_metadata_first.prefill
             outputs_list = torch.split(hidden_states, prefill_meta.sp_reverse_split_list, dim=0)

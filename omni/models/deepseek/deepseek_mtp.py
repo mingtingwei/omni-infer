@@ -128,7 +128,8 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
         is_prefill = attn_metadata is None or (isinstance(attn_metadata, dict) and self.get_layer_attn_metadata(attn_metadata).prefill is not None)
         if is_prefill and model_extra_config.parall_config.attn_sp_size > 1:
             # split input for sp attention
-            tok_embeds = tensor_model_parallel_all_gather(tok_embeds, dim=0)
+            if not model_extra_config.operator_opt_config.use_mlaprolog:
+               tok_embeds = tensor_model_parallel_all_gather(tok_embeds, dim=0)
             tok_embeds = generate_sp_inputs(tok_embeds, self.get_layer_attn_metadata(attn_metadata))
             previous_hidden_states = generate_sp_inputs(previous_hidden_states, self.get_layer_attn_metadata(attn_metadata))
 
@@ -161,8 +162,9 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
             hidden_states, _ = self.shared_head.norm(encoded_states, residual)
         else:
             hidden_states = self.shared_head.norm(encoded_states)
-
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        
+        if is_prefill:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
             # reverse sp split
@@ -179,7 +181,10 @@ class DeepseekMultiTokenPredictorLayer(DeepseekDecoderLayer):
         return logits, hidden_states
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids, reduce=1)
+        reduce = 1
+        if model_extra_config.operator_opt_config.use_mlaprolog and model_extra_config.parall_config.attn_sp_size > 1:
+            reduce = 0
+        return self.embed_tokens(input_ids, reduce=reduce)
 
     def get_layer_attn_metadata(self, attn_metadata):
         if attn_metadata is None:

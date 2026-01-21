@@ -203,7 +203,7 @@ class Indexer(nn.Module):
         else:
             cos, sin = attn_metadata.decode.cos, attn_metadata.decode.sin
 
-        if model_extra_config.parall_config.attn_sp_size > 1:
+        if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
             cos_q, sin_q = attn_metadata.prefill.cos_q, attn_metadata.prefill.sin_q
         else:
             cos_q, sin_q = cos, sin
@@ -218,7 +218,7 @@ class Indexer(nn.Module):
             q_rope_mini = torch_npu.npu_rotary_mul(q_rope_mini, cos_q, sin_q)
             q_rope_mini = q_rope_mini.squeeze(2)
 
-            if model_extra_config.parall_config.attn_sp_size > 1:
+            if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
                 q_nope_mini, q_nope_mini_2 = torch.split(q_nope_mini, q_nope_mini.size(0) // 2, dim=0)
                 q_rope_mini, q_rope_mini_2 = torch.split(q_rope_mini, q_rope_mini.size(0) // 2, dim=0)
                 q_mini_2 = torch.cat([q_rope_mini_2, q_nope_mini_2], dim=-1)
@@ -227,8 +227,9 @@ class Indexer(nn.Module):
 
         kw = self.wk(x)[0]  # [b*s,7168] @ [7168,128] = [b*s,128]
         k_mini = self.k_norm(kw).unsqueeze(1)
-        k_mini = mla_tensor_model_parallel_all_gather(k_mini, dim=0)
-        if model_extra_config.parall_config.attn_sp_size > 1:
+        if is_prefill:
+           k_mini = mla_tensor_model_parallel_all_gather(k_mini, dim=0)
+        if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
             k_list = torch.split(k_mini, attn_metadata.prefill.sp_reverse_split_list, dim=0)
             k_mini = torch.cat([k_list[i] for i in attn_metadata.prefill.sp_reverse_index], dim=0)
         k_mini_rope, k_mini_nope = torch.split(k_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64+64]
@@ -249,7 +250,7 @@ class Indexer(nn.Module):
                 q_mini = self.apply_hadamard(q_mini)
                 q_mini, query_dequant_scale = torch_npu.npu_dynamic_quant(q_mini)
                 query_dequant_scale = query_dequant_scale.type(torch.float16)
-                if model_extra_config.parall_config.attn_sp_size > 1:
+                if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
                     q_mini_2 = self.apply_hadamard(q_mini_2)
                     q_mini_2, query_dequant_scale_2 = torch_npu.npu_dynamic_quant(q_mini_2)
                     query_dequant_scale_2 = query_dequant_scale_2.type(torch.float16)
@@ -281,13 +282,13 @@ class Indexer(nn.Module):
             if model_extra_config.parall_config.attn_sp_size == 1:
                 x = tensor_model_parallel_all_gather(x, dim=0)
             weights = self.weights_proj(x)[0]
-            if model_extra_config.parall_config.attn_sp_size > 1:
+            if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
                 weights, weights_2 = torch.split(weights, weights.size(0) // 2, dim=0)
 
         topk_indices = self._apply_lightning_indexer(q_mini, weights, attn_metadata, kv_cache, is_prefill, False, query_dequant_scale, key_dequant_scale)
 
         topk_indices_2 = None
-        if model_extra_config.parall_config.attn_sp_size > 1:
+        if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
             topk_indices_2 = self._apply_lightning_indexer(q_mini_2, weights_2, attn_metadata, kv_cache, is_prefill, True, query_dequant_scale_2, key_dequant_scale)
 
         return topk_indices, topk_indices_2, k_mini
@@ -666,9 +667,13 @@ class DeepseekMLA(nn.Module):
             output = self._forward_decode(positions, hidden_states, kv_cache, attn_metadata)
         if model_extra_config.operator_opt_config.use_mlaprolog and not self.is_mla_prolog_init:
             self.is_mla_prolog_init = True
-            self.q_a_proj.weight = self._process_mla_prolog_weight(self.q_a_proj.weight)
-            self.q_b_proj.weight = self._process_mla_prolog_weight(self.q_b_proj.weight)
-            self.kv_a_proj_with_mqa.weight = self._process_mla_prolog_weight(self.kv_a_proj_with_mqa.weight)
+            if model_extra_config.parall_config.attn_sp_size > 1:
+                self.q_a_proj_weight_copy = self._process_hybrid_mla_prolog_weight(self.q_a_proj.weight)
+                self.kv_a_proj_with_mqa_weight_copy = self._process_hybrid_mla_prolog_weight(self.kv_a_proj_with_mqa.weight)
+            else:
+                self.q_a_proj.weight = self._process_mla_prolog_weight(self.q_a_proj.weight)
+                self.q_b_proj.weight = self._process_mla_prolog_weight(self.q_b_proj.weight)
+                self.kv_a_proj_with_mqa.weight = self._process_mla_prolog_weight(self.kv_a_proj_with_mqa.weight)
         return output
 
     def _process_mla_prolog_weight(self, weight):
@@ -678,6 +683,13 @@ class DeepseekMLA(nn.Module):
         weight = torch.nn.Parameter(weight.transpose(0, 1).contiguous(), requires_grad = False)
         weight.data = torch_npu.npu_format_cast(weight.data, 29)
         return weight
+    
+    def _process_hybrid_mla_prolog_weight(self, weight):
+        if weight.dtype == torch.int8:
+            return weight
+        new_wight = torch.nn.Parameter(weight.transpose(0, 1).contiguous(), requires_grad = False)
+        new_wight.data = torch_npu.npu_format_cast(new_wight.data, 29)
+        return new_wight
 
     def _forward_prefill_absorb(
         self,
@@ -1078,12 +1090,17 @@ class DeepseekMLA(nn.Module):
         dequant_scale_q_norm = None
         if model_extra_config.operator_opt_config.enable_dsa or model_extra_config.operator_opt_config.use_omni_cache:
             cache_mode = "PA_BSND"
+            dq_wight = self.q_a_proj.weight
+            dkv_kr_weight = self.kv_a_proj_with_mqa.weight
+            if model_extra_config.parall_config.attn_sp_size > 1:
+                dq_wight = self.q_a_proj_weight_copy
+                dkv_kr_weight = self.kv_a_proj_with_mqa_weight_copy
             q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
                 token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
-                weight_dq=self.q_a_proj.weight,
+                weight_dq=dq_wight,
                 weight_uq_qr=self.q_b_proj.weight,
                 weight_uk=self.W_UK,
-                weight_dkv_kr=self.kv_a_proj_with_mqa.weight,
+                weight_dkv_kr=dkv_kr_weight,
                 rmsnorm_gamma_cq=self.q_a_layernorm.weight,
                 rmsnorm_gamma_ckv=self.kv_a_layernorm.weight,
                 rope_sin=sin.squeeze(1),
@@ -1143,7 +1160,8 @@ class DeepseekMLA(nn.Module):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        if not model_extra_config.operator_opt_config.use_mlaprolog or model_extra_config.parall_config.attn_sp_size <= 1:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         nope_cache = kv_cache[0]
         rope_cache = kv_cache[1]
 
