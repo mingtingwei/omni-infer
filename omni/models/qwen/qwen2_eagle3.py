@@ -216,10 +216,15 @@ class Eagle3Qwen2ForCausalLM(Qwen2ForCausalLM, GraphCompileConfiguration):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
         self.target_layer_num = target_layer_num
+
+        draft_model_config = vllm_config. \
+            speculative_config.draft_model_config
+        quant_config = VllmConfig._get_quantization_config(draft_model_config, vllm_config.load_config)
+
         self.model = Eagle3Qwen2Model(
             config=self.config,
             cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
                                 prefix="model",
                                 start_layer_id=target_layer_num)
 
