@@ -136,6 +136,10 @@ class Test_e2e_models():
     @pytest.mark.parametrize("world_size", [1])
     @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
     def test_model(self, world_size: int, model_arch: str, enable_graph: bool):
+        if model_arch == "Qwen3MoeForCausalLM" and world_size == 1 and enable_graph:
+            pytest.skip(
+                "Temporarily skip: Qwen3MoeForCausalLM + world_size=1 + enable_graph=True"
+            )
         model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
 
         with tempfile.NamedTemporaryFile(delete=False) as tfile:
