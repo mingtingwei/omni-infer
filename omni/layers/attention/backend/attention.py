@@ -419,12 +419,12 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
 
         is_pd_seperate_d = self.runner.vllm_config.kv_transfer_config is not None and \
                            self.runner.vllm_config.kv_transfer_config.kv_role == 'kv_consumer'
-        if os.getenv('ROLE',None)=='prefill':
-            query_lens_list=query_lens.tolist()
-            seq_lens_list=seq_lens.tolist()
-        else:
+        if is_pd_seperate_d:
             query_lens_list=None
             seq_lens_list=None
+        else:
+            query_lens_list=query_lens.tolist()
+            seq_lens_list=seq_lens.tolist()
 
         attn_metadata = AscendMetadata(num_actual_tokens=num_actual_tokens,
                                        block_tables=block_table,
