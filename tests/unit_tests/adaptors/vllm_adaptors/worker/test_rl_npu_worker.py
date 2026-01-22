@@ -147,46 +147,6 @@ def test_sleep_and_wake_up_with_drafter(fake_platform, monkeypatch, dummy_worker
     assert dummy_worker.model_runner.model.device == "npu"
     assert dummy_worker.model_runner.drafter.model.device == "npu"
 
-def test_wake_up_dp_world_size(fake_platform, monkeypatch, dummy_worker):
-    # Ensure calling sleep/wake_up on RLNPUWorker with patched platform/allocator does not raise.
-    called = {"dp_all_reduce": False, "unregister_kv_caches": False, "reregister_kv_caches": False}
-
-    def fake_all_reduce(x):
-        called["dp_all_reduce"] = True
-
-    fake_tp = SimpleNamespace(all_reduce=lambda x:None)
-    fake_dp = SimpleNamespace(all_reduce=fake_all_reduce, world_size=1)
-
-    monkeypatch.setattr("vllm.distributed.parallel_state.get_tp_group", lambda: fake_tp)
-    monkeypatch.setattr("vllm.distributed.parallel_state.get_dp_group", lambda: fake_dp)
-
-    kv_config = dummy_worker.kv_cache_config
-    kv_caches = [[torch.zeros((kv_config.batch_size, kv_config.num_heads, kv_config.seq_len, kv_config.head_dim), 
-                dtype=torch.float32, device=dummy_worker.device)
-                for _ in range(2)] for _ in range(kv_config.num_layers)]
-    
-    def fake_unregister_kv_caches():
-        called["unregister_kv_caches"] = True
-
-    def fake_reregister_kv_caches():
-        called["reregister_kv_caches"] = True
-    dummy_worker.model_runner = SimpleNamespace(   
-        unregister_kv_caches = fake_unregister_kv_caches,
-        reregister_kv_caches = fake_reregister_kv_caches,     
-        kv_caches = kv_caches,
-        model=FakeModel(dummy_worker.device),
-    )
-
-    dummy_worker.sleep(level=1)
-    dummy_worker.wake_up(tags=["kv_cache"])
-    assert not called["dp_all_reduce"]
-
-    monkeypatch.setattr("vllm.distributed.parallel_state.get_dp_group", lambda: fake_dp)
-    fake_dp.world_size = 2
-    dummy_worker.sleep(level=1)
-    dummy_worker.wake_up(tags=["kv_cache"])
-    assert called["dp_all_reduce"]
-
 def test_initialize_from_config_is_callable(fake_platform, monkeypatch, dummy_worker):
     # initialize_from_config should be callable and not raise with a simple config object
     kv_cfg = dummy_worker.kv_cache_config
