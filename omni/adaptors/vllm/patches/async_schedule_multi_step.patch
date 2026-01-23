@@ -145,6 +145,15 @@ index 4c6b3eea0..5d297ff1a 100644
  
              # Extract sample logprobs if needed.
              if request.sampling_params.logprobs is not None and logprobs:
+@@ -890,7 +900,7 @@ class Scheduler(SchedulerInterface):
+ 
+     def _free_blocks(self, request: Request):
+         assert request.is_finished()
+-        assert request.request_id not in self._cached_reqs_data
++
+         self.kv_cache_manager.free(request)
+         self.kv_cache_manager.free_block_hashes(request)
+         del self.requests[request.request_id]
 @@ -929,7 +939,7 @@ class Scheduler(SchedulerInterface):
          if not self.log_stats:
              return None
@@ -275,17 +284,17 @@ index 740ba60fe..75b284f03 100644
 +            for each_cached_req in self.cur_batch.scheduled_cached_reqs:
 +                if each_cached_req.req_id in output.req_ids:
 +                    req_idx = output.req_id_to_index[each_cached_req.req_id]
-+                    new_tokens = output.sampled_token_ids[-1][req_idx]
++                    new_tokens = output.sampled_token_ids[req_idx]
 +                    spec_tokens = None
 +                    len_spec_tokens = 0
-+                    if output.spec_token_ids is not None and output.spec_token_ids[-1] is not None:
-+                        spec_tokens = output.spec_token_ids[-1][req_idx]
++                    if output.spec_token_ids is not None:
++                        spec_tokens = output.spec_token_ids[req_idx]
 +                        len_spec_tokens = len(spec_tokens)
 +                    if len(each_cached_req.new_token_ids) != self.cur_batch.num_scheduled_tokens[each_cached_req.req_id]:
 +                        self.cur_batch.total_num_scheduled_tokens = self.cur_batch.total_num_scheduled_tokens - self.cur_batch.num_scheduled_tokens[each_cached_req.req_id] + len(new_tokens[-1:]) + len_spec_tokens
 +                        self.cur_batch.num_scheduled_tokens[each_cached_req.req_id] = len(new_tokens[-1:]) + len_spec_tokens
 +                        each_cached_req.new_token_ids = new_tokens[-1:]
-+                        actual_computed_tokens = len(output.sampled_token_ids[0][req_idx])
++                        actual_computed_tokens = len(output.sampled_token_ids[req_idx])
 +                        each_cached_req.num_computed_tokens =  \
 +                            each_cached_req.num_computed_tokens + actual_computed_tokens \
 +                            - self.last_batch.num_scheduled_tokens[each_cached_req.req_id] * self.step_num

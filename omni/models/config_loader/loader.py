@@ -310,23 +310,33 @@ def _load_best_practice_config():
 
 
 def _get_best_practice_config(task_config):
-    config_map, node_elasticly_config_map, afd_config_map, low_latency_map = _load_best_practice_config()
-
-    if task_config.enable_attn_ffn_disaggregation:
-        best_practice_model_config_path = afd_config_map.get((task_config.model_name,
-            task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
-            task_config.prefill_node_num,task_config.decode_node_num), None)
-    elif task_config.low_latency:
-        best_practice_model_config_path = low_latency_map.get((task_config.model_name,
-            task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
-            task_config.prefill_node_num,task_config.decode_node_num), None)
-    elif not task_config.enable_pd_elastic_scaling:
-        best_practice_model_config_path = config_map.get((task_config.model_name,
-            task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
-            task_config.prefill_node_num,task_config.decode_node_num), None)
+    best_practice_model_config_path = os.environ.get("BEST_PRATICE_MODEL_CONFIG_PATH", None)
+    if best_practice_model_config_path:
+        logger.info(f"Get best_practice_model_config_path from environ")
+        # load best_pratice_model_config_path from os.environ
+        best_practice_model_config_path = json.loads(best_practice_model_config_path)
+        best_practice_model_config_path = [best_practice_model_config_path["prefill_config_file"],
+                                           best_practice_model_config_path["decode_config_file"]]
     else:
-        best_practice_model_config_path = node_elasticly_config_map.get((task_config.model_name,
-            task_config.hardware_platform, task_config.quant_type, task_config.enable_pd_elastic_scaling), None)
+        config_map, node_elasticly_config_map, afd_config_map, low_latency_map = _load_best_practice_config()
+
+        if task_config.enable_attn_ffn_disaggregation:
+            best_practice_model_config_path = afd_config_map.get((task_config.model_name,
+                task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
+                task_config.prefill_node_num,task_config.decode_node_num), None)
+        elif task_config.low_latency:
+            best_practice_model_config_path = low_latency_map.get((task_config.model_name,
+                task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
+                task_config.prefill_node_num,task_config.decode_node_num), None)
+        elif not task_config.enable_pd_elastic_scaling:
+            best_practice_model_config_path = config_map.get((task_config.model_name,
+                task_config.hardware_platform, task_config.quant_type, task_config.is_pd_disaggregation,
+                task_config.prefill_node_num,task_config.decode_node_num), None)
+        else:
+            best_practice_model_config_path = node_elasticly_config_map.get((task_config.model_name,
+                task_config.hardware_platform, task_config.quant_type, task_config.enable_pd_elastic_scaling), None)
+            
+        logger.info(f"Get best_practice_model_config_path from best_practice_configs.json")
     
     task_info = f'{task_config.model_name}_{task_config.quant_type}_{task_config.hardware_platform}'
     if best_practice_model_config_path:
