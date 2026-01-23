@@ -578,6 +578,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.use_tnd_pa = model_extra_config.operator_opt_config.use_tnd_pa
         self.kv_stream = kv_stream
 
+        self.sink_kv_need_cache = True
+
     def forward(self, *args, **kwargs):
         # adapted for Gpt-oss
         if self.attn_sinks is not None:
@@ -1388,7 +1390,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )         
 
         # Store sink kv in block 0 (kv cache starts from block 1 and slots 128)
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or (not self.is_hybrid_chunked_prefill_graph_mode and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill):
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and self.sink_kv_need_cache:
             slots = torch.arange(0, 128, device=sink_key.device, dtype=torch.int32)
             torch_npu.npu_scatter_pa_kv_cache(
                 sink_key,
@@ -1396,7 +1398,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 kv_cache[0],
                 kv_cache[1],
                 slots
-            )        
+            )
+            # Since block 0 will not be overwritten or released, it only needs to be stored once.
+            self.sink_kv_need_cache = False
 
         block_size = self.value_cache.shape[-2]
         num_batch = attn_metadata.query_lens.shape[0]

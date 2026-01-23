@@ -756,7 +756,7 @@
    {
       "model": "pangu_pro_moe_v2",
       "hardware": "A3",
-      "precision": "bf16",
+      "precision": "w8a8",
       "prefill_node_num": 1,
       "decode_node_num": 1,        
       "pd_disaggregation": false,
@@ -782,6 +782,66 @@
       "pd_disaggregation": true,
       "prefill_config_file": "pangu_pro_moe_v2_a3_2p1d_p.json",
       "decode_config_file": "pangu_pro_moe_v2_a3_2p1d_d.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "bf16",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": false,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_hybrid.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_hybrid.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "bf16",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": true,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_2p1d_p.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_2p1d_d.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "bf16",
+      "prefill_node_num": 2,
+      "decode_node_num": 1,        
+      "pd_disaggregation": true,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_2p1d_p.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_2p1d_d.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "w8a8",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": false,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_hybrid.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_hybrid.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "w8a8",
+      "prefill_node_num": 1,
+      "decode_node_num": 1,        
+      "pd_disaggregation": true,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_2p1d_p.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_2p1d_d.json"
+   },
+   {
+      "model": "pangu_pro_moe_v2",
+      "hardware": "A2",
+      "precision": "w8a8",
+      "prefill_node_num": 2,
+      "decode_node_num": 1,        
+      "pd_disaggregation": true,
+      "prefill_config_file": "pangu_pro_moe_v2_a2_2p1d_p.json",
+      "decode_config_file": "pangu_pro_moe_v2_a2_2p1d_d.json"
    },
    {
       "model": "qwen3",

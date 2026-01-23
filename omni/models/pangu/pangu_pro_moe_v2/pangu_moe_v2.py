@@ -161,15 +161,23 @@ class CustomQKVRearrangeColumnParallelLinear(ColumnParallelFlashCommLinear):
             assert k_origin_dim % tp_size == 0, f"tp_size is not correct. tp_size {tp_size} must be divisible by k_origin_dim {k_origin_dim}"
             assert v_origin_dim % tp_size == 0, f"tp_size is not correct. tp_size {tp_size} must be divisible by v_origin_dim {v_origin_dim}"
 
-            q_weight = q_weight.reshape(tp_size, q_origin_dim//tp_size, -1)
-            k_weight = k_weight.reshape(tp_size, k_origin_dim//tp_size, -1)
-            v_weight = v_weight.reshape(tp_size, v_origin_dim//tp_size, -1)
+            index_factor = 1
+            if (tp_size > num_kv_heads):
+                assert tp_size % num_kv_heads == 0, f"tp_size is not correct. tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
+                index_factor = tp_size // num_kv_heads
+                q_weight = q_weight.reshape(tp_size, q_origin_dim//tp_size, -1)
+                k_weight = k_weight.reshape(num_kv_heads, k_origin_dim//num_kv_heads, -1)
+                v_weight = v_weight.reshape(num_kv_heads, v_origin_dim//num_kv_heads, -1)
+            else:
+                q_weight = q_weight.reshape(tp_size, q_origin_dim//tp_size, -1)
+                k_weight = k_weight.reshape(tp_size, k_origin_dim//tp_size, -1)
+                v_weight = v_weight.reshape(tp_size, v_origin_dim//tp_size, -1)
 
             loaded_weight_rearrange = []
             for i in range(tp_size):
                 loaded_weight_rearrange.append(q_weight[i])
-                loaded_weight_rearrange.append(k_weight[i])
-                loaded_weight_rearrange.append(v_weight[i])
+                loaded_weight_rearrange.append(k_weight[i // index_factor])
+                loaded_weight_rearrange.append(v_weight[i // index_factor])
 
             loaded_weight_rearrange = torch.cat(loaded_weight_rearrange, dim=0)
 
@@ -418,6 +426,16 @@ class PanguProMoEV2Attention(nn.Module):
             prefix=f"{prefix}.o_proj"
         )
 
+        self.a2a_o_proj = RowParallelFlashCommLinear(
+            self.total_num_heads * self.v_channels,
+            self.hidden_size,
+            tp_size=1,
+            tp_rank=0,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj"
+        )
+
         if rope_scaling is None:
             rope_scaling = {'factor': '0'}
         rope_scaling["rope_type"] = 'pangu_pro_moe'
@@ -504,8 +522,8 @@ class PanguProMoEV2Attention(nn.Module):
         sink_pad_params: Optional[dict] = None,
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
+        is_prefill = False
     ) -> torch.Tensor:
-        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
         qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill=is_prefill)
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
 
@@ -540,16 +558,25 @@ class PanguProMoEV2Attention(nn.Module):
         )
 
         attn_output = attn_output.reshape(-1, self.num_heads * self.v_channels)
-        output, _ = self.o_proj(attn_output, reduce_type="RS")
+        # Adapt for Prefill
+        if is_prefill and model_extra_config.operator_opt_config.prefill_enable_mla_alltoall:
+            attn_output = get_tp_group().all_to_all(attn_output)
+            output, _ = self.a2a_o_proj(attn_output)
+        else:
+            output, _ = self.o_proj(attn_output, reduce_type="RS")
+
         return output
 
 class PanguProMoEV2MoEBlock(DeepseekMoE):
 
     def __init__(
         self,
+        vllm_config,
         *args,
         **kwargs    
     ) -> None:
+        self.enable_torchair_graph_mode = (
+            vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
         super().__init__(*args, **kwargs)
     
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None, is_hybrid_chunked_prefill_graph_mode=False) -> torch.Tensor:
@@ -567,9 +594,10 @@ class PanguProMoEV2MoEBlock(DeepseekMoE):
 
         if is_prefill:
             return self._forward_prefill_norm(hidden_states, residual, attn_metadata, layer_id)
+        elif self.is_A2:
+            return self._forward_decode_ag_rs(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
         else:
             return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
-    
 
     def _forward_decode_dispatch_combine(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         # when hybrid DP>1, Prefill and Decode must take the same branch.
@@ -798,6 +826,196 @@ class PanguProMoEV2MoEBlock(DeepseekMoE):
 
         return final_hidden_states, residual
 
+    def _forward_decode_ag_rs(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
+        
+        hidden_states_float = hidden_states.float()
+        act_dtype = hidden_states.dtype
+        router_logits, _ = self.gate.forward(hidden_states_float)
+        # Here, we do a 2D to 3D conversion, and then convert back to 2D to trigger
+        # the fusion rule, fusing add rms and cast into AddRmsNormCast.
+        hidden_states_3d = hidden_states.unsqueeze(1)
+        hidden_states = hidden_states_3d.squeeze(1)
+
+        if self.enable_torchair_graph_mode:
+            if self.quant_symbol:
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    hidden_states = tng.scope.npu_wait_tensor(hidden_states, hidden_states_float)
+                    hidden_states_int8, hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                    hidden_states_quant = {"x_int8": hidden_states_int8, "pertoken_scale": hidden_states_scale}
+
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    hidden_states_int8 = tng.scope.npu_wait_tensor(hidden_states_int8, router_logits)
+                    # shared_experts w13
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states_quant)
+            else:
+                with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                    hidden_states = tng.scope.npu_wait_tensor(hidden_states, hidden_states_float)
+                    # shared_experts w13
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states)
+            
+            wait_gate = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
+            
+            # expert weight prefetch
+            if self.w13_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w13_weight, wait_gate, self.w13_prefetch_size)
+            if self.w2_prefetch_size > 0:
+                torch_npu.npu_prefetch(self.experts.w2_weight, wait_gate, self.w2_prefetch_size)
+        else:
+            if self.quant_symbol:
+                hidden_states_int8, hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            shared_output = self.shared_experts(hidden_states)
+
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+            hidden_states, 
+            router_logits,
+            self.experts.top_k,
+            self.experts.use_grouped_topk,
+            self.experts.renormalize,
+            self.experts.topk_group,
+            self.experts.num_expert_group,
+            self.experts.custom_routing_function,
+            self.experts.scoring_func,
+            self.e_score_correction_bias,
+            self.routed_scaling_factor,
+            layer=self.experts  # ENABLE_OMNI_PLANNER
+            )
+
+        # All gather hidden_states for TP before MoE computation
+        # hidden_states is reduced-scattered from attention layer, need to gather for gate and experts
+        if self.quant_symbol:
+            global_hidden_states = get_ep_group().all_gather(hidden_states_int8, dim=0)
+            global_hidden_states_scale = get_ep_group().all_gather(hidden_states_scale, dim=0)
+        else:
+            global_hidden_states = get_ep_group().all_gather(hidden_states, dim=0)
+            global_hidden_states_scale = None
+        topk_weights = get_ep_group().all_gather(topk_weights, dim=0)
+        topk_ids = get_ep_group().all_gather(topk_ids, dim=0)
+        
+        num_deployed_expert_per_rank =  self.n_routed_experts // get_ep_group().world_size
+        experts_start_idx = (get_ep_group().rank_in_group) * num_deployed_expert_per_rank  # ENABLE_OMNI_PLANNER
+        experts_end_idx = experts_start_idx + num_deployed_expert_per_rank
+        expert_range = [experts_start_idx, experts_end_idx] 
+
+        self.ones_scale = torch.ones((len(self.experts.w13_weight), self.experts.intermediate_size_per_partition), dtype=torch.float32, device='npu')
+
+        sorted_tokens, expanded_x_idx, expert_tokens, expanded_scale = torch_npu.npu_moe_init_routing_v2(
+                global_hidden_states,
+                topk_ids,
+                scale=global_hidden_states_scale,
+                offset=None,
+                active_num=topk_ids.numel(),
+                expert_num=80,
+                drop_pad_mode=0,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=expert_range,
+                quant_mode=-1,
+                row_idx_type=0
+        )
+
+        if self.enable_torchair_graph_mode:
+            with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                wait_gate = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
+                wait_gate = tng.scope.npu_wait_tensor(wait_gate, sorted_tokens)
+                if not isinstance(gate_up_share, torch.Tensor):
+                    gate_up_share = (wait_gate, gate_up_share[1])
+                intermediate_hiddenstates_share = self.shared_experts.act_fn(gate_up_share, self.shared_experts.quant_symbol)
+
+        if self.quant_symbol:
+            if self.experts.weight_num_bits == 8:
+                
+                gate_up_proj = torch_npu.npu_grouped_matmul(
+                    [sorted_tokens],
+                    [self.experts.w13_weight],
+                    bias=None,
+                    group_list=expert_tokens,
+                    split_item=3,
+                    output_dtype=torch.int32,
+                    group_type=0,
+                    group_list_type=1
+                )[0]
+
+                inter_states, inter_states_scale = torch_npu.npu_dequant_swiglu_quant(
+                    gate_up_proj,
+                    weight_scale=self.experts.w13_weight_scale,
+                    activation_scale=expanded_scale,
+                    bias=None,
+                    quant_scale=self.ones_scale,
+                    quant_offset=None,
+                    group_index=expert_tokens,
+                    activate_left=True,
+                    quant_mode=1
+                )
+
+                hidden_states_experts = torch_npu.npu_grouped_matmul(
+                    [inter_states],
+                    [self.experts.w2_weight],
+                    scale=[self.experts.w2_weight_scale],
+                    per_token_scale=[inter_states_scale],
+                    bias=None,
+                    group_list=expert_tokens,
+                    split_item=3,
+                    output_dtype=act_dtype,
+                    group_type=0,
+                    group_list_type=1
+                )[0]
+            else:
+                raise NotImplementedError(f"Unsupported compress tensor type. num bits: {self.experts.weight_num_bits}")
+        else:
+            # bf16
+            gate_up_proj = torch_npu.npu_grouped_matmul(
+                [sorted_tokens],
+                [self.experts.w13_weight],
+                bias=None,
+                group_list=expert_tokens,
+                split_item=2,
+                group_type=0,
+                group_list_type=1)[0]
+
+            gate_up_proj = torch_npu.npu_swiglu(gate_up_proj)
+            
+            hidden_states_experts = torch_npu.npu_grouped_matmul(
+                [gate_up_proj],
+                [self.experts.w2_weight],
+                bias=None,
+                group_list=expert_tokens,
+                split_item=2,
+                output_dtype=act_dtype,
+                group_type=0,
+                group_list_type=1)[0]
+
+        if self.enable_torchair_graph_mode:
+            with tng.scope.npu_stream_switch(STREAM_SHARED_EXPERT):
+                if isinstance(intermediate_hiddenstates_share, dict):
+                    intermediate_hiddenstates_share['x_int8'] = tng.scope.npu_wait_tensor(intermediate_hiddenstates_share.get('x_int8'), hidden_states_experts)
+                else:
+                    intermediate_hiddenstates_share = tng.scope.npu_wait_tensor(intermediate_hiddenstates_share, hidden_states_experts)
+                shared_output, _ = self.shared_experts.down_proj.forward(intermediate_hiddenstates_share)
+
+        final_hidden_states = torch_npu.npu_moe_finalize_routing(
+            hidden_states_experts.unsqueeze(1).to(act_dtype),
+            skip1=None,
+            skip2=None,
+            bias=None,
+            scales=topk_weights.to(act_dtype),
+            expanded_src_to_dst_row=expanded_x_idx,
+            export_for_source_row=topk_ids,
+            drop_pad_mode=3
+        )
+
+        # prefetch weights for attention next layer
+        if model_extra_config.operator_opt_config.use_prefetch and next_attention_weights is not None:
+            attn_prefetch_size = model_extra_config.operator_opt_config.attn_prefetch * 1024 * 1024
+            attn_prefetch_flag = shared_output
+            for name, weight in next_attention_weights.items():
+                if weight is None:
+                    break
+                torch_npu.npu_prefetch(weight, attn_prefetch_flag, attn_prefetch_size)
+
+        final_hidden_states = get_ep_group().reduce_scatter(final_hidden_states)
+        final_hidden_states = final_hidden_states + shared_output
+
+        return final_hidden_states , residual
 
 class PanguProMoEDecoderLayer(nn.Module):
 
@@ -812,6 +1030,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         super().__init__()
 
         self.hidden_size = config.hidden_size
+        self.vllm_config = vllm_config
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -837,6 +1056,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         mlp_only_layers = [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
             self.mlp = PanguProMoEV2MoEBlock(
+                vllm_config=vllm_config,
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
@@ -851,6 +1071,7 @@ class PanguProMoEDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
             self.is_moe = False
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if getattr(config, 'sandwich_norm', False):
@@ -863,6 +1084,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         self.enable_torchair_graph_mode = (
             vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
         self.is_pd_seperate_d = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        self.is_pd_seperate_p = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_producer"
         self.is_hybrid_chunked_prefill_graph_mode = (
             self.enable_torchair_graph_mode and not self.is_pd_seperate_d and
             not vllm_config.additional_config.get("enable_hybrid_graph_mode", False) and
@@ -886,8 +1108,13 @@ class PanguProMoEDecoderLayer(nn.Module):
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
 
-        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
-        enable_superkernel = not is_prefill and model_extra_config.operator_opt_config.use_super_kernel
+        is_prefill = attn_metadata is None or self.is_pd_seperate_p or attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+
+        # when hybrid_chunked_prefill_graph_mode is enabled, only the MoE layer, enable superkernel
+        if self.is_hybrid_chunked_prefill_graph_mode:
+            enable_superkernel = not is_prefill and model_extra_config.operator_opt_config.use_super_kernel and self.is_moe
+        else:
+            enable_superkernel = not is_prefill and model_extra_config.operator_opt_config.use_super_kernel
 
         # Self Attention
         if residual is None:
@@ -906,6 +1133,7 @@ class PanguProMoEDecoderLayer(nn.Module):
             sink_pad_params=sink_pad_params,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            is_prefill=is_prefill
         )
 
         with ConditionalTNGScope(super_kernel=enable_superkernel, scope='superkernel_decode_layer'):
@@ -993,7 +1221,6 @@ class PanguProMoEModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         lm_head=None
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # print(f"get_world_group().world_size {get_world_group().world_size}" , flush = True)
         if get_pp_group().is_first_rank:
             hidden_states = self.get_input_embeddings(input_ids)
             residual = None
@@ -1198,7 +1425,9 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts)
 
-        # expert_params_mapping = []
+        duplicate_params_mapping = [
+            ("a2a_o_proj", "o_proj"),
+        ]
 
         params_dict = dict(self.named_parameters())  # from model
         loaded_params: Set[str] = set()
@@ -1336,10 +1565,37 @@ class PanguProMoEV2ForCausalLM(nn.Module, SupportsPP):
                             set_weight_attrs(param, {"is_2_dims": True})
 
                     if name.endswith("param_sink_key") or name.endswith("param_sink_value"):
-                        weight_loader = getattr(param, "weight_loader", sharded_weight_loader(-2))
+                        tp_rank = get_tensor_model_parallel_rank()
+                        tp_size = get_tensor_model_parallel_world_size()
+ 
+                        shard_size = param.data.shape[-2]
+                        num_kv_heads = loaded_weight.shape[-2]
+                        index_factor = 1
+                        if tp_size > num_kv_heads:
+                            index_factor = tp_size // num_kv_heads
+                        start_idx = tp_rank // index_factor * shard_size
+                        loaded_weight = loaded_weight.narrow(-2, start_idx, shard_size)
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader) # [S,N,D]
                     else:
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
+
+                    for param_name, weight_name in duplicate_params_mapping:
+                        if weight_name not in name:
+                            continue
+                        duplicate_name = name.replace(weight_name, param_name)
+                        if is_pp_missing_parameter(duplicate_name, self):
+                            continue
+                        if duplicate_name not in params_dict:
+                            continue
+                        param = params_dict[duplicate_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(duplicate_name)
+                        break
+
             loaded_params.add(name)
         return loaded_params
 
