@@ -7,7 +7,7 @@ index 9159a8870..c65514bb9 100755
                  else:
                      request.spec_token_ids = spec_token_ids[req_index]
 +                    # For guided decoding case, if the spec_token_ids is thinking ends token, NEEDS POP IT OUT!
-+                    if request.sampling_params.guided_decoding is not None and \
++                    if request.num_computed_tokens >= request.num_prompt_tokens and request.sampling_params.guided_decoding is not None and \
 +                        request.spec_token_ids[0] == self.structured_output_manager.get_think_end_token():
 +                        request.spec_token_ids.pop()
 
