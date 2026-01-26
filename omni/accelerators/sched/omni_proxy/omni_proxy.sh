@@ -413,8 +413,8 @@ http {
     $(gen_access_log)
     proxy_http_version 1.1;
     tcp_nodelay on;
-    client_max_body_size 10M;
-    client_body_buffer_size 1M;
+    client_max_body_size 50M;
+    client_body_buffer_size 50M;
 
     proxy_read_timeout 14400s;
     proxy_connect_timeout 600s;
@@ -488,7 +488,7 @@ EOF
         location ~ ^/prefill_sub(?<orig>/.*)\$ {
             internal;
             proxy_pass http://prefill_endpoints\$orig\$is_args\$args;
-            subrequest_output_buffer_size 1M;
+            subrequest_output_buffer_size 50M;
         }
     }
 }

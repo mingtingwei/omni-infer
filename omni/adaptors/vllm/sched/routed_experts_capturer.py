@@ -350,7 +350,7 @@ class _RoutedExpertsReader:
 
     def get_routed_experts(
         self, request, kv_cache_manager, stopped: bool
-    ) -> Optional[list]:
+    ) -> Optional[np.ndarray]:
         """Get routed experts for a request."""
         is_stream = request.sampling_params.output_kind != RequestOutputKind.FINAL_ONLY
         if not stopped and not is_stream:
@@ -398,7 +398,7 @@ class _RoutedExpertsReader:
         if routed_experts is not None:
             save_indices(indices, request.request_id, SAVE_DIR)
         
-        return routed_experts.tolist()
+        return routed_experts
 
     def __del__(self) -> None:
         """Cleanup shared memory resources."""

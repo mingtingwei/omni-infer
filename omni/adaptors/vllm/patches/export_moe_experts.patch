@@ -1,83 +1,101 @@
 diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
-index 572ad9681..a92965dbe 100644
+index cbadb080f..82fd7889a 100644
 --- a/vllm/entrypoints/openai/protocol.py
 +++ b/vllm/entrypoints/openai/protocol.py
-@@ -1263,6 +1263,7 @@ class CompletionResponse(OpenAIBaseModel):
+@@ -1281,6 +1281,8 @@ class CompletionResponse(OpenAIBaseModel):
      usage: UsageInfo
      kv_transfer_params: Optional[dict[str, Any]] = Field(
          default=None, description="KVTransfer parameters.")
-+    routed_experts: Optional[list[list[list[int]]]] = None
++    routed_experts: Optional[dict[str, Any]] = Field(
++        default=None, description="Expert ids parameters.")
  
  
  class CompletionResponseStreamChoice(OpenAIBaseModel):
-@@ -1286,6 +1287,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
+@@ -1304,6 +1306,8 @@ class CompletionStreamResponse(OpenAIBaseModel):
      model: str
      choices: list[CompletionResponseStreamChoice]
      usage: Optional[UsageInfo] = Field(default=None)
-+    routed_experts: Optional[list[list[list[int]]]] = None
++    routed_experts: Optional[dict[str, Any]] = Field(
++        default=None, description="Expert ids parameters.")
  
  
  class EmbeddingResponseData(OpenAIBaseModel):
-@@ -1454,6 +1456,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
+@@ -1472,6 +1476,8 @@ class ChatCompletionResponse(OpenAIBaseModel):
      prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
      kv_transfer_params: Optional[dict[str, Any]] = Field(
          default=None, description="KVTransfer parameters.")
-+    routed_experts: Optional[list[list[list[int]]]] = None
++    routed_experts: Optional[dict[str, Any]] = Field(
++        default=None, description="Expert ids parameters.")
  
  
  class DeltaMessage(OpenAIBaseModel):
-@@ -1478,6 +1481,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
+@@ -1496,6 +1502,8 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
      model: str
      choices: list[ChatCompletionResponseStreamChoice]
      usage: Optional[UsageInfo] = Field(default=None)
-+    routed_experts: Optional[list[list[list[int]]]] = None
++    routed_experts: Optional[dict[str, Any]] = Field(
++        default=None, description="Expert ids parameters.")
  
  
  class TranscriptionResponseStreamChoice(OpenAIBaseModel):
 diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
-index 37d5e1746..70265352f 100755
+index 37d5e1746..4bbc956e3 100644
 --- a/vllm/entrypoints/openai/serving_chat.py
 +++ b/vllm/entrypoints/openai/serving_chat.py
-@@ -637,6 +637,10 @@ class OpenAIServingChat(OpenAIServing):
+@@ -637,6 +637,20 @@ class OpenAIServingChat(OpenAIServing):
                              choices=[choice_data],
                              model=model_name)
  
 +                        if os.getenv("ROLE") == "decode":
-+                            prefill_experts_id = request.kv_transfer_params.get('prefill_experts_id', None)
-+                            chunk.routed_experts = prefill_experts_id
++                            required_keys = [
++                                "routed_experts_shape",
++                                "routed_experts_dtype",
++                                "routed_experts_str_len",
++                                "routed_experts_str"
++                            ]
++
++                            if all(key in request.kv_transfer_params for key in required_keys):
++                                chunk.routed_experts = {
++                                    key: request.kv_transfer_params[key]
++                                    for key in required_keys
++                                }
 +
                          # if continuous usage stats are requested, add it
                          if include_continuous_usage:
                              chunk.usage = UsageInfo(
-@@ -1060,6 +1064,10 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1060,6 +1074,11 @@ class OpenAIServingChat(OpenAIServing):
                          created=created_time,
                          choices=[choice_data],
                          model=model_name)
 +                    
 +                    expert_ids = getattr(res, 'routed_experts', None)
-+                    if expert_ids:
-+                        chunk.routed_experts = expert_ids
++                    if expert_ids is not None:
++                        chunk.routed_experts = {}
++                        self.add_ndarray_info_to_dict(expert_ids, chunk.routed_experts)
  
                      # handle usage stats if requested & if continuous
                      if include_continuous_usage:
-@@ -1407,6 +1415,16 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1407,6 +1426,19 @@ class OpenAIServingChat(OpenAIServing):
  
          request_metadata.final_usage_info = usage
  
 +        final_expert_ids = None
 +        if os.getenv('ROLE', None) == "prefill":
-+            final_res.kv_transfer_params["prefill_experts_id"] = getattr(final_res, 'routed_experts', None)
++            experts_id_array = getattr(final_res, 'routed_experts', None)
++            if experts_id_array is not None:
++                self.add_ndarray_info_to_dict(experts_id_array, final_res.kv_transfer_params)
 +        else:
 +            kv_transfer_params = getattr(request, 'kv_transfer_params', {}) or {}
-+            prefill_expert_ids = kv_transfer_params.get('prefill_experts_id')
-+            final_expert_ids = getattr(final_res, 'routed_experts', None)
-+            if prefill_expert_ids is not None:
-+                final_expert_ids = prefill_expert_ids + (final_expert_ids if final_expert_ids is not None else [])
++            res_expert_ids = getattr(final_res, 'routed_experts', None)
++            if res_expert_ids is not None:
++                res_expert_ids = self.concatenate_dict_and_ndarray(kv_transfer_params, res_expert_ids)
++                final_expert_ids = {}
++                self.add_ndarray_info_to_dict(res_expert_ids, final_expert_ids)
 +
          response = ChatCompletionResponse(
              id=request_id,
              created=created_time,
-@@ -1414,6 +1432,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -1414,6 +1446,7 @@ class OpenAIServingChat(OpenAIServing):
              choices=choices,
              usage=usage,
              prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
@@ -86,38 +104,51 @@ index 37d5e1746..70265352f 100755
          )
          if response.kv_transfer_params is None:
 diff --git a/vllm/entrypoints/openai/serving_completion.py b/vllm/entrypoints/openai/serving_completion.py
-index e43a96d51..64efaacad 100755
+index e43a96d51..e2ed2deb8 100644
 --- a/vllm/entrypoints/openai/serving_completion.py
 +++ b/vllm/entrypoints/openai/serving_completion.py
-@@ -417,6 +417,15 @@ class OpenAIServingCompletion(OpenAIServing):
+@@ -417,6 +417,25 @@ class OpenAIServingCompletion(OpenAIServing):
                                  stop_reason=stop_reason,
                              )
                          ])
 +
 +                    expert_ids = getattr(res, 'routed_experts', None)
-+                    if expert_ids:
-+                        chunk.routed_experts = expert_ids
++                    if expert_ids is not None:
++                        chunk.routed_experts = {}
++                        self.add_ndarray_info_to_dict(expert_ids, chunk.routed_experts)
 +                    elif os.getenv("ROLE") == "decode":
-+                        expert_ids = request.kv_transfer_params.get('prefill_experts_id', None)
-+                        if expert_ids:
-+                            chunk.routed_experts = expert_ids
++                        required_keys = [
++                            "routed_experts_shape",
++                            "routed_experts_dtype",
++                            "routed_experts_str_len",
++                            "routed_experts_str"
++                        ]
++
++                        if all(key in request.kv_transfer_params for key in required_keys):
++                            chunk.routed_experts = {
++                                key: request.kv_transfer_params[key]
++                                for key in required_keys
++                            }
 +
                      if include_continuous_usage:
                          prompt_tokens = num_prompt_tokens[prompt_idx]
                          completion_tokens = previous_num_tokens[i]
-@@ -572,12 +581,23 @@ class OpenAIServingCompletion(OpenAIServing):
+@@ -572,12 +591,26 @@ class OpenAIServingCompletion(OpenAIServing):
  
          request_metadata.final_usage_info = usage
  
 +        final_expert_ids = None
 +        if os.getenv('ROLE', None) == "prefill":
-+            final_res.kv_transfer_params["prefill_experts_id"] = getattr(final_res, 'routed_experts', None)
++            experts_id_array = getattr(final_res, 'routed_experts', None)
++            if experts_id_array is not None:
++                self.add_ndarray_info_to_dict(experts_id_array, final_res.kv_transfer_params)
 +        else:
 +            kv_transfer_params = getattr(request, 'kv_transfer_params', {}) or {}
-+            prefill_expert_ids = kv_transfer_params.get('prefill_experts_id')
-+            final_expert_ids = getattr(final_res, 'routed_experts', None)
-+            if prefill_expert_ids is not None:
-+                final_expert_ids = prefill_expert_ids + (final_expert_ids if final_expert_ids is not None else [])
++            res_expert_ids = getattr(final_res, 'routed_experts', None)
++            if res_expert_ids is not None:
++                res_expert_ids = self.concatenate_dict_and_ndarray(kv_transfer_params, res_expert_ids)
++                final_expert_ids = {}
++                self.add_ndarray_info_to_dict(res_expert_ids, final_expert_ids)
 +
          return CompletionResponse(
              id=request_id,
@@ -129,19 +160,86 @@ index e43a96d51..64efaacad 100755
              kv_transfer_params=final_res_batch[0].kv_transfer_params)
  
      def _create_completion_logprobs(
+diff --git a/vllm/entrypoints/openai/serving_engine.py b/vllm/entrypoints/openai/serving_engine.py
+index 5c58c2e64..d05ed1549 100644
+--- a/vllm/entrypoints/openai/serving_engine.py
++++ b/vllm/entrypoints/openai/serving_engine.py
+@@ -20,6 +20,9 @@ from starlette.datastructures import Headers
+ from typing_extensions import TypeIs
+ 
+ import os
++import zlib
++import numpy as np
++from typing import Tuple
+ 
+ if sys.version_info >= (3, 12):
+     from typing import TypedDict
+@@ -1276,6 +1279,44 @@ class OpenAIServing:
+             return self.models.base_model_paths[0].name
+         return model_name
+ 
++    def convert_ndarray_to_str(self, data: np.ndarray) -> Tuple[str, Tuple[int, ...], str]:
++        shape = data.shape
++        dtype_str = str(data.dtype)
++        raw_bytes = data.tobytes()
++        compressed = zlib.compress(raw_bytes, level=1)
++        b64_data = base64.b64encode(compressed).decode('utf-8')
++        return b64_data, shape, dtype_str
++
++    def restore_str_to_ndarray(self, b64_data: str, shape: Tuple[int, ...], dtype_str: str) -> np.ndarray:
++        compressed = base64.b64decode(b64_data)
++        raw_bytes = zlib.decompress(compressed)
++        return np.frombuffer(raw_bytes, dtype=np.dtype(dtype_str)).reshape(shape)
++
++    def concatenate_dict_and_ndarray(self, routed_experts_dict: dict, expert_ids_arr: np.ndarray) -> np.ndarray:
++        prefill_expert_ids = routed_experts_dict.get('routed_experts_str')
++        shape = routed_experts_dict.get('routed_experts_shape', None)
++        dtype = routed_experts_dict.get('routed_experts_dtype', None)
++        if (
++            prefill_expert_ids is not None and
++            shape is not None and
++            dtype is not None and
++            len(shape) == expert_ids_arr.ndim and
++            shape[1:] == list(expert_ids_arr.shape[1:]) and
++            dtype == str(expert_ids_arr.dtype)
++        ):
++            arr = self.restore_str_to_ndarray(prefill_expert_ids, shape, dtype)
++            expert_ids_arr = np.concatenate([arr, expert_ids_arr], axis=0)
++        else:
++            logger.warning(f"{shape=} or {dtype=} mismatch {expert_ids_arr.shape=} or {str(expert_ids_arr.dtype)=}, skipping routed_experts output")
++        return expert_ids_arr
++
++    def add_ndarray_info_to_dict(self, data: np.ndarray, routed_experts_dict: dict):
++        b64_data, shape, dtype = self.convert_ndarray_to_str(data)
++        routed_experts_dict["routed_experts_shape"] = shape
++        routed_experts_dict["routed_experts_dtype"] = dtype
++        routed_experts_dict["routed_experts_str_len"] = len(b64_data)
++        routed_experts_dict["routed_experts_str"] = b64_data
++
+ 
+ def clamp_prompt_logprobs(
+     prompt_logprobs: Union[PromptLogprobs,
 diff --git a/vllm/outputs.py b/vllm/outputs.py
-index 33cc50c87..54edd726a 100644
+index 33cc50c87..a35b0bb53 100644
 --- a/vllm/outputs.py
 +++ b/vllm/outputs.py
-@@ -117,6 +117,7 @@ class RequestOutput:
+@@ -7,6 +7,7 @@ from dataclasses import dataclass
+ from typing import Any, Generic, Optional, Union
+ 
+ import torch
++import numpy as np
+ from typing_extensions import TypeVar, deprecated
+ 
+ from vllm.logger import init_logger
+@@ -117,6 +118,7 @@ class RequestOutput:
          prompt_logprobs: Optional[PromptLogprobs],
          outputs: list[CompletionOutput],
          finished: bool,
-+        routed_experts: Optional[list[list[list[int]]]] = None,
++        routed_experts: Optional[np.ndarray] = None,
          metrics: Optional[RequestMetrics] = None,
          lora_request: Optional[LoRARequest] = None,
          encoder_prompt: Optional[str] = None,
-@@ -145,6 +146,7 @@ class RequestOutput:
+@@ -145,6 +147,7 @@ class RequestOutput:
          self.encoder_prompt_token_ids = encoder_prompt_token_ids
          self.num_cached_tokens = num_cached_tokens
          self.kv_transfer_params = kv_transfer_params
@@ -150,7 +248,7 @@ index 33cc50c87..54edd726a 100644
      def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
          """Merge subsequent RequestOutput into this one"""
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 7038a87cd..05d6c53f5 100755
+index 7038a87cd..870f132ad 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
 @@ -35,6 +35,8 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -205,30 +303,46 @@ index 7038a87cd..05d6c53f5 100755
  
              else:
 diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
-index 1474f9528..f4bd02797 100755
+index 1474f9528..390107a27 100644
 --- a/vllm/v1/engine/__init__.py
 +++ b/vllm/v1/engine/__init__.py
-@@ -110,6 +110,7 @@ class EngineCoreOutput(
+@@ -6,6 +6,7 @@ from collections.abc import Sequence
+ from typing import Any, Optional, Union
+ 
+ import msgspec
++import numpy as np
+ 
+ from vllm.lora.request import LoRARequest
+ from vllm.multimodal import MultiModalKwargs
+@@ -110,6 +111,7 @@ class EngineCoreOutput(
  
      # The number of tokens with prefix cache hits.
      num_cached_tokens: int = 0
-+    routed_experts: Optional[list[list[list[int]]]] = None
++    routed_experts: Optional[np.ndarray] = None
  
      @property
      def finished(self) -> bool:
 diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
-index 293c291b4..623d5132a 100644
+index 293c291b4..da8aaa574 100644
 --- a/vllm/v1/engine/output_processor.py
 +++ b/vllm/v1/engine/output_processor.py
-@@ -148,6 +148,7 @@ class RequestState:
+@@ -4,6 +4,7 @@ import asyncio
+ from collections.abc import Iterable
+ from dataclasses import dataclass
+ from typing import Any, Optional, Union
++import numpy as np
+ 
+ from vllm.outputs import CompletionOutput, RequestOutput
+ from vllm.sampling_params import RequestOutputKind
+@@ -148,6 +149,7 @@ class RequestState:
          stop_reason: Union[int, str, None],
          kv_transfer_params: Optional[dict[str, Any]] = None,
          num_cached_tokens: int = 0,
-+        routed_experts: Optional[list[list[list[int]]]] = None,
++        routed_experts: Optional[np.ndarray] = None,
      ) -> Optional[RequestOutput]:
  
          finished = finish_reason is not None
-@@ -170,7 +171,7 @@ class RequestState:
+@@ -170,7 +172,7 @@ class RequestState:
                  return None
  
          return self._new_request_output(request_id, outputs, finished,
@@ -237,15 +351,15 @@ index 293c291b4..623d5132a 100644
  
      def _new_request_output(
          self,
-@@ -179,6 +180,7 @@ class RequestState:
+@@ -179,6 +181,7 @@ class RequestState:
          finished: bool,
          kv_transfer_params: Optional[dict[str, Any]] = None,
          num_cached_tokens: int = 0,
-+        routed_experts: Optional[list[list[list[int]]]] = None,
++        routed_experts: Optional[np.ndarray] = None,
      ) -> RequestOutput:
  
          if self.output_kind == RequestOutputKind.DELTA:
-@@ -196,6 +198,7 @@ class RequestState:
+@@ -196,6 +199,7 @@ class RequestState:
              finished=finished,
              kv_transfer_params=kv_transfer_params,
              num_cached_tokens=num_cached_tokens,
@@ -253,7 +367,7 @@ index 293c291b4..623d5132a 100644
          )
  
      def _new_completion_output(
-@@ -359,7 +362,7 @@ class OutputProcessor:
+@@ -359,7 +363,7 @@ class OutputProcessor:
              # 4) Create and handle RequestOutput objects.
              if request_output := req_state.make_request_output(
                      new_token_ids, finish_reason, stop_reason,
@@ -262,6 +376,3 @@ index 293c291b4..623d5132a 100644
                  if req_state.queue is not None:
                      # AsyncLLM: put into queue for handling by generate().
                      req_state.queue.put(request_output)
--- 
-2.33.0
-
