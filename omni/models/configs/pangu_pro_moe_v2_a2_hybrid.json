@@ -11,6 +11,7 @@
         "use_tnd_pa": true,
         "cast_w2_scale_f32": true,
         "use_super_kernel": false,
-        "use_prefetch": true
+        "use_prefetch": true,
+        "enable_moe_prefill_multi_stream": true
     }
 }

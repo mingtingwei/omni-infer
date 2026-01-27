@@ -443,8 +443,9 @@ class DeepseekMoE(nn.Module):
         if self.decode_experts_pruning:
             self.decode_experts_pruning_threshold= torch.tensor(
                     [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135], dtype=torch.float32).npu()
-
-        self.Prefill_shared_expert_stream = torch.npu.Stream()
+        
+        if model_extra_config.operator_opt_config.enable_moe_prefill_multi_stream:
+            self.Prefill_shared_expert_stream = torch.npu.Stream()
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
@@ -471,18 +472,22 @@ class DeepseekMoE(nn.Module):
                 return self._forward_decode_norm(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
 
     def _forward_prefill_norm(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int = 0) -> torch.Tensor:
-        curr_stream = torch.npu.current_stream()
-        self.Prefill_shared_expert_stream.wait_stream(curr_stream)
 
-        with torch.npu.stream(self.Prefill_shared_expert_stream):
-            # Forward pass through shared experts gate_up projection
-            if self.quant_symbol:
-                hidden_states_int8, hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                hidden_states_quant = {"x_int8": hidden_states_int8, "pertoken_scale": hidden_states_scale}
-                # shared_experts w13
-                gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states_quant)
-            else:
-                gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states)
+        if not model_extra_config.operator_opt_config.enable_moe_prefill_multi_stream:
+            shared_output = self.shared_experts(hidden_states) 
+        else:
+            curr_stream = torch.npu.current_stream()
+            self.Prefill_shared_expert_stream.wait_stream(curr_stream)
+            
+            with torch.npu.stream(self.Prefill_shared_expert_stream):
+                # Forward pass through shared experts gate_up projection
+                if self.quant_symbol:
+                    hidden_states_int8, hidden_states_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                    hidden_states_quant = {"x_int8": hidden_states_int8, "pertoken_scale": hidden_states_scale}
+                    # shared_experts w13
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states_quant)
+                else:
+                    gate_up_share, _ = self.shared_experts.gate_up_proj.forward(hidden_states)
 
         if not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
             hidden_states_int8, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -526,13 +531,14 @@ class DeepseekMoE(nn.Module):
             topk_ids = torch.round(topk_ids).to(torch.int32)
             global_pertoken_scale = global_pertoken_scale.squeeze(-1)
 
-        with torch.npu.stream(self.Prefill_shared_expert_stream):
-            gate_up_share_tensor = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
-            if not isinstance(gate_up_share, torch.Tensor):
-                gate_up_share = (gate_up_share_tensor, gate_up_share[1])
-            intermediate_hiddenstates_share = self.shared_experts.act_fn(gate_up_share, self.shared_experts.quant_symbol)
+        if model_extra_config.operator_opt_config.enable_moe_prefill_multi_stream:
+            with torch.npu.stream(self.Prefill_shared_expert_stream):
+                gate_up_share_tensor = gate_up_share if isinstance(gate_up_share, torch.Tensor) else gate_up_share[0]
+                if not isinstance(gate_up_share, torch.Tensor):
+                    gate_up_share = (gate_up_share_tensor, gate_up_share[1])
+                intermediate_hiddenstates_share = self.shared_experts.act_fn(gate_up_share, self.shared_experts.quant_symbol)
 
-            shared_output, _ = self.shared_experts.down_proj.forward(intermediate_hiddenstates_share)
+                shared_output, _ = self.shared_experts.down_proj.forward(intermediate_hiddenstates_share)
 
         final_hidden_states_list = self.experts(
             hidden_states=global_hidden_states,
@@ -567,8 +573,9 @@ class DeepseekMoE(nn.Module):
                 drop_pad_mode=2
             )
 
-        if self.Prefill_shared_expert_stream != torch.npu.current_stream():
-            torch.npu.current_stream().wait_stream(self.Prefill_shared_expert_stream)
+        if model_extra_config.operator_opt_config.enable_moe_prefill_multi_stream:
+            if self.Prefill_shared_expert_stream != torch.npu.current_stream():
+                torch.npu.current_stream().wait_stream(self.Prefill_shared_expert_stream)
 
         final_hidden_states = final_hidden_states + shared_output
 
