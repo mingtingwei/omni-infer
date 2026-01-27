@@ -417,7 +417,8 @@ class DP2TPRowParallelLinear(AscendRowParallelLinear):
             input_ = input_.view(all_to_all_o_proj_shape)
             input_parallel = torch.empty(all_to_all_o_proj_shape, dtype=input_.dtype, device=current_platform.device_type)
             dist.all_to_all_single(input_parallel, input_, group=get_o_proj_tp_group().device_group)
-            torch_npu.npu_prefetch(self.weight, input_, 25*1024*1024)
+            if not (model_extra_config.task_config.model_name == "deepseek_v32" and model_extra_config.task_config.hardware_platform == "A2" and  not model_extra_config.task_config.is_pd_disaggregation):
+                torch_npu.npu_prefetch(self.weight, input_, 25*1024*1024)
             input_parallel = input_parallel.view(bsz * q_len * self.tp_size, self.input_size_per_partition)
 
         # Matrix multiply.
