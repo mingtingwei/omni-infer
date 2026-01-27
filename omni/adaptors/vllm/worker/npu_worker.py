@@ -55,6 +55,7 @@ from omni.adaptors.vllm.token_recovery.ha_patches import (stop_device, restart_d
                                                           is_token_recompute)
 from omni.adaptors.vllm.token_recovery.ha_monitor import token_recover_wrapper
 from omni.adaptors.vllm.token_recovery.envs import ENV
+from omni.adaptors.vllm.distributed.parallel_state import init_world_group
 
 
 __origin_get_device_properties__ = torch.npu.get_device_properties
@@ -125,6 +126,8 @@ class NPUWorker(WorkerBase):
         if self.vllm_config.kv_transfer_config is not None:
             if ENV.use_ha and self.vllm_config.kv_transfer_config.kv_role == 'kv_consumer':
                 self.enable_token_recover = True
+        self.world_ranks = kwargs.get("world_ranks", None)
+        logger.info(f"[NPUWorker.init] {self.rank=}, {self.local_rank=}, {self.world_ranks=}")
 
     def sleep(self, level: int = 1) -> None:
         if not NPUPlatform.is_sleep_mode_available():
@@ -501,9 +504,12 @@ class NPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         set_custom_all_reduce(
             not self.parallel_config.disable_custom_all_reduce)
-        init_distributed_environment(self.parallel_config.world_size,
-                                     self.rank, self.distributed_init_method,
-                                     self.local_rank, "hccl")
+        if self.world_ranks is None:
+            init_distributed_environment(self.parallel_config.world_size,
+                                        self.rank, self.distributed_init_method,
+                                        self.local_rank, "hccl")
+        else:
+            init_world_group(self.world_ranks, self.local_rank, "hccl")
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)

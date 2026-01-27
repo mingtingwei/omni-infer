@@ -33,8 +33,6 @@ from omni.models.config_loader.loader import model_extra_config
 import os
 import torch_npu
 
-initialize_model_parallel_default = parallel_state.initialize_model_parallel
-
 _DIE_PER_NODE_910C = 16
 _DIE_PER_NODE_910B = 8
 
@@ -49,6 +47,7 @@ def get_npu_device_count():
 
 
 class GroupCoordinator(GroupCoordinatorGPU):
+    use_local_synchronization = False
 
     def __init__(
         self,
@@ -75,10 +74,11 @@ class GroupCoordinator(GroupCoordinatorGPU):
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend, pg_options=torch_distributed_options)
+                ranks, backend=torch_distributed_backend, pg_options=torch_distributed_options,
+                use_local_synchronization=self.use_local_synchronization)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            cpu_group = torch.distributed.new_group(ranks, backend="gloo", use_local_synchronization=self.use_local_synchronization)
             if self.rank in ranks:
                 from omni.adaptors.vllm.token_recovery.ha_patches import register_process_group
                 register_process_group(device_group)
@@ -235,6 +235,8 @@ def initialize_model_parallel(
     backend: Optional[str] = None,
 ) -> None:
     # TP、PP、EP、DP
+    # NOTE: avoid reshape error in parallel_state.initialize_model_parallel with RL,
+    #       such as torch.arange(96).reshape(-1, 64, 1, 1), where world_size is 96 and 64 dies for D
     initialize_model_parallel_default(
         tensor_model_parallel_size,
         pipeline_model_parallel_size,
@@ -272,6 +274,126 @@ def initialize_model_parallel(
     scale_parallel = model_extra_config.operator_opt_config.enable_scale_parallel
     if scale_parallel:
         initial_scale_parallel_group(backend)
+
+# called when world_ranks is built by RL
+def init_world_group(ranks: list[int], local_rank: int, backend: str):
+    if not torch.distributed.is_initialized():
+        raise RuntimeError("torch.distributed must be initialized")
+    if parallel_state._WORLD is not None:
+        raise RuntimeError("_WORLD must not be initialized")
+    world_rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    logger.info(f"worker init world group {ranks=}, {local_rank=}, {backend=}, {world_rank=}, {world_size=}")
+    if len(ranks) != world_size:
+        GroupCoordinator.use_local_synchronization = True
+    world_group = parallel_state.init_world_group(
+        ranks,
+        local_rank,
+        backend,
+    )
+    parallel_state._WORLD = world_group
+    logger.info(f"worker init world group done {ranks=}, {local_rank=}, {backend=}, {world_rank=}")
+
+def initialize_model_parallel_default(
+    tensor_model_parallel_size: int = 1,
+    pipeline_model_parallel_size: int = 1,
+    backend: Optional[str] = None,
+) -> None:
+    """
+    Initialize model parallel groups.
+
+    Arguments:
+        tensor_model_parallel_size: number of GPUs used for tensor model
+            parallelism.
+        pipeline_model_parallel_size: number of GPUs used for pipeline model
+            parallelism.
+
+    Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
+    use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
+    the model pipeline. The present function will
+    create 4 tensor model-parallel groups and 2 pipeline model-parallel groups:
+        4 tensor model-parallel groups:
+            [g0, g1], [g2, g3], [g4, g5], [g6, g7]
+        2 pipeline model-parallel groups:
+            [g0, g2, g4, g6], [g1, g3, g5, g7]
+    Note that for efficiency, the caller should make sure adjacent ranks
+    are on the same DGX box. For example if we are using 2 DGX-1 boxes
+    with a total of 16 GPUs, rank 0 to 7 belong to the first box and
+    ranks 8 to 15 belong to the second box.
+    """
+    # Get world size and rank. Ensure some consistencies.
+    assert torch.distributed.is_initialized()
+    world_size: int = get_world_group().world_size
+    rank = torch.distributed.get_rank()
+    backend = backend or torch.distributed.get_backend(
+        get_world_group().device_group)
+
+    data_parallel_size = 1
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is not None:
+        data_parallel_size = config.parallel_config.data_parallel_size
+
+    # the layout order is: ExternalDP x DP x PP x TP
+    # ExternalDP is the data parallel group that is not part of the model,
+    # every dp rank can generate independently (in verl integration).
+    # DP is the data parallel group that is part of the model,
+    # all the ranks in the same DP group should generate simultaneously,
+    # i.e. the `generate` call in the same DP group should be called together,
+    # otherwise it will cause deadlock.
+    # to get group_ranks for each dimension, transpose that dimension to the
+    # last dimension, then reshape to 2D, then unbind the last dimension
+    all_ranks = torch.tensor(get_world_group().ranks).reshape(
+        -1, data_parallel_size, pipeline_model_parallel_size,
+        tensor_model_parallel_size)  # noqa
+
+    # Build the tensor model-parallel groups.
+    assert parallel_state._TP is None, ("tensor model parallel group is already initialized")
+    group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+
+    # message queue broadcaster is only used in tensor model parallel group
+    parallel_state._TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    use_message_queue_broadcaster=True,
+                                    group_name="tp")
+
+    # Build the pipeline model-parallel groups.
+    assert parallel_state._PP is None, (
+        "pipeline model parallel group is already initialized")
+    group_ranks = all_ranks.transpose(2, 3).reshape(
+        -1, pipeline_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    parallel_state._PP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="pp")
+
+    assert parallel_state._DP is None, ("data parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1,
+                                      3).reshape(-1,
+                                                 data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    parallel_state._DP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="dp")
+
+    assert parallel_state._EP is None, ("expert parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    parallel_state._EP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="ep")
+
+    logger.info(
+        "rank %s in world size %s is assigned as "
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
+        parallel_state._DP.rank_in_group, parallel_state._PP.rank_in_group, parallel_state._TP.rank_in_group,
+        parallel_state._EP.rank_in_group)
 
 
 def initial_scale_parallel_group(backend: Optional[str] = None):
@@ -407,19 +529,15 @@ def calculate_effective_local_size(local_size: int, world_size: int) -> int:
 def initialize_mlp_tp_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = get_world_group().world_size
     mtp_tp_size = model_extra_config.parall_config.dense_mlp_tp_size
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
     if world_size % mtp_tp_size != 0:
         raise RuntimeError(f"Dense MLP TP Size ({mtp_tp_size}) should be divisible by world size ({world_size})")
-    num_groups: int = world_size // mtp_tp_size
     global _MLP_TP
     if _MLP_TP is not None:
         raise RuntimeError("_MLP_TP must be None")
-    group_ranks = []
-    for i in range(num_groups):
-        ranks = list(range(i * mtp_tp_size, (i + 1) * mtp_tp_size))
-        group_ranks.append(ranks)
+    group_ranks = [get_world_group().ranks[i : i + mtp_tp_size] for i in range(0, world_size, mtp_tp_size)]
 
     # message queue broadcaster is only used in tensor model parallel group
     _MLP_TP = init_model_parallel_group(
@@ -435,20 +553,16 @@ def initialize_o_proj_tp_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = get_world_group().world_size
     o_proj_tp_size = model_extra_config.parall_config.o_proj_tp_size
     if world_size % o_proj_tp_size != 0:
         raise RuntimeError(f"o_proj TP Size ({o_proj_tp_size}) should be divisible by world size ({world_size})")
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
-    num_local_groups: int = world_size // o_proj_tp_size
     global _O_PROJ_TP
     if _O_PROJ_TP is not None:
         raise RuntimeError("_O_PROJ_TP must be None")
-    group_ranks = []
-    for i in range(num_local_groups):
-        ranks = list(range(i * o_proj_tp_size, (i + 1) * o_proj_tp_size))
-        group_ranks.append(ranks)
+    group_ranks = [get_world_group().ranks[i : i + o_proj_tp_size] for i in range(0, world_size, o_proj_tp_size)]
 
     # message queue broadcaster is only used in tensor model parallel group
     _O_PROJ_TP = init_model_parallel_group(
@@ -464,7 +578,7 @@ def initialize_o_proj_dp_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = get_world_group().world_size
     o_proj_tp_size = model_extra_config.parall_config.o_proj_tp_size
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
@@ -472,7 +586,7 @@ def initialize_o_proj_dp_group(backend) -> None:
     global _O_PROJ_DP
     if _O_PROJ_DP is not None:
         raise RuntimeError("_O_PROJ_DP must be None")
-    all_ranks = torch.arange(world_size).reshape(dp_size, o_proj_tp_size)
+    all_ranks = torch.tensor(get_world_group().ranks).reshape(dp_size, o_proj_tp_size)
     group_ranks = all_ranks.transpose(0, 1)
     group_ranks = [x.tolist() for x in group_ranks]
     # message queue broadcaster is only used in tensor model parallel group
@@ -488,20 +602,16 @@ def initialize_eh_proj_tp_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = get_world_group().world_size
     eh_proj_tp_size = model_extra_config.parall_config.eh_proj_tp_size
     if world_size % eh_proj_tp_size != 0:
         raise RuntimeError(f"eh_proj TP Size ({eh_proj_tp_size}) should be divisible by world size ({world_size})")
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
-    num_local_groups: int = world_size // eh_proj_tp_size
     global _EH_PROJ_TP
     if _EH_PROJ_TP is not None:
         raise RuntimeError("_EH_PROJ_TP must be None")
-    group_ranks = []
-    for i in range(num_local_groups):
-        ranks = list(range(i * eh_proj_tp_size, (i + 1) * eh_proj_tp_size))
-        group_ranks.append(ranks)
+    group_ranks = [get_world_group().ranks[i : i + eh_proj_tp_size] for i in range(0, world_size, eh_proj_tp_size)]
 
     # message queue broadcaster is only used in tensor model parallel group
     _EH_PROJ_TP = init_model_parallel_group(
@@ -516,20 +626,16 @@ def initialize_local_world_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
-    world_size: int = torch.distributed.get_world_size()
+    world_size: int = get_world_group().world_size
     local_size = calculate_effective_local_size(torch.npu.device_count() if not int(os.getenv("NO_NPU_MOCK", "0")) \
         else len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(",")), world_size)
 
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
-    num_local_groups: int = world_size // local_size
     global _LOCAL_WORLD
     if _LOCAL_WORLD is not None:
         raise RuntimeError("_LOCAL_WORLD must be None")
-    group_ranks = []
-    for i in range(num_local_groups):
-        ranks = list(range(i * local_size, (i + 1) * local_size))
-        group_ranks.append(ranks)
+    group_ranks = [get_world_group().ranks[i : i + local_size] for i in range(0, world_size, local_size)]
 
     # message queue broadcaster is only used in tensor model parallel group
     _LOCAL_WORLD = init_model_parallel_group(
