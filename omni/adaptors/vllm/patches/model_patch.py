@@ -49,8 +49,10 @@ def patch_compilation():
 
 def patch_linear():
     from vllm.model_executor.layers import linear
-    from omni.layers.linear import AscendUnquantizedLinearMethod
+    from omni.layers.linear import AscendUnquantizedLinearMethod, AscendReplicatedLinear, AscendColumnParallelLinear
     linear.UnquantizedLinearMethod = AscendUnquantizedLinearMethod
+    linear.ReplicatedLinear = AscendReplicatedLinear
+    linear.ColumnParallelLinear = AscendColumnParallelLinear
 
 def patch_update_xgrammar_graph():
     exit_code = os.system(f"bash {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'update_xgrammar_graph.sh')}")

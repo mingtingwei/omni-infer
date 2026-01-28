@@ -42,6 +42,30 @@ from omni.adaptors.vllm.distributed.parallel_state import (
 )
 from omni.models.config_loader.loader import model_extra_config
 
+class AscendReplicatedLinear(ReplicatedLinear):
+        
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        # veRL special case: transpose the weight back to original shape
+        is_weight_transposed = getattr(param, "is_weight_transposed", False)
+        if is_weight_transposed:
+            param.data = param.data.t_()
+        super().weight_loader(param, loaded_weight)
+        # veRL special case: transpose the weight to use torch npu operator
+        if is_weight_transposed:
+            param.data = torch_npu.npu_format_cast(param.data.t_(), 29)
+
+class AscendColumnParallelLinear(ColumnParallelLinear):
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        # veRL special case: transpose the weight back to original shape
+        is_weight_transposed = getattr(param, "is_weight_transposed", False)
+        if is_weight_transposed:
+            param.data = param.data.t_()
+        super().weight_loader(param, loaded_weight)
+        # veRL special case: transpose the weight to use torch npu operator
+        if is_weight_transposed:
+            param.data = torch_npu.npu_format_cast(param.data.t_(), 29)
+
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer):

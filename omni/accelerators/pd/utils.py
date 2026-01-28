@@ -22,11 +22,6 @@ def get_p_start_rank(p_tp_size, p_dp_size, d_tp_size, d_dp_size, d_node_num, cur
     if cur_d_rank < 0:
         raise ValueError('cur_d_rank < 0')
 
-    # Calculate device information
-    devices_per_node = d_dp_size * d_tp_size
-    if cur_d_rank >= devices_per_node:
-        raise ValueError('cur_d_rank >= devices_per_node')
-
     # Calculate KV group information
     kv_group_size = d_tp_size
     if p_tp_size % kv_group_size != 0:

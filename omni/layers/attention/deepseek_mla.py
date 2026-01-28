@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.distributed import get_world_group, get_dp_group
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.distributed.communication_op import (
     tensor_model_parallel_all_gather)
 from vllm.distributed.parallel_state import (
@@ -698,8 +699,10 @@ class DeepseekMLA(nn.Module):
         if weight.dtype == torch.int8:
             return weight
         weight.data = torch_npu.npu_format_cast(weight.data, 2)
-        weight = torch.nn.Parameter(weight.transpose(0, 1).contiguous(), requires_grad = False)
+        weight.data = weight.data.transpose(0, 1).contiguous()
         weight.data = torch_npu.npu_format_cast(weight.data, 29)
+        if not hasattr(weight, "is_weight_transposed"):
+            set_weight_attrs(weight, {"is_weight_transposed": True})
         return weight
 
     def _forward_prefill_absorb(
