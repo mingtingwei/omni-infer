@@ -36,6 +36,7 @@ from omni.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding
 )
+from omni.layers.attention.backend.attention import AscendAttentionState
 from omni.layers.linear import ColumnParallelFlashCommLinear
 from omni.layers.moe.fused_moe.layer import FusedMoE
 from omni.models.config_loader.loader import model_extra_config
@@ -116,14 +117,15 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
             selected_indices: Optional[torch.Tensor] = None,
             **kwargs,
     ) -> torch.Tensor:
-        tok_embeds = self.enorm(self.get_input_embeddings(input_ids))
+        tok_embeds = self.enorm(self.get_input_embeddings(input_ids, attn_metadata))
         if len(tok_embeds.shape) > 2:
             tok_embeds = tok_embeds.view(-1, self.config.hidden_size)
 
         tp_size = get_tensor_model_parallel_world_size()  # cloud: get_tp_group().world_size
         rank_in_group = get_tensor_model_parallel_rank()
 
-        if tp_size > 1:
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if tp_size > 1 and not is_decode_dcp_node:
             token_num = previous_hidden_states.shape[0]
             start_range = rank_in_group * (token_num // tp_size)
             end_range = (1 + rank_in_group) * (token_num // tp_size)
@@ -147,8 +149,10 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
         )
 
         hidden_states, _ = self.shared_head.norm(encoded_states, residual)
-
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if not is_decode_dcp_node:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         if attn_metadata is None:
             logits = self.compute_lmhead(hidden_states[-1:, ...], None)
@@ -157,8 +161,12 @@ class PanguUltraMoEMultiTokenPredictorLayer(PanguUltraMoEDecoderLayer):
 
         return logits, hidden_states
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids, reduce=1)
+    def get_input_embeddings(self, input_ids: torch.Tensor, attn_metadata: AttentionMetadata) -> torch.Tensor:
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if attn_metadata is not None and is_decode_dcp_node:
+            return self.embed_tokens(input_ids, reduce=0)
+        else:
+            return self.embed_tokens(input_ids, reduce=1)
 
     def compute_lmhead(
             self,

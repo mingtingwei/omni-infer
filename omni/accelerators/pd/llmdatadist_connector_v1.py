@@ -24,6 +24,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from omni.accelerators.pd.utils import get_config_from_dict_or_env
+from omni.models.config_loader.loader import model_extra_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig, KVTransferConfig
@@ -68,6 +69,7 @@ class ReqMeta:
     spec_token_ids: Optional[list[int]]
     remote_dp_rank: Optional[int]
     remote_request_id: Optional[str]
+    num_tokens:Optional[int]
     trace_headers: Optional[Mapping[str, str]] = None
 
 @dataclass
@@ -85,6 +87,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
         request_id: str,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
+        num_tokens: Optional[int],
         trace_headers: Optional[Mapping[str, str]] = None,
     ):
         self.requests[request_id] = ReqMeta(
@@ -95,6 +98,7 @@ class DatadistConnectorMetadata(KVConnectorMetadata):
             spec_token_ids=kv_transfer_params["spec_token_ids"],
             remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
             remote_request_id=kv_transfer_params.get("remote_request_id", None),
+            num_tokens=num_tokens,
             trace_headers=trace_headers  or {},
         )
 
@@ -120,9 +124,12 @@ class LLMDataDistConnector(KVConnectorBase_V1):
             raise RuntimeError("vllm_config.kv_transfer_config cannot be None")
 
         if vllm_config.model_config.is_deepseek_mla:
-            vllm_config.kv_transfer_config.kv_parallel_size = 1
-            logger.info("Set kv_parallel_size to 1 when use deepseek mla model.")
-
+            if model_extra_config.operator_opt_config.use_dcp:
+                kv_parallel_size = vllm_config.additional_config.get("attn_tp_size", 1)
+                vllm_config.kv_transfer_config.kv_parallel_size = kv_parallel_size
+            else:
+                vllm_config.kv_transfer_config.kv_parallel_size = 1
+                logger.info("Set kv_parallel_size to 1 when use deepseek mla model.")
         if FLAG_ENABLE_DYNAMIC_LLMDATADIST:
             local_host_ip = get_local_ip()
             local_host_port = LLMDATADIST_BASE_PORT
@@ -499,6 +506,7 @@ class DecodeConnectorScheduler:
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    num_tokens = req.num_tokens,
                     trace_headers=getattr(req, 'trace_headers', None) or {},
                 )
             req.kv_transfer_params = None
@@ -574,6 +582,9 @@ class DecodeConnectorWorker:
 
         self.ctx = zmq.Context()
         self.zmq_socket_map = {}
+        self.pull_times = {}
+        self.kv_producer_tp_size = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get("kv_producer_tp_size", 64)
+        self.pull_cnt = self.kv_producer_tp_size // self.vllm_config.parallel_config.tensor_parallel_size if model_extra_config.operator_opt_config.use_dcp else 1
 
         if self.async_pull_kv:
             # dp_rank = vllm_config.parallel_config.data_parallel_rank_local
@@ -707,144 +718,180 @@ class DecodeConnectorWorker:
         logger.debug(f" ***** start_load_kv: {len(metadata.requests)}")
         futures = []
         for req_id, meta in metadata.requests.items():
-            # if the local_block_ids is empty, skip pulling kv for the request
-            if len(meta.local_block_ids) == 0:
-                if self.tp_rank == 0:
-                    logger.info(f" ***** Request {req_id} has 0 local blocks, skip load kv.")
-                continue
-            # If local_block_ids is a flat list of int, omni-attention is not used
-            # and we can directly use the local_block_ids and remote_block_ids
-            if isinstance(meta.local_block_ids[0], int):
-                # local_block_ids (kv blocks in D) is more than remote_block_ids (kv blocks in P)
-                # leaded by lookahead num, which is used by eagle and multi step
-                if len(meta.remote_block_ids) < len(meta.local_block_ids):
-                    meta.local_block_ids = meta.local_block_ids[:len(meta.remote_block_ids)]
-                    logger.debug("look ahead token num is greater than 0")
-                # If remote_block_ids is more than local_block_ids, we only need the last N remote blocks
-                # where N is the number of local blocks
-                elif len(meta.remote_block_ids) > len(meta.local_block_ids):
-                    meta.remote_block_ids = meta.remote_block_ids[-len(meta.local_block_ids):]
-                if self.tp_rank == 0:
-                    logger.info(
-                        " ***** start_load_kv for request %s "
-                        "Num local_block_ids: %s. Num remote_block_ids: %s.",
-                        req_id,
-                        len(meta.local_block_ids),
-                        len(meta.remote_block_ids)
-                    )
-            # If local_block_ids is a list of lists (e.g., [[], []]), omni-attention is used
-            # local_block_ids[0] is a list of local block ids for uncompressed layers
-            # local_block_ids[1] is a list of local block ids for compressed layers
-            elif isinstance(meta.local_block_ids[0], list):
-                # If local_block_ids[0] is a list of lists, we need to ensure that remote_block_ids
-                # is a list of lists as well, where each sublist corresponds to the local_block
-                meta.remote_block_ids = [meta.remote_block_ids] * len(meta.local_block_ids)
-                # If local_block_ids[0] is empty, skip pulling kv for the request
-                if len(meta.local_block_ids[0]) == 0:
+            if model_extra_config.operator_opt_config.use_dcp:
+                block_size = self.vllm_config.cache_config.block_size
+                prefill_tp = self.kv_producer_tp_size
+
+                block_total = (meta.num_tokens + block_size - 1) // block_size
+                completed_blocks = block_total // prefill_tp
+                remaining_blocks = block_total % prefill_tp
+                if remaining_blocks ==0 and completed_blocks != 0:
+                    remaining_blocks = prefill_tp
+                    completed_blocks -=1
+                last_col_block_token = [
+                    block_size if idx < remaining_blocks-1 else
+                    (meta.num_tokens % block_size if idx == remaining_blocks-1 else 0)
+                    for idx in range(prefill_tp)
+                ]
+            start_block = 0
+            end_block = 0
+            for remote_dp_rank in range(self.pull_cnt):
+                # if the local_block_ids is empty, skip pulling kv for the request
+                if len(meta.local_block_ids) == 0:
                     if self.tp_rank == 0:
                         logger.info(f" ***** Request {req_id} has 0 local blocks, skip load kv.")
-                    continue
-                # remote_block_ids in P is less than local_block_ids[0] in D, 
-                # leaded by lookahead num, which is used by eagle and multi step
-                elif len(meta.remote_block_ids[0]) < len(meta.local_block_ids[0]):
-                    meta.local_block_ids[0] = meta.local_block_ids[0][:len(meta.remote_block_ids[0])]
-                    logger.debug("look ahead token num is greater than 0")
-                # If remote_block_ids in P is more than local_block_ids[0] in D, we only need the last N remote blocks
-                elif len(meta.remote_block_ids[0]) > len(meta.local_block_ids[0]):
-                    meta.remote_block_ids[0] = meta.remote_block_ids[0][-len(meta.local_block_ids[0]):]
-                if self.tp_rank == 0:
-                    logger.info(
-                        " ***** start_load_kv for request %s "
-                        "Num local_block_ids: %s. Num remote_block_ids: %s.",
-                        req_id,
-                        len(meta.local_block_ids[0]),
-                        len(meta.remote_block_ids[0])
-                    )
-            # handle the unexpected case where local_block_ids is not a list of int or list of lists
-            else:
-                logger.error(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
-                raise RuntimeError(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
-            if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
-                cluster_ids = [0]
-            else:
-                cluster_ids = self.datadist_manager.get_real_remote_cluster_ids(meta)
-            if self.multi_rank_pull_kv and not FLAG_ENABLE_DYNAMIC_LLMDATADIST:
-                # If multi_rank_pull_kv is enabled, each DP rank will pull kv from multiple P ranks
-                # and the cluster_ids are obtained from registered_link_infos
-                # If the local_block_ids is a flat list of int, we can directly use it
-                # As multi_rank_pull_kv is designed to pull kv from two P ranks,
-                # we split the local_block_ids and remote_block_ids into two parts
-                if not isinstance(meta.local_block_ids[0], list):
-                    block_thre = len(meta.local_block_ids) // 2
-                # If the local_block_ids is a flat list of list, only split the blocks for uncompressed layers
+                    continue      
+                if model_extra_config.operator_opt_config.use_dcp:
+                    meta.remote_dp_rank = remote_dp_rank
+                    remaining_token = last_col_block_token[self.tp_rank + self.vllm_config.parallel_config.decode_context_parallel_size * remote_dp_rank]    
+                    remote_block_ids = meta.remote_block_ids
+                    if remaining_token > 0:
+                        end_block = start_block + completed_blocks + 1
+                    elif remaining_token == 0:
+                        end_block = start_block + completed_blocks
+                        remote_block_ids = meta.remote_block_ids[:-1]
+                    local_block_ids = meta.local_block_ids[start_block:end_block]
+                    
+                    if remaining_token > 0 and remaining_token < block_size:
+                        end_block -= 1
+                        local_block_ids[-1] = meta.local_block_ids[completed_blocks * self.pull_cnt + remote_dp_rank]
+                    start_block = end_block
                 else:
-                    block_thre = len(meta.local_block_ids[0]) // 2
-                for idx_cluster, cluster_id in enumerate(cluster_ids):
-                    if not isinstance(meta.local_block_ids[0], list):
-                        if idx_cluster == 0:
-                            local_blocks = meta.local_block_ids[:block_thre]
-                            remote_blocks = meta.remote_block_ids[:block_thre]
-                            len_local_blocks = len(local_blocks)
-                        else:
-                            local_blocks = meta.local_block_ids[block_thre:]
-                            remote_blocks = meta.remote_block_ids[block_thre:]
-                            len_local_blocks = len(local_blocks)
+                    
+                    # If local_block_ids is a flat list of int, omni-attention is not used
+                    # and we can directly use the local_block_ids and remote_block_ids
+                    if isinstance(meta.local_block_ids[0], int):
+                        # local_block_ids (kv blocks in D) is more than remote_block_ids (kv blocks in P)
+                        # leaded by lookahead num, which is used by eagle and multi step
+                        if len(meta.remote_block_ids) < len(meta.local_block_ids):
+                            meta.local_block_ids = meta.local_block_ids[:len(meta.remote_block_ids)]
+                            logger.debug("look ahead token num is greater than 0")
+                        # If remote_block_ids is more than local_block_ids, we only need the last N remote blocks
+                        # where N is the number of local blocks
+                        elif len(meta.remote_block_ids) > len(meta.local_block_ids):
+                            meta.remote_block_ids = meta.remote_block_ids[-len(meta.local_block_ids):]
+                        if self.tp_rank == 0:
+                            logger.info(
+                                " ***** start_load_kv for request %s "
+                                "Num local_block_ids: %s. Num remote_block_ids: %s.",
+                                req_id,
+                                len(meta.local_block_ids),
+                                len(meta.remote_block_ids)
+                            )
+                    # If local_block_ids is a list of lists (e.g., [[], []]), omni-attention is used
+                    # local_block_ids[0] is a list of local block ids for uncompressed layers
+                    # local_block_ids[1] is a list of local block ids for compressed layers
+                    elif isinstance(meta.local_block_ids[0], list):
+                        # If local_block_ids[0] is a list of lists, we need to ensure that remote_block_ids
+                        # is a list of lists as well, where each sublist corresponds to the local_block
+                        meta.remote_block_ids = [meta.remote_block_ids] * len(meta.local_block_ids)
+                        # If local_block_ids[0] is empty, skip pulling kv for the request
+                        if len(meta.local_block_ids[0]) == 0:
+                            if self.tp_rank == 0:
+                                logger.info(f" ***** Request {req_id} has 0 local blocks, skip load kv.")
+                            continue
+                        # remote_block_ids in P is less than local_block_ids[0] in D, 
+                        # leaded by lookahead num, which is used by eagle and multi step
+                        elif len(meta.remote_block_ids[0]) < len(meta.local_block_ids[0]):
+                            meta.local_block_ids[0] = meta.local_block_ids[0][:len(meta.remote_block_ids[0])]
+                            logger.debug("look ahead token num is greater than 0")
+                        # If remote_block_ids in P is more than local_block_ids[0] in D, we only need the last N remote blocks
+                        elif len(meta.remote_block_ids[0]) > len(meta.local_block_ids[0]):
+                            meta.remote_block_ids[0] = meta.remote_block_ids[0][-len(meta.local_block_ids[0]):]
+                        if self.tp_rank == 0:
+                            logger.info(
+                                " ***** start_load_kv for request %s "
+                                "Num local_block_ids: %s. Num remote_block_ids: %s.",
+                                req_id,
+                                len(meta.local_block_ids[0]),
+                                len(meta.remote_block_ids[0])
+                            )
+                    # handle the unexpected case where local_block_ids is not a list of int or list of lists
                     else:
-                        if idx_cluster == 0:
-                            # For uncompressed layers, split the local_block_ids[0] and remote_block_ids
-                            # For compressed layers, only pull kv from the second P rank
-                            local_blocks = [meta.local_block_ids[0][:block_thre], []]
-                            # remote_blocks need to be split as well for getting kv blocks for compressed layers in P
-                            remote_blocks = [meta.remote_block_ids[0][:block_thre], []]
-                            len_local_blocks = len(local_blocks[0])
+                        logger.error(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
+                        raise RuntimeError(f"Unexpected type for meta.local_block_ids[0]: {type(meta.local_block_ids[0])}")
+                if os.getenv("ENABLE_PD_MOCKUP", "0") == "1":
+                    cluster_ids = [0]
+                else:
+                    cluster_ids = self.datadist_manager.get_real_remote_cluster_ids(meta)
+                if self.multi_rank_pull_kv and not FLAG_ENABLE_DYNAMIC_LLMDATADIST and not model_extra_config.operator_opt_config.use_dcp:
+                    # If multi_rank_pull_kv is enabled, each DP rank will pull kv from multiple P ranks
+                    # and the cluster_ids are obtained from registered_link_infos
+                    # If the local_block_ids is a flat list of int, we can directly use it
+                    # As multi_rank_pull_kv is designed to pull kv from two P ranks,
+                    # we split the local_block_ids and remote_block_ids into two parts
+                    if not isinstance(meta.local_block_ids[0], list):
+                        block_thre = len(meta.local_block_ids) // 2
+                    # If the local_block_ids is a flat list of list, only split the blocks for uncompressed layers
+                    else:
+                        block_thre = len(meta.local_block_ids[0]) // 2
+                    for idx_cluster, cluster_id in enumerate(cluster_ids):
+                        if not isinstance(meta.local_block_ids[0], list):
+                            if idx_cluster == 0:
+                                local_blocks = meta.local_block_ids[:block_thre]
+                                remote_blocks = meta.remote_block_ids[:block_thre]
+                                len_local_blocks = len(local_blocks)
+                            else:
+                                local_blocks = meta.local_block_ids[block_thre:]
+                                remote_blocks = meta.remote_block_ids[block_thre:]
+                                len_local_blocks = len(local_blocks)
                         else:
-                            local_blocks = [meta.local_block_ids[0][block_thre:], meta.local_block_ids[1]]
-                            remote_blocks = [meta.remote_block_ids[0][block_thre:], meta.remote_block_ids[1]]
-                            len_local_blocks = len(local_blocks[0])
-                    if len_local_blocks > 0:
-                        task = {
-                            'request_id': req_id,
-                            'remote_request_id': meta.remote_request_id,
-                            'dst_cluster_id': cluster_id,
-                            'local_block_ids': local_blocks,
-                            'remote_block_ids': remote_blocks,
-                            'remote_host_ip': meta.remote_host,
-                            'prefill_dp_rank': meta.remote_dp_rank,
-                            'trace_headers': meta.trace_headers  or {},
-                        }
-                        logger.warning(f"*********** dst cluster_id is {cluster_id}.")
-                        self.queues[cluster_id].put(task)
-            elif self.multi_thread_pull_kv and not FLAG_ENABLE_DYNAMIC_LLMDATADIST:
-                task = {
-                    'request_id': req_id,
-                    'remote_request_id': meta.remote_request_id,
-                    'dst_cluster_id': cluster_ids[0],
-                    'local_block_ids': meta.local_block_ids,
-                    'remote_block_ids': meta.remote_block_ids,
-                    'remote_host_ip': meta.remote_host,
-                    'prefill_dp_rank': meta.remote_dp_rank,
-                    'trace_headers': meta.trace_headers  or {},
-                }
+                            if idx_cluster == 0:
+                                # For uncompressed layers, split the local_block_ids[0] and remote_block_ids
+                                # For compressed layers, only pull kv from the second P rank
+                                local_blocks = [meta.local_block_ids[0][:block_thre], []]
+                                # remote_blocks need to be split as well for getting kv blocks for compressed layers in P
+                                remote_blocks = [meta.remote_block_ids[0][:block_thre], []]
+                                len_local_blocks = len(local_blocks[0])
+                            else:
+                                local_blocks = [meta.local_block_ids[0][block_thre:], meta.local_block_ids[1]]
+                                remote_blocks = [meta.remote_block_ids[0][block_thre:], meta.remote_block_ids[1]]
+                                len_local_blocks = len(local_blocks[0])
+                        if len_local_blocks > 0:
+                            task = {
+                                'request_id': req_id,
+                                'remote_request_id': meta.remote_request_id,
+                                'dst_cluster_id': cluster_id,
+                                'local_block_ids': local_blocks,
+                                'remote_block_ids': remote_blocks,
+                                'remote_host_ip': meta.remote_host,
+                                'prefill_dp_rank': meta.remote_dp_rank,
+                                'trace_headers': meta.trace_headers  or {},
+                            }
+                            logger.warning(f"*********** dst cluster_id is {cluster_id}.")
+                            self.queues[cluster_id].put(task)
+                elif self.multi_thread_pull_kv and not FLAG_ENABLE_DYNAMIC_LLMDATADIST and not model_extra_config.operator_opt_config.use_dcp:
+                    task = {
+                        'request_id': req_id,
+                        'remote_request_id': meta.remote_request_id,
+                        'dst_cluster_id': cluster_ids[0],
+                        'local_block_ids': meta.local_block_ids,
+                        'remote_block_ids': meta.remote_block_ids,
+                        'remote_host_ip': meta.remote_host,
+                        'prefill_dp_rank': meta.remote_dp_rank,
+                        'trace_headers': meta.trace_headers  or {},
+                    }
 
-                self.queues[cluster_ids[0]].put(task)
-            else:
-                # Use ThreadPoolExecutor to handle the task
-                future = self.executor.submit(
-                    self._read_blocks,
-                    local_block_ids=meta.local_block_ids,
-                    remote_block_ids=meta.remote_block_ids,
-                    dst_cluster_id=cluster_ids[0],
-                    request_id=req_id,
-                    remote_request_id=meta.remote_request_id,
-                    remote_host_ip=meta.remote_host,
-                    prefill_dp_rank=meta.remote_dp_rank,
-                    trace_headers=meta.trace_headers or {},
-                )
-                futures.append(future)
+                    self.queues[cluster_ids[0]].put(task)
+                else:
+                    # Use ThreadPoolExecutor to handle the task
+                    future = self.executor.submit(
+                        self._read_blocks,
+                        local_block_ids=local_block_ids if model_extra_config.operator_opt_config.use_dcp else meta.local_block_ids,
+                        remote_block_ids=remote_block_ids if model_extra_config.operator_opt_config.use_dcp else meta.remote_block_ids,
+                        dst_cluster_id=cluster_ids[0],
+                        request_id=req_id,
+                        remote_request_id=meta.remote_request_id,
+                        remote_host_ip=meta.remote_host,
+                        prefill_dp_rank=meta.remote_dp_rank,
+                        trace_headers=meta.trace_headers or {},
+                    )
+                    futures.append(future)            
+            
 
         if not self.multi_thread_pull_kv or FLAG_ENABLE_DYNAMIC_LLMDATADIST:
             for future in futures:
-                future.add_done_callback(handle_exception)
+                future.add_done_callback(handle_exception)            
 
     def _read_blocks(
         self,
@@ -861,12 +908,13 @@ class DecodeConnectorWorker:
         if hasattr(self.vllm_config.model_config.hf_config, 'param_sink_with_value'):
             local_block_ids.insert(0, 0)
             remote_block_ids.insert(0, 0)
-        if FLAG_ENABLE_DYNAMIC_LLMDATADIST:
-            self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id, prefill_dp_rank)
-        else:
-            self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id)
+        if local_block_ids != []:
+            if FLAG_ENABLE_DYNAMIC_LLMDATADIST:
+                self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id, prefill_dp_rank)
+            else:
+                self.datadist_manager.pull_kv(remote_block_ids, local_block_ids, dst_cluster_id)
 
-        if self.vllm_config.parallel_config.tensor_parallel_size == 1:
+        if self.vllm_config.parallel_config.tensor_parallel_size == 1 and not model_extra_config.operator_opt_config.use_dcp:
             # tp=1, send to prefill tp rank0 directly.
             data = [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}]
             self._send_pulled_kv_req_list(remote_host_ip, data)
@@ -877,7 +925,7 @@ class DecodeConnectorWorker:
                     request_id = request_id + '|' + headers_str
                 self._recving_transfers.append(request_id)
         else:
-            if self.multi_thread_pull_kv:
+            if self.multi_thread_pull_kv and not model_extra_config.operator_opt_config.use_dcp:
                 # tp>1, send to decode to rank0 firstly.
                 self._send_pulled_kv_req_list(
                     self.tp_sync_path,
@@ -889,16 +937,20 @@ class DecodeConnectorWorker:
                     }
                 )
             else:
-                torch.distributed.barrier(group=get_tp_group().cpu_group)
-                if get_tensor_model_parallel_rank() == 0:
-                    data = [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}]
-                    self._send_pulled_kv_req_list(remote_host_ip, data)
                 with self._transfer_lock:
-                    if profiling_is_set:
-                        headers = data[0]['trace_headers'] or None
-                        headers_str = json.dumps(headers)
-                        request_id = request_id + '|' + headers_str
-                    self._recving_transfers.append(request_id)
+                    self.pull_times[request_id] = self.pull_times.get(request_id, 0) + 1
+                if self.pull_times[request_id] == self.pull_cnt:
+                    torch.distributed.barrier(group=get_tp_group().cpu_group)
+                    if get_tensor_model_parallel_rank() == 0:
+                        data = [{'remote_request_id': remote_request_id, 'trace_headers': trace_headers or {}}]
+                        self._send_pulled_kv_req_list(remote_host_ip, data)
+                    with self._transfer_lock:
+                        if profiling_is_set:
+                            headers = data[0]['trace_headers'] or None
+                            headers_str = json.dumps(headers)
+                            request_id = request_id + '|' + headers_str
+                        self._recving_transfers.append(request_id)
+                    self.pull_times.pop(request_id, None)
         logger.debug(f" ***** read block, req_id:{request_id}, local_block_ids:{local_block_ids}, remote_block_ids:{remote_block_ids}")
         cost = time.time() - start
         if self.tp_rank == 0:

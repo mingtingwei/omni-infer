@@ -23,6 +23,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Dict, Optional, Union, Any, List
 from contextlib import nullcontext
+import math
 
 import numpy as np
 import torch
@@ -174,7 +175,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.rejection_sampler = SparseRejectionSamplerValidator(vllm_config, device, self)
                 self.drafter = PostDrafter(vllm_config, device, self)
 
-
+        self.dcp_kv_cache_interleave_size = self.block_size if model_extra_config.operator_opt_config.use_dcp else 1
         self._init_graph_options()
 
         self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
@@ -482,19 +483,51 @@ class NPUModelRunner(GPUModelRunner):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
             block_size = kv_cache_group_spec.kv_cache_spec.block_size
             block_table: BlockTable = self.input_batch.block_table[kv_cache_group_id]
-            # NOTE(runze): since each request has at most M blocks, the offset is at most M-1
-            block_table_indices = (
-                req_indices * block_table.max_num_blocks_per_req +
-                np.minimum(positions_np // block_size, block_table.max_num_blocks_per_req - 1))
             block_table_cpu = block_table.get_cpu_tensor()
-            block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-            block_offsets = positions_np % block_size
-            np.add(
-                block_numbers * block_size,
-                block_offsets,
-                out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
-            if self.routed_experts_capturer:
-                self.slot_mapping = block_table.slot_mapping_np[:total_num_scheduled_tokens]
+            
+            if model_extra_config.operator_opt_config.use_dcp:
+                if model_extra_config.task_config.is_prefill_node:
+                    virtual_block_size = block_size * get_tensor_model_parallel_world_size()
+                    block_table_indices = (
+                        req_indices * block_table.max_num_blocks_per_req +
+                        np.minimum(positions_np // virtual_block_size, block_table.max_num_blocks_per_req - 1))
+    
+                    block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+                    virtual_block_offsets = positions_np % virtual_block_size
+                    
+                    mask = virtual_block_offsets // self.dcp_kv_cache_interleave_size % get_tensor_model_parallel_world_size() == get_tensor_model_parallel_rank()
+                    block_offsets = virtual_block_offsets // (get_tensor_model_parallel_world_size() * self.dcp_kv_cache_interleave_size) * self.dcp_kv_cache_interleave_size + virtual_block_offsets % self.dcp_kv_cache_interleave_size
+                    slot_mapping = block_numbers * block_size + block_offsets
+                    block_table.slot_mapping_np[:req_indices.shape[0]] = np.where(mask, slot_mapping, -1)
+                else:
+                    virtual_block_size = block_size * get_tensor_model_parallel_world_size()
+                    block_table_indices = positions_np // virtual_block_size
+                    block_table_offset = positions_np % virtual_block_size
+                    
+                    block_table_indices = (
+                        req_indices * block_table.max_num_blocks_per_req +
+                        np.minimum(positions_np // virtual_block_size, block_table.max_num_blocks_per_req - 1))
+                    
+                    block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+                    #within this rank
+                    mask = block_table_offset // block_size % get_tensor_model_parallel_world_size() == get_tensor_model_parallel_rank()
+                    block_offsets = positions_np % block_size
+                    slot_mapping = block_numbers * block_size + block_offsets
+                    block_table.slot_mapping_np[:req_indices.shape[0]] = np.where(mask, slot_mapping, -1)                
+
+            else:
+                # NOTE(runze): since each request has at most M blocks, the offset is at most M-1
+                block_table_indices = (
+                    req_indices * block_table.max_num_blocks_per_req +
+                    np.minimum(positions_np // block_size, block_table.max_num_blocks_per_req - 1))
+                block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+                block_offsets = positions_np % block_size
+                np.add(
+                    block_numbers * block_size,
+                    block_offsets,
+                    out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
+                if self.routed_experts_capturer:
+                    self.slot_mapping = block_table.slot_mapping_np[:total_num_scheduled_tokens]
 
         # check and set attention state
         can_decode = self.vllm_config.kv_transfer_config is None or self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
@@ -1113,7 +1146,7 @@ class NPUModelRunner(GPUModelRunner):
         for self.curr_step in range(self.total_step):
             start_1 = time.time()
             if not scheduler_output.total_num_scheduled_tokens:
-                if get_dp_group().world_size > 1:
+                if get_dp_group().world_size > 1 and (not self.enable_sleep_mode):
                    self._dummy_run(1)
                 else:
                     time.sleep(0.001) # release GIL
@@ -1529,7 +1562,7 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer" \
             and not model_extra_config.task_config.enable_attn_ffn_disaggregation:
-            hidden_states = self._dummy_run(self.max_batch_size * get_dp_group().world_size)
+            hidden_states = self._dummy_run(self.max_batch_size * get_dp_group().world_size * get_tensor_model_parallel_world_size())
         elif model_extra_config.task_config.enable_attn_ffn_disaggregation:
             hidden_states = self._dummy_run(self.max_num_reqs)
         else:

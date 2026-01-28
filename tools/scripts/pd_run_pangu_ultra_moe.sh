@@ -45,6 +45,7 @@ KV_ROLE="kv_producer"
 KV_RANK=0
 KV_ENGINE_ID=0
 KV_PARALLEL_SIZE=2
+KV_PRODUCER_TP_SIZE=64
 
 GPU_UTIL=0.9
 EXTRA_ARGS=""
@@ -96,6 +97,7 @@ print_help() {
     echo "  --kv-rank                        vLLM framework: PD separation parameter, kv rank (p_num/d_num-1) (default: $KV_RANK)"
     echo "  --kv-engine-id                   vLLM framework: PD separation parameter, kv engine ID (default: $KV_ENGINE_ID)"
     echo "  --kv-parallel-size               vLLM framework: PD separation parameter, kv parallel size (equal to num_p + num_d) (default: $KV_PARALLEL_SIZE)"
+    echo "  --kv-producer-tp-size            vLLM framework: PD separation parameter, kv producer tensor parallel size (default: $KV_PRODUCER_TP_SIZE)"
     echo "  --llm-waiting-out                vLLM framework: PD separation parameter, P instance requests waiting time out (default: $LLM_WAITING_OUT)"
     echo "  --extra-args                     vLLM framework: Additional VLLM arguments (space-separated, e.g., '--enable-expert-parallel') (default: $EXTRA_ARGS)"
     echo "  --additional-args                vLLM framework: Additional VLLM arguments"
@@ -218,6 +220,9 @@ parse_long_option() {
         --kv-parallel-size)
             KV_PARALLEL_SIZE="$2"
             ;;
+        --kv-producer-tp-size)
+            KV_PRODUCER_TP_SIZE="$2"
+            ;;
         --llm-waiting-out)
             LLM_WAITING_OUT="$2"
             ;;
@@ -279,7 +284,8 @@ KV_TRANSFER_CONFIG=$(cat <<EOF
     "kv_role": "$KV_ROLE",
     "kv_rank": $KV_RANK,
     "engine_id": $KV_ENGINE_ID,
-    "kv_parallel_size": $KV_PARALLEL_SIZE
+    "kv_parallel_size": $KV_PARALLEL_SIZE,
+    "kv_connector_extra_config": {"kv_producer_tp_size": $KV_PRODUCER_TP_SIZE}
 }
 EOF
 )

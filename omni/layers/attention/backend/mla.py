@@ -67,6 +67,21 @@ def group_request_list(seq_lens, query_lens, block_tables, threshold):
         blocks_result.append(blocks_current_group)
     return s_lens_result, q_lens_result, blocks_result
 
+def determine_has_context(seq_lens_group, chunksize):
+    has_context_result = []
+    for seq_lens in seq_lens_group:
+        has_context = any(seq_len > chunksize for seq_len in seq_lens)
+        has_context_result.append(has_context)
+    return has_context_result
+
+def column_cumsum_numpy(seq_lens_3d):
+    result_per_group = []
+    for group in seq_lens_3d:
+        arr = np.array(group)
+        cum_result = np.cumsum(arr, axis=0)
+        result_per_group.append(cum_result.T.tolist())
+    return result_per_group
+
 class AscendMLABackend(AttentionBackend):
 
     accept_output_buffer: bool = True
@@ -169,6 +184,8 @@ class AscendMLAPrefillMetadata:
     # adaptor for chunk-prefill & prefix-caching use
     seq_qlen_group: Optional[list] = None
     seq_kvlen_group: Optional[list] = None
+    has_context_group: Optional[list] = None
+    chunk_seq_lens_group: Optional[list] = None
     kv_index_list: Optional[list] = None
 
     cos: Optional[torch.Tensor] = None
@@ -184,7 +201,9 @@ class AscendMLAPrefillMetadata:
     computed_seq_lens: Optional[torch.Tensor] = None
 
     prefix_meta: Optional[list[PrefixCopyMeta]] = None
-
+    prefill_chunksize: Optional[int] = None
+    kv_allgather_restore_index_list: Optional[list] = None
+    max_kv_index_list: Optional[list] = None
 
 @dataclass
 class AscendMLADecodeMetadata:
@@ -197,6 +216,8 @@ class AscendMLADecodeMetadata:
     cos: Optional[torch.Tensor] = None
     sin: Optional[torch.Tensor] = None
     best_topk: Optional[torch.Tensor] = None
+    batch_seq_out_mask: Optional[torch.Tensor] = None
+    batch_seq_lse_mask: Optional[torch.Tensor] = None
 
 @dataclass
 class AscendMLAMetadata:
@@ -288,6 +309,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         self.decode_num_tokens_cpu = torch.zeros(
             runner.max_num_reqs, dtype=torch.int32, pin_memory=is_pin_memory_available(),
         )
+        self.dcp_kv_cache_interleave_size = self.runner.dcp_kv_cache_interleave_size
 
     def generate_activate_mask(self, actual_seqs_num, batch_size):
         if len(self.decode_gear_list) > 1:
@@ -428,6 +450,88 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             kv_index.append(index.reshape(-1)[:seq_len])
         return torch.tensor(np.concatenate(kv_index, axis=0), dtype=torch.long, device="cpu").npu()
 
+    def get_context_kv_index_slices(self, query_lens, seq_lens, block_tables, chunksize, dcp_kv_cache_interleave_size):
+        assert len(query_lens) == len(seq_lens)
+        context_seq_lens = [b - a for a,b in zip(query_lens, seq_lens)]
+        kv_index_list = []
+        max_kv_index_list = []
+        kv_allgather_restore_index_list = []
+        num_chunk = max(math.ceil(context_seq_len / chunksize) for context_seq_len in context_seq_lens)
+        kv_slice_rank = get_tensor_model_parallel_rank()
+        kv_slice_size = get_tensor_model_parallel_world_size()
+        
+        for req in range(len(context_seq_lens)):
+            kv_index = []
+            max_kv_index = []
+            restore_idx = []
+            block_table = block_tables[req]
+            index = self.base_index + np.expand_dims(block_table.cpu().numpy(), axis=-1) * self.base_block.repeat(block_table.shape[0], axis=0)
+            
+            start_idx = 0
+            remain_kv_len = context_seq_lens[req]
+            for i in range(num_chunk):
+                cur_kv_len = min(remain_kv_len, chunksize)
+                group_count = cur_kv_len // (dcp_kv_cache_interleave_size * kv_slice_size)
+                remain_cur_kv_len = cur_kv_len - group_count * dcp_kv_cache_interleave_size * kv_slice_size
+                
+                if remain_cur_kv_len == 0:
+                    max_offset = group_count * dcp_kv_cache_interleave_size
+                    offset = group_count * dcp_kv_cache_interleave_size
+                else:
+                    last_rank = remain_cur_kv_len // dcp_kv_cache_interleave_size
+                    max_offset = group_count * dcp_kv_cache_interleave_size + dcp_kv_cache_interleave_size
+                    if kv_slice_rank < last_rank:
+                        offset = group_count * dcp_kv_cache_interleave_size + dcp_kv_cache_interleave_size
+                    elif kv_slice_rank == last_rank:
+                        offset = group_count * dcp_kv_cache_interleave_size + (remain_cur_kv_len % dcp_kv_cache_interleave_size)
+                    else:
+                        offset = group_count * dcp_kv_cache_interleave_size
+                
+                chunk_kv_index = torch.tensor(index.reshape(-1)[start_idx:start_idx + offset].reshape(-1), dtype=torch.long, device="cpu").npu()
+                kv_index.append(chunk_kv_index)
+                max_chunk_kv_index = torch.tensor(index.reshape(-1)[start_idx:start_idx + max_offset].reshape(-1), dtype=torch.long, device="cpu").npu()
+                max_kv_index.append(max_chunk_kv_index)
+                
+                # build allgather restore index
+                chunk_restore_idx = self._build_chunk_restore_index(min(chunksize, remain_kv_len), max_offset, chunk_kv_index, dcp_kv_cache_interleave_size)
+                restore_idx.append(chunk_restore_idx)
+                
+                start_idx += max_offset
+                remain_kv_len = max(0, remain_kv_len - chunksize)
+            kv_index_list.append(kv_index)
+            max_kv_index_list.append(max_kv_index)
+            kv_allgather_restore_index_list.append(restore_idx)
+        return kv_index_list, max_kv_index_list, kv_allgather_restore_index_list
+
+    def _build_chunk_restore_index(self, chunk_size, tokens_per_rank, chunk_kv_index, dcp_kv_cache_interleave_size):
+        dcp_size = self.runner.vllm_config.parallel_config.decode_context_parallel_size
+        rank_start_indices = torch.zeros(dcp_size, dtype=torch.long, device=chunk_kv_index.device)
+        for i in range(1, dcp_size):
+            rank_start_indices[i] = rank_start_indices[i - 1] + tokens_per_rank
+        
+        normal_indices = torch.arange(chunk_size, dtype=torch.long, device=chunk_kv_index.device)
+        target_ranks = normal_indices // dcp_kv_cache_interleave_size % dcp_size
+        target_offsets = normal_indices // (dcp_size * dcp_kv_cache_interleave_size) * dcp_kv_cache_interleave_size + (normal_indices % dcp_kv_cache_interleave_size)
+        source_indices = rank_start_indices[target_ranks] + target_offsets
+        return source_indices
+
+    def get_context_chunk_seq_lens(self, query_lens, seq_lens, chunksize):
+        chunk_seq_lens = []
+        context_seq_lens = [b-a for a,b in zip(query_lens, seq_lens)]
+        num_chunk = max(math.ceil(context_seq_len / chunksize) for context_seq_len in context_seq_lens)
+        for req in range(len(context_seq_lens)):
+            remaining = context_seq_lens[req]
+            chunks = []
+            for _ in range(num_chunk):
+                if remaining >= chunksize:
+                    chunks.append(chunksize)
+                    remaining -= chunksize
+                else:
+                    chunks.append(remaining)
+                    remaining = 0
+            chunk_seq_lens.append(chunks)
+        return chunk_seq_lens
+
     def prepare_sp_split_indices(self, query_lens):
         sp_size = get_tensor_model_parallel_world_size()
         sp_rank = get_tensor_model_parallel_rank()
@@ -513,6 +617,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
             device, non_blocking=True)
 
+        chunksize = math.floor(self.runner.vllm_config.scheduler_config.max_num_batched_tokens / (get_tensor_model_parallel_world_size() * self.dcp_kv_cache_interleave_size)) * (get_tensor_model_parallel_world_size() * self.dcp_kv_cache_interleave_size)
         if self.runner.omni_cache is not None:
             assert isinstance(self.runner.omni_cache, BaseOmniCache), \
                 f"Omni cache type is {type(self.runner.omni_cache)}"
@@ -546,15 +651,33 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     block_table,
                     self.runner.max_num_tokens)
 
+                has_context_group = determine_has_context(seq_kvlen_group, chunksize)
                 # Prepare kv index for prefill get kv_latent from kv_cache
                 if self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
                     kv_index_list = []
-                    if block_table is not None and block_table.numel() > 0:
-                        for seq_lens, block_tables in zip(seq_kvlen_group, block_groups):
-                            kv_index = self.get_kv_index(seq_lens, block_tables)
-                            kv_index_list.append(kv_index)
+                    max_kv_index_list = []
+                    kv_allgather_restore_index_list = []
+                    chunk_seq_lens_group = []
+                    if model_extra_config.operator_opt_config.use_dcp:
+                        if block_table is not None and block_table.numel() > 0:
+                            for query_lens, seq_lens, block_tables in zip(seq_qlen_group, seq_kvlen_group, block_groups):
+                                kv_index, max_kv_index, restore_idx = self.get_context_kv_index_slices(query_lens, seq_lens, block_tables, chunksize, self.dcp_kv_cache_interleave_size)
+                                kv_index_list.append(kv_index)
+                                max_kv_index_list.append(max_kv_index)
+                                kv_allgather_restore_index_list.append(restore_idx)
+                                chunk_seq_lens = self.get_context_chunk_seq_lens(query_lens, seq_lens, chunksize)
+                                chunk_seq_lens_group.append(chunk_seq_lens)
+                        chunk_seq_lens_group = column_cumsum_numpy(chunk_seq_lens_group)
+                    else:
+                        if block_table is not None and block_table.numel() > 0:
+                            for seq_lens, block_tables in zip(seq_kvlen_group, block_groups):
+                                kv_index = self.get_kv_index(seq_lens, block_tables)
+                                kv_index_list.append(kv_index)
                 else:
                     kv_index_list = None
+                    max_kv_index_list = None
+                    kv_allgather_restore_index_list = None
+                    chunk_seq_lens_group = None
 
                 seq_qlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_qlen_group]
                 seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
@@ -609,7 +732,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 tmp_input_position = input_positions[tokens_start:]
 
             first_layer_ind = self.runner.model.model.start_layer
-            if not model_extra_config.operator_opt_config.enable_dsa:
+            if not model_extra_config.operator_opt_config.enable_dsa and not model_extra_config.operator_opt_config.use_dcp:
                 query_lens = query_lens_list[reqs_start:]
                 seq_lens = seq_lens_list
             else:
@@ -642,6 +765,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 max_query_len=max_query_len,
                 seq_qlen_group=seq_qlen_group,
                 seq_kvlen_group=seq_kvlen_group,
+                has_context_group=has_context_group,
                 kv_index_list=kv_index_list,
                 sin=sin,
                 cos=cos,
@@ -654,6 +778,10 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 actual_query_lens=actual_query_lens if model_extra_config.parall_config.attn_sp_size > 1 else None,
                 computed_seq_lens=computed_seq_lens if model_extra_config.parall_config.attn_sp_size > 1 else None,
                 prefix_meta=prefix_meta if model_extra_config.operator_opt_config.use_omni_cache else None,
+                prefill_chunksize=chunksize if model_extra_config.operator_opt_config.use_dcp else None,
+                chunk_seq_lens_group=chunk_seq_lens_group if model_extra_config.operator_opt_config.use_dcp else None,
+                kv_allgather_restore_index_list=kv_allgather_restore_index_list if model_extra_config.operator_opt_config.use_dcp else None,
+                max_kv_index_list=max_kv_index_list if model_extra_config.operator_opt_config.use_dcp else None,
             )
 
         decode_metadata = None
@@ -702,7 +830,17 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     else:
                         logger.warning(f"++++++++ Time cost for one-step block_status update is {(time1-time0)*1000}ms ++++++++")
 
-                seq_lens = (input_positions + 1).to(self.runner.seq_lens.dtype)
+                seq_lens = calculate_seq_lens_for_dcp(input_positions).to(self.runner.seq_lens.dtype)
+                hf_text_config = self.runner.model_config.hf_text_config
+                T = seq_lens.shape[0]
+                N = getattr(hf_text_config, "num_attention_heads", 0)
+                D = getattr(hf_text_config, "attention_kv_lora_dim", 0)
+                batch_seq_mask = (seq_lens == 0)
+                batch_seq_out_mask = batch_seq_mask[None, :, None]
+                batch_seq_out_mask = batch_seq_out_mask.expand((N, T, D))
+                batch_seq_lse_mask = batch_seq_mask[:, None, None]
+                batch_seq_lse_mask = batch_seq_lse_mask.expand((T, N, 1))
+                
                 block_table = block_table[:self._num_decodes, ...]
                 # has speculative tokens
                 if self._num_decode_tokens > self._num_decodes:
@@ -737,7 +875,9 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 mc2_mask=self.mc2_mask,
                 cos=cos,
                 sin=sin,
-                best_topk=best_topk)
+                best_topk=best_topk,
+                batch_seq_out_mask=batch_seq_out_mask,
+                batch_seq_lse_mask=batch_seq_lse_mask)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
@@ -970,6 +1110,16 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         )
 
         seq_lens = torch.ones(max_pad_size, dtype=torch.long, device=self.runner.device, pin_memory=True) * 2
+        hf_text_config = self.runner.model_config.hf_text_config
+        T = seq_lens.shape[0]
+        N = getattr(hf_text_config, "num_attention_heads", 0)
+        D = getattr(hf_text_config, "attention_kv_lora_dim", 0)
+        batch_seq_mask = (seq_lens == 0)
+        batch_seq_out_mask = batch_seq_mask[None, :, None]
+        batch_seq_out_mask = batch_seq_out_mask.expand((N, T, D))
+        batch_seq_lse_mask = batch_seq_mask[:, None, None]
+        batch_seq_lse_mask = batch_seq_lse_mask.expand((T, N, 1))
+        
         first_layer_ind = self.runner.model.model.start_layer
         if isinstance(self.runner.model.model.layers[first_layer_ind].self_attn, torch.nn.ModuleList):
             cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn[0].rotary_emb.get_cos_sin(input_positions)
@@ -986,7 +1136,9 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 mc2_mask=self.mc2_mask,
                 cos=cos,
                 sin=sin,
-                best_topk=best_topk)
+                best_topk=best_topk,
+                batch_seq_out_mask=batch_seq_out_mask,
+                batch_seq_lse_mask=batch_seq_lse_mask)
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_tokens,
             slot_mapping=slot_mapping,
@@ -1058,3 +1210,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         # This method should be implemented in the subclass
         raise NotImplementedError("AscendMLAImpl.forward is not implemented.")
 
+def calculate_seq_lens_for_dcp(input_positions):
+    block_size = 128
+    virtual_block_size = block_size * get_tensor_model_parallel_world_size()
+    
+    block_table_group_indices = (input_positions + 1) // virtual_block_size
+    block_table_in_group_offset = ((input_positions + 1) % virtual_block_size) - (get_tensor_model_parallel_rank() * block_size)
+    block_table_in_group_offset_clamp = torch.clamp(block_table_in_group_offset, min=0, max=block_size)
+    seq_len = block_table_group_indices * block_size + block_table_in_group_offset_clamp
+    return seq_len

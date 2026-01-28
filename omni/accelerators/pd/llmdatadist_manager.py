@@ -18,7 +18,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from omni.accelerators.pd.ranktable.local_info import LocalInfo
 from omni.accelerators.pd.ranktable.rank_table import GlobalRankTable, RankTableConfig
-from omni.accelerators.pd.utils import get_p_start_rank, prepare_ranktables
+from omni.accelerators.pd.utils import get_p_start_rank, prepare_ranktables, get_p_start_rank_dcp
+from omni.models.config_loader.loader import model_extra_config
 from vllm.config import VllmConfig
 import os
 
@@ -331,11 +332,16 @@ class LLMDataDistManager:
                 decode_id = 0
                 for decode_device in decode_server_group.device_list:
                     d_rank = decode_device.rank_id
-                    # compute p_rank with dp_size=1, and expand to dp_size>1.
-                    p_rank_start = get_p_start_rank(prefill_tp_size, 1, decode_tp_size, decode_dp_size,
-                                              decode_num, decode_id, d_rank)
+                    if model_extra_config.operator_opt_config.use_dcp:
+                        p_rank_start = get_p_start_rank_dcp(prefill_tp_size, 1, decode_tp_size, decode_dp_size,
+                                                decode_num, decode_id, d_rank)
+                        pd_pairs = [(p_rank_start + tp_idx * decode_tp_size, d_rank) for tp_idx in range(prefill_tp_size // decode_tp_size)]
+                    else:                 
+                        # compute p_rank with dp_size=1, and expand to dp_size>1.
+                        p_rank_start = get_p_start_rank(prefill_tp_size, 1, decode_tp_size, decode_dp_size,
+                                                decode_num, decode_id, d_rank)
 
-                    pd_pairs = [(p_rank_start + dp_idx * prefill_tp_size, d_rank) for dp_idx in range(prefill_dp_size)]
+                        pd_pairs = [(p_rank_start + dp_idx * prefill_tp_size, d_rank) for dp_idx in range(prefill_dp_size)]
 
                     if self.data_dist_config.kv_producer_pp_size > 1:
                         decode_cluster_id = decode_device.cluster_id

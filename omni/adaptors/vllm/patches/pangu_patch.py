@@ -1,4 +1,4 @@
-from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.utils import get_attr_by_names, _round_up
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -6,7 +6,10 @@ logger = init_logger(__name__)
 
 
 def patch_pangu():
+    from typing import Optional
     from vllm.config import ModelConfig
+    from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
+    from vllm.v1.request import Request
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -368,6 +371,124 @@ def patch_pangu():
         MRotaryEmbedding.get_input_positions_tensor = get_input_positions_tensor
         MRotaryEmbedding._pangu_omni_get_input_positions_tensor = _pangu_omni_get_input_positions_tensor
         print("+++++++++++++++++++++++patch_rotary_embedding+++++++++++++++++++++++++++")
+
+    from vllm.utils import cdiv
+    def allocate_slots(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_draft_tokens: int = 0,
+        num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
+        dcp_size: Optional[int] = 1,
+        is_swap: bool = False
+    ) -> Optional[KVCacheBlocks]:
+        """Add slots for a request with new tokens to append.
+
+        Args:
+            request: The request to allocate slots.
+            num_new_tokens: The number of tokens to allocate, including external
+                tokens. Note that this does not include tokens that have
+                already been computed locally (i.e. new_computed_blocks).
+            num_new_computed_tokens: The number of new computed tokens just
+                hitting the prefix caching, excluding external tokens.
+            new_computed_blocks: The cached blocks for the above new computed 
+                tokens.
+            num_lookahead_tokens: The number of speculative tokens to allocate.
+                This is used by spec decode proposers with kv-cache such 
+                as eagle.
+            delay_cache_blocks: Whether to skip caching the blocks. This is
+                used by P/D when allocating blocks used in a KV transfer
+                which will complete in a future step.
+
+        Blocks layout:
+        ```
+        -----------------------------------------------------------------------
+        | < computed > | < new computed > |    < new >    | < pre-allocated > |
+        -----------------------------------------------------------------------
+        |                  < required >                   |
+        --------------------------------------------------
+        |                    < full >                  |
+        ------------------------------------------------
+                                          | <new full> |
+                                          --------------
+        ```
+        The following *_blocks are illustrated in this layout.
+
+        Returns:
+            A list of new allocated blocks.
+        """
+        if num_new_tokens == 0 and not is_swap:
+            raise ValueError("num_new_tokens must be greater than 0")
+
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = []
+
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self.single_type_manager.remove_skipped_blocks(
+            request.request_id, request.num_computed_tokens)
+
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix caching hits
+        num_computed_tokens = (request.num_computed_tokens +
+                               num_new_computed_tokens) 
+        num_tokens_need_slot = min(
+            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            self.max_model_len)
+        if dcp_size > 1:
+            num_tokens_need_slot = cdiv(num_tokens_need_slot, dcp_size)
+        
+        num_blocks_to_allocate = (
+            self.single_type_manager.get_num_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=num_tokens_need_slot,
+                new_computed_blocks=new_computed_block_list,
+            ))
+
+        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+            # Cannot allocate new blocks
+            return None
+
+        # Touch the computed blocks to make sure they won't be evicted.
+        if self.enable_caching:
+            self.block_pool.touch(new_computed_block_list)
+        else:
+            assert not new_computed_block_list, (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
+
+        # Append the new computed blocks to the request blocks until now to
+        # avoid the case where the new blocks cannot be allocated.
+        self.single_type_manager.save_new_computed_blocks(
+            request.request_id, new_computed_block_list)
+
+        new_blocks = self.single_type_manager.allocate_new_blocks(
+            request.request_id, num_tokens_need_slot)
+
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
+            return KVCacheBlocks(new_blocks)
+
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens, request.num_tokens)
+        self.single_type_manager.cache_blocks(
+            request, self.req_to_block_hashes[request.request_id],
+            num_tokens_to_cache)
+
+        return KVCacheBlocks(new_blocks)
+    KVCacheManager.allocate_slots = allocate_slots
 
     ModelConfig.is_deepseek_mla = is_deepseek_mla
     ModelConfig._verify_with_expert_parallelism = _verify_with_expert_parallelism

@@ -33,7 +33,7 @@ class _IndexerStub(torch.nn.Module):
         return topk, None, None
 
 
-def _make_model_extra_config(enable_dsa: bool, use_mlaprolog: bool):
+def _make_model_extra_config(enable_dsa: bool, use_mlaprolog: bool, use_dcp: bool, is_prefill_node: bool):
     return SimpleNamespace(
         operator_opt_config=SimpleNamespace(
             enable_dsa=enable_dsa,
@@ -51,6 +51,7 @@ def _make_model_extra_config(enable_dsa: bool, use_mlaprolog: bool):
             mla_multistream_limit_core=0,
             enable_prefill_micro_batch=False,
             c8_calib_path=None,
+            use_dcp=use_dcp
         ),
         parall_config=SimpleNamespace(
             o_proj_tp_size=1,
@@ -59,13 +60,14 @@ def _make_model_extra_config(enable_dsa: bool, use_mlaprolog: bool):
         task_config=SimpleNamespace(
             decode_gear_list=[8],
             hardware_platform="A3",
+            is_prefill_node=is_prefill_node
         ),
     )
 
 
 @pytest.fixture
 def mla():
-    cfg = _make_model_extra_config(enable_dsa=True, use_mlaprolog=False)
+    cfg = _make_model_extra_config(enable_dsa=True, use_mlaprolog=False, use_dcp=False, is_prefill_node=False)
 
     cur_vllm_cfg = SimpleNamespace(
         npu_compilation_config=SimpleNamespace(level=mla_mod.CompilationLevel.NO_COMPILATION),
@@ -120,6 +122,244 @@ def test_init_basic(mla):
     assert mla.o_proj is not None
     assert mla.indexer is not None
 
+@pytest.fixture
+def mla_prefill():
+    cfg = _make_model_extra_config(enable_dsa=False, use_mlaprolog=False, use_dcp=False, is_prefill_node=True)
+    cfg.operator_opt_config.prefill_enable_mla_alltoall = True
+    cfg.operator_opt_config.use_omni_cache = False
+    cfg.parall_config.attn_sp_size = 1
+    cfg.parall_config.o_proj_tp_size = 1
+    
+    cur_vllm_cfg = SimpleNamespace(
+        npu_compilation_config=SimpleNamespace(level=mla_mod.CompilationLevel.NO_COMPILATION),
+        speculative_config=None,
+    )
+
+    pretrain_cfg = MagicMock()
+    pretrain_cfg.rms_norm_eps = 1e-6
+    pretrain_cfg.hidden_size = 7168
+    pretrain_cfg.qk_rope_head_dim = 64
+    pretrain_cfg.q_lora_rank = 1536
+
+    cache_cfg = MagicMock()
+    with patch('vllm.distributed.parallel_state._TP') as mock_tp, \
+         patch('vllm.distributed.parallel_state.get_tp_group') as mock_get_tp_group, \
+         patch('vllm.distributed.parallel_state.get_tensor_model_parallel_world_size') as mock_tp_world_size, \
+         patch('vllm.distributed.parallel_state.get_tensor_model_parallel_rank') as mock_tp_rank:
+
+        mock_tp_group = SimpleNamespace(
+            world_size=1,
+            rank_in_group=0,
+            device_group=None
+        )
+        
+        mock_tp.is_initialized.return_value = True
+        mock_get_tp_group.return_value = mock_tp_group
+        mock_tp_world_size.return_value = 1
+        mock_tp_rank.return_value = 0
+        with patch.object(mla_mod, "model_extra_config", cfg), \
+            patch.object(mla_mod, "get_current_vllm_config", return_value=cur_vllm_cfg), \
+            patch.object(mla_mod, "supports_dynamo", return_value=False), \
+            patch.object(mla_mod, "get_rope", return_value=_RopeStub(64)), \
+            patch.object(mla_mod, "get_dp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+            patch.object(mla_mod, "get_world_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+            patch.object(mla_mod, "get_tensor_model_parallel_world_size", return_value=1), \
+            patch.object(mla_mod, "get_tensor_model_parallel_rank", return_value=0), \
+            patch.object(mla_mod, "get_o_proj_dp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)):
+
+            m = mla_mod.DeepseekMLA(
+                config=pretrain_cfg,
+                hidden_size=7168,
+                num_heads=128,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=64,
+                q_lora_rank=1536,
+                kv_lora_rank=512,
+                rope_theta=10000,
+                rope_scaling=None,
+                max_position_embeddings=8192,
+                cache_config=cache_cfg,
+                quant_config=None,
+                prefix="model.layers.5.self_attn",
+            )
+            
+            m.stream1 = None
+            m.kv_a_proj_event = torch.npu.Event(blocking=False, enable_timing=False)
+            m.q_norm_event = torch.npu.Event(blocking=False, enable_timing=False)
+            m.kv_all_gather_event = torch.npu.Event(blocking=False, enable_timing=False)
+            
+            yield m
+
+def test_forward_prefill_basic(mla_prefill):
+    mla = mla_prefill
+    bsz, seq_len = 4, 2048
+    dev = mla_mod.current_platform.device_type
+    
+    hidden_states = torch.randn(bsz * seq_len, 7168, dtype=torch.bfloat16, device=dev)
+    positions = torch.randint(0, seq_len, (bsz * seq_len,), dtype=torch.int64, device=dev)
+    
+    comm_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    
+    with patch.object(mla_mod, "tensor_model_parallel_all_gather") as mock_tp_all_gather, \
+         patch.object(mla_mod, "mla_tensor_model_parallel_all_gather") as mock_mla_all_gather, \
+         patch.object(torch_npu, "npu_interleave_rope") as mock_rope_op, \
+         patch.object(torch_npu, "npu_rms_norm") as mock_rmsnorm_op, \
+         patch.object(torch_npu, "npu_kv_rmsnorm_rope_cache") as mock_kv_cache_op, \
+         patch.object(torch.ops.npu, "npu_fused_infer_attention_score") as mock_attn_op:
+        
+        mock_tp_all_gather.side_effect = lambda x, *args, **kwargs: x
+        mock_mla_all_gather.side_effect = lambda x, *args, **kwargs: x
+        mock_rope_op.side_effect = lambda x, cos, sin: x
+        mock_rmsnorm_op.side_effect = lambda x, *args, **kwargs: x
+        
+        mock_kv_cache_op.return_value = (None, None, None, None)
+        
+        attn_output_shape = (bsz * seq_len, mla.num_local_heads, mla.v_head_dim)
+        mock_attn_output = torch.randn(attn_output_shape, dtype=torch.bfloat16, device=dev)
+        mock_attn_op.return_value = (mock_attn_output, None)
+        
+        mla.q_a_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.q_lora_rank, dtype=torch.bfloat16, device=dev), None))
+        mla.kv_a_proj_with_mqa.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.kv_lora_rank + mla.qk_rope_head_dim, 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.q_b_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.num_heads * mla.qk_head_dim, 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.kv_b_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.num_heads * (mla.qk_nope_head_dim + mla.v_head_dim), 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.o_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.hidden_size, dtype=torch.bfloat16, device=dev), None))
+        
+        output = mla._forward_prefill(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=None,
+            attn_metadata=None,
+            comm_group=comm_group
+        )
+        
+        assert output.shape == (bsz * seq_len, mla.hidden_size)
+        mock_mla_all_gather.assert_called()
+
+@pytest.fixture
+def mla_prefill_dcp():
+    cfg = _make_model_extra_config(enable_dsa=False, use_mlaprolog=False, use_dcp=True, is_prefill_node=True)
+    
+    cur_vllm_cfg = SimpleNamespace(
+        npu_compilation_config=SimpleNamespace(level=mla_mod.CompilationLevel.NO_COMPILATION),
+        speculative_config=None,
+    )
+
+    pretrain_cfg = MagicMock()
+    pretrain_cfg.rms_norm_eps = 1e-6
+    pretrain_cfg.hidden_size = 7168
+    pretrain_cfg.qk_rope_head_dim = 64
+    pretrain_cfg.q_lora_rank = 1536
+
+    cache_cfg = MagicMock()
+
+    with patch('vllm.distributed.parallel_state._TP') as mock_tp, \
+         patch('vllm.distributed.parallel_state.get_tp_group') as mock_get_tp_group, \
+         patch('vllm.distributed.parallel_state.get_tensor_model_parallel_world_size') as mock_tp_world_size, \
+         patch('vllm.distributed.parallel_state.get_tensor_model_parallel_rank') as mock_tp_rank:
+
+        mock_tp_group = SimpleNamespace(
+            world_size=1,
+            rank_in_group=0,
+            device_group=None
+        )
+        
+        mock_tp.is_initialized.return_value = True
+        mock_get_tp_group.return_value = mock_tp_group
+        mock_tp_world_size.return_value = 1
+        mock_tp_rank.return_value = 0
+
+        with patch.object(mla_mod, "model_extra_config", cfg), \
+             patch.object(mla_mod, "get_current_vllm_config", return_value=cur_vllm_cfg), \
+             patch.object(mla_mod, "supports_dynamo", return_value=False), \
+             patch.object(mla_mod, "get_rope", return_value=_RopeStub(64)), \
+             patch.object(mla_mod, "get_dp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+             patch.object(mla_mod, "get_tp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+             patch.object(mla_mod, "get_world_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+             patch.object(mla_mod, "get_mla_cp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)), \
+             patch.object(mla_mod, "get_tensor_model_parallel_world_size", return_value=1), \
+             patch.object(mla_mod, "get_tensor_model_parallel_rank", return_value=0):
+
+            m = mla_mod.DeepseekMLA(
+                config=pretrain_cfg,
+                hidden_size=7168,
+                num_heads=128,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=64,
+                q_lora_rank=1536,
+                kv_lora_rank=512,
+                rope_theta=10000,
+                rope_scaling=None,
+                max_position_embeddings=8192,
+                cache_config=cache_cfg,
+                quant_config=None,
+                prefix="model.layers.5.self_attn",
+            )
+            yield m
+
+def test_forward_prefill_dcp_basic(mla_prefill_dcp):
+    mla = mla_prefill_dcp
+    bsz, seq_len = 4, 2048
+    dev = mla_mod.current_platform.device_type
+    
+    hidden_states = torch.randn(bsz * seq_len, 7168, dtype=torch.bfloat16, device=dev)
+    positions = torch.randint(0, seq_len, (bsz * seq_len,), dtype=torch.int64, device=dev)
+
+    comm_group = SimpleNamespace(
+        world_size=2,
+        rank_in_group=0
+    )
+    
+    with patch.object(mla_mod, "mla_tensor_model_parallel_all_gather") as mock_all_gather, \
+         patch.object(mla_mod, "tensor_model_parallel_all_gather") as mock_tp_all_gather, \
+         patch.object(torch_npu, "npu_interleave_rope") as mock_rope_op, \
+         patch.object(torch_npu, "npu_rms_norm") as mock_rmsnorm_op, \
+         patch.object(torch_npu, "npu_kv_rmsnorm_rope_cache") as mock_kv_cache_op, \
+         patch.object(torch.ops.npu, "npu_fused_infer_attention_score") as mock_attn_op:
+        
+        mock_all_gather.side_effect = lambda x, *args, **kwargs: x  
+        mock_tp_all_gather.side_effect = lambda x, *args, **kwargs: x
+        mock_rope_op.side_effect = lambda x, cos, sin: x 
+        mock_rmsnorm_op.side_effect = lambda x, *args, **kwargs: x
+        mock_kv_cache_op.return_value = (None, None, None, None) 
+        
+        attn_output_shape = (bsz * seq_len // 2, mla.num_local_heads * 2, mla.v_head_dim)
+        mock_attn_output = torch.randn(attn_output_shape, dtype=torch.bfloat16, device=dev)
+        mock_attn_op.return_value = (mock_attn_output, None)
+        
+        mla.q_a_proj.forward = MagicMock(return_value=(torch.randn(bsz * seq_len, mla.q_lora_rank, 
+                                                                 dtype=torch.bfloat16, device=dev), None))
+        mla.kv_a_proj_with_mqa.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.kv_lora_rank + mla.qk_rope_head_dim, 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.q_b_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.num_heads * mla.qk_head_dim, 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.kv_b_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.num_heads * (mla.qk_nope_head_dim + mla.v_head_dim), 
+                       dtype=torch.bfloat16, device=dev), None))
+        mla.o_proj.forward = MagicMock(return_value=(
+            torch.randn(bsz * seq_len, mla.hidden_size, dtype=torch.bfloat16, device=dev), None))
+        
+        output = mla._forward_prefill_dcp(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=None,
+            attn_metadata=None,
+            comm_group=comm_group
+        )
+        
+        assert output.shape == (bsz * seq_len, mla.hidden_size)
+        mock_all_gather.assert_called() 
 
 def test_forward_decode_patches_real_torch_npu_ops(mla):
     bsz = 8

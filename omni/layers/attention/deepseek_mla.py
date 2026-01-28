@@ -31,12 +31,16 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group
 )
+from omni.adaptors.vllm.distributed import (
+    get_mla_cp_group
+)
 from vllm.platforms import current_platform
 
 from omni.adaptors.vllm.utils import current_stream
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.rotary_embedding import get_rope
 from omni.layers.linear import (
+    AscendRowParallelLinear,
     MergedReplicatedLinear,
     RowParallelLinearWithReduceScatter,
     DP2TPRowParallelLinear,
@@ -349,6 +353,9 @@ class DeepseekMLA(nn.Module):
         # FA is fully quantized, KVCache is not quantized, and the function is not enabled.
         self.quant_symbol = quant_config is not None
         self.layer_idx = extract_layer_index(self.prefix)
+        if model_extra_config.operator_opt_config.use_dcp:
+            self.dcp_world_size = get_mla_cp_group().world_size
+            self.dcp_rank = get_mla_cp_group().rank_in_group
 
         self.merge_qkv = model_extra_config.operator_opt_config.merge_qkv
         if self.q_lora_rank is not None:
@@ -418,7 +425,18 @@ class DeepseekMLA(nn.Module):
                 quant_config=None,
                 prefix=f"{prefix}.kv_b_proj")
         # O projection.
-        if model_extra_config.operator_opt_config.prefill_enable_mla_alltoall:
+        if model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node:
+            tp_size = model_extra_config.parall_config.o_proj_tp_size
+            tp_rank = get_o_proj_dp_group().rank_in_group
+            self.o_proj = AscendRowParallelLinear(self.num_heads * self.v_head_dim,
+                                                        hidden_size,
+                                                        tp_size=tp_size,
+                                                        tp_rank=tp_rank,
+                                                        bias=False,
+                                                        quant_config=quant_config,
+                                                        prefix=f"{prefix}.o_proj",
+                                                        reduce_results=False)
+        elif model_extra_config.operator_opt_config.prefill_enable_mla_alltoall:
             if model_extra_config.parall_config.o_proj_tp_size > 1:
                 self.o_proj = Tp2DpAndTpRowParallelLinear(self.num_heads * self.v_head_dim,
                                                           hidden_size,
@@ -520,14 +538,14 @@ class DeepseekMLA(nn.Module):
 
             expected_shape = (
                 self.kv_lora_rank,
-                self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)
+                self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim)
             )
             if kv_b_proj_weight.shape != expected_shape:
                 raise RuntimeError(f"{kv_b_proj_weight.shape} != {expected_shape}")
 
             kv_b_proj_weight = kv_b_proj_weight.view(
                 self.kv_lora_rank,
-                self.num_heads,
+                self.num_local_heads,
                 self.qk_nope_head_dim + self.v_head_dim,
             )
             self.W_UK, self.W_UV = kv_b_proj_weight.split(
@@ -539,9 +557,9 @@ class DeepseekMLA(nn.Module):
             self.norm_res = {}
             self.actual_seq_lengths = {}
             for batch_size in model_extra_config.task_config.decode_gear_list:
-                self.norm_res[batch_size] = torch.zeros([batch_size * self.tp_size, self.q_lora_rank], dtype=torch.bfloat16, device=current_platform.device_type)
+                self.norm_res[batch_size] = torch.zeros([batch_size, self.q_lora_rank], dtype=torch.bfloat16, device=current_platform.device_type)
                 self.actual_seq_lengths[batch_size] = (1 + self.num_speculative_tokens) * \
-                    torch.arange(1, batch_size * self.tp_size // (1 + self.num_speculative_tokens) + 1, dtype=torch.int64, device=current_platform.device_type)
+                    torch.arange(1, batch_size // (1 + self.num_speculative_tokens) + 1, dtype=torch.int64, device=current_platform.device_type)
         if self.quant_symbol and model_extra_config.operator_opt_config.use_mlaprolog:
             if not model_extra_config.operator_opt_config.enable_dsa:
                 self.q_a_proj.weight_scale.data = self.q_a_proj.weight_scale.data.to(torch.float)
@@ -663,7 +681,10 @@ class DeepseekMLA(nn.Module):
                 if model_extra_config.operator_opt_config.enable_dsa:
                     output = self._forward_prefill_absorb(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)
                 else:
-                    output = self._forward_prefill(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)
+                    if model_extra_config.operator_opt_config.use_dcp:
+                        output = self._forward_prefill_dcp(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)
+                    else:
+                        output = self._forward_prefill(positions, hidden_states, kv_cache, attn_metadata, comm_group=comm_group)
         else:
             output = self._forward_decode(positions, hidden_states, kv_cache, attn_metadata)
         if model_extra_config.operator_opt_config.use_mlaprolog and not self.is_mla_prolog_init:
@@ -822,6 +843,257 @@ class DeepseekMLA(nn.Module):
 
         return output
 
+    def _forward_prefill_dcp(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        comm_group: Optional[GroupCoordinator] = None,
+    ) -> torch.Tensor:
+        main_stream = current_stream()
+        kv_event = torch.npu.Event(blocking=False, enable_timing=False)
+
+        if self.q_lora_rank is not None:
+            if self.merge_qkv:
+                qkv = self.qkv_a_proj(hidden_states)[0]
+                qkv = tensor_model_parallel_all_gather(qkv, dim=0)
+                q, latent_cache = torch.split(qkv, [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
+
+                q = self.q_a_layernorm(q)
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            else:
+                latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+                q = self.q_a_proj(hidden_states)[0]
+                q = self.q_a_layernorm(q)
+                latent_cache = mla_tensor_model_parallel_all_gather(latent_cache, dim=0, comm_group=comm_group)
+                if self.quant_symbol:
+                    q_quant, q_scale = torch_npu.npu_dynamic_quant(q)
+                    # Quantizing before all_gather can reduce communication overhead.
+                    q_quant = mla_tensor_model_parallel_all_gather(q_quant, dim=0, comm_group=comm_group)
+                    q_scale = mla_tensor_model_parallel_all_gather(q_scale, dim=0, comm_group=comm_group)
+                    q = {'x_int8':q_quant, 'pertoken_scale':q_scale}
+                else:
+                    q = mla_tensor_model_parallel_all_gather(q, dim=0, comm_group=comm_group)
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = tensor_model_parallel_all_gather(q, dim=0)
+            latent_cache = tensor_model_parallel_all_gather(latent_cache, dim=0)
+            
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim],  dim=-1)
+        # k_pe:BNS,64 kv_a:BNS, 512, kv_states:bnsd, cos,sin:bnsd, kv cache:bsnd
+        q_pe = q_pe.unsqueeze(2)
+        if attn_metadata is None or model_extra_config.operator_opt_config.enable_prefill_micro_batch:
+            cos, sin = self.rotary_emb.get_cos_sin(positions)
+        else:
+            cos, sin = attn_metadata.prefill.cos, attn_metadata.prefill.sin
+        q_pe = torch_npu.npu_interleave_rope(q_pe, cos, sin) # BNSD
+        q_pe = q_pe.squeeze(2) #BSH
+
+        if isinstance(kv_cache, Dict):
+            kv_cache = kv_cache.get("kv_cache")
+        if kv_cache is not None and isinstance(kv_cache, Tuple) and kv_cache[0].numel() > 0:
+            slot_mapping = attn_metadata.slot_mapping
+            _, _, k_pe, kv_a = torch_npu.npu_kv_rmsnorm_rope_cache(
+                latent_cache.view(-1, 1, 1, 576), # bnsd
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                slot_mapping,
+                kv_cache[1],
+                kv_cache[0],
+                k_rope_scale=None,
+                c_kv_scale=self.kv_scale_reci_tile,
+                k_rope_offset=None, c_kv_offset=None,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+                cache_mode="PA_NZ",
+                is_output_kv=True) # adapter NZ
+
+            if model_extra_config.operator_opt_config.c8_calib_path is not None and get_world_group().rank_in_group == 0:
+                layer_idx = int(self.prefix.split(sep='.')[-2])
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                filename = f"{timestamp}_{layer_idx}.pth"
+                save_path = os.path.join(model_extra_config.operator_opt_config.c8_calib_path, filename)
+                torch.save(kv_a.detach().to("cpu").contiguous(), save_path)
+        else:
+            latent_cache = latent_cache.view(-1, latent_cache.size(-1))
+            # adapt end
+            kv_a, _ = torch.split(latent_cache, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            latent_cache = latent_cache.unsqueeze(1)
+            kv_a = self.kv_a_layernorm(kv_a)
+            k_pe = latent_cache[:, :, self.kv_lora_rank:]
+            k_pe = k_pe.unsqueeze(2)
+            k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
+            k_pe = k_pe.squeeze(2)
+
+            # for omni_cache
+            if attn_metadata is not None:
+                assert len(kv_a.shape) == 2 and kv_a.shape[1] == 512, f"{kv_a.shape=}"
+                assert k_pe.shape == (kv_a.shape[0], 1, 64), f"{k_pe.shape=}"
+
+                if model_extra_config.operator_opt_config.use_omni_cache and \
+                    attn_metadata.prefill.prefix_meta is not None:
+                    prefix_buffer = attn_metadata.omni_cache.prefix_buffer_npu
+                    dst_slots = attn_metadata.prefill.prefix_meta.query_slots
+                    num_actual_tokens = attn_metadata.prefill.prefix_meta.num_actual_tokens
+                    prefix_buffer[dst_slots, :, :512] = kv_a.unsqueeze(1)[:num_actual_tokens]
+                    prefix_buffer[dst_slots, :, 512:] = k_pe[:num_actual_tokens]
+        
+        is_attn_output_reshape = model_extra_config.operator_opt_config.prefill_enable_mla_alltoall and attn_metadata is None
+        o_proj_tp_size = get_o_proj_dp_group().world_size \
+            if model_extra_config.parall_config.o_proj_tp_size > 1 else get_tensor_model_parallel_world_size()
+        attn_output = torch.empty(
+            q.shape[0] // o_proj_tp_size if is_attn_output_reshape else q.shape[0],
+            self.num_local_heads * o_proj_tp_size if is_attn_output_reshape else self.num_local_heads,
+            self.v_head_dim,
+            device=q_nope.device,
+            dtype=q_nope.dtype)
+        
+        if attn_metadata is not None:
+            prefill_metadata = attn_metadata.prefill
+            computed_tokens = 0
+            assert not (self.fa_quant and len(prefill_metadata.seq_qlen_group) > 1)
+            for iter, (actual_seq_qlen, actual_seq_kvlen, has_context) in enumerate(zip(
+                prefill_metadata.seq_qlen_group,
+                prefill_metadata.seq_kvlen_group,
+                prefill_metadata.has_context_group)
+            ):
+                if prefill_metadata.kv_index_list and kv_cache is not None and isinstance(kv_cache, Tuple) and\
+                        kv_cache[0].numel() > 0 and not self.fa_quant and has_context:
+                    # adapt nz
+                    block_num, block_size, head_size, _ = kv_cache[0].shape
+                    kv_cache_a = (kv_cache[0]
+                                .view(block_num, 1, self.kv_lora_rank // KVCACHE_NZ_DIM, block_size, KVCACHE_NZ_DIM))
+                    kv_cache_pe = (kv_cache[1]
+                                .view(block_num, 1, self.qk_rope_head_dim // KVCACHE_NZ_DIM, block_size, KVCACHE_NZ_DIM))
+                    kv_cache_a = kv_cache_a.transpose(1, 3).reshape(-1, kv_cache[0].shape[-1])
+                    kv_cache_pe = kv_cache_pe.transpose(1, 3).reshape(-1, kv_cache[1].shape[-1])
+                    
+                    assert len(prefill_metadata.max_kv_index_list[iter]) > 0
+                    prefill_kv_a = []
+                    prefill_kv_pe = []
+                    for req_id in range(len(prefill_metadata.max_kv_index_list[iter])):
+                        # append context
+                        for i in range(len(prefill_metadata.max_kv_index_list[iter][req_id])):
+                            kv_a_per_req = kv_cache_a.index_select(0, prefill_metadata.max_kv_index_list[iter][req_id][i]).contiguous()
+                            kv_pe_per_req = kv_cache_pe.index_select(0, prefill_metadata.max_kv_index_list[iter][req_id][i]).contiguous()
+                            
+                            kv_a_per_req = mla_tensor_model_parallel_all_gather(kv_a_per_req, dim=0)
+                            kv_pe_per_req = mla_tensor_model_parallel_all_gather(kv_pe_per_req, dim=0)
+                            
+                            kv_a_per_req = kv_a_per_req.index_select(0, prefill_metadata.kv_allgather_restore_index_list[iter][req_id][i])
+                            kv_pe_per_req = kv_pe_per_req.index_select(0, prefill_metadata.kv_allgather_restore_index_list[iter][req_id][i])
+                            prefill_kv_a.append(kv_a_per_req)
+                            prefill_kv_pe.append(kv_pe_per_req)
+                        # append suffix
+                        if req_id == 0:
+                            prefill_kv_a.append(kv_a[:actual_seq_qlen[0]].reshape(-1, self.kv_lora_rank))
+                            prefill_kv_pe.append(k_pe[:actual_seq_qlen[0]].reshape(-1, self.qk_rope_head_dim))
+                        else:
+                            prefill_kv_a.append(kv_a[actual_seq_qlen[req_id-1]:actual_seq_qlen[req_id]].reshape(-1, self.kv_lora_rank))
+                            prefill_kv_pe.append(k_pe[actual_seq_qlen[req_id-1]:actual_seq_qlen[req_id]].reshape(-1, self.qk_rope_head_dim))
+                    prefill_kv_a = torch.cat(prefill_kv_a, dim=0)
+                    prefill_kv_pe = torch.cat(prefill_kv_pe, dim=0)
+                else:
+                    prefill_kv_a = kv_a[:actual_seq_kvlen[-1]].reshape(-1, self.kv_lora_rank)
+                    prefill_kv_pe = k_pe[:actual_seq_kvlen[-1]].reshape(-1, self.qk_rope_head_dim)
+
+                kv = self.kv_b_proj.forward(prefill_kv_a)[0]
+                kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+                k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+                if prefill_metadata.max_query_len > 1:
+                    attn_mask = self.attn_mask
+                    sparse_mode = 3
+                else:
+                    attn_mask = None
+                    sparse_mode = 0  # must be 0 if attn_mask is None
+                prefill_k_rope = prefill_kv_pe.view(-1, 1, self.qk_rope_head_dim).repeat(1, self.num_local_heads, 1)
+            
+                attn_output[computed_tokens:computed_tokens+actual_seq_qlen[-1]] = \
+                    torch.ops.npu.npu_fused_infer_attention_score(
+                        q_nope[computed_tokens:computed_tokens+actual_seq_qlen[-1]],
+                        k_nope,
+                        v,
+                        query_rope=q_pe[computed_tokens:computed_tokens+actual_seq_qlen[-1]],
+                        key_rope=prefill_k_rope,
+                        num_heads=self.num_local_heads,
+                        num_key_value_heads=self.num_local_heads,
+                        input_layout="TND",
+                        atten_mask=attn_mask,
+                        sparse_mode=sparse_mode,
+                        actual_seq_lengths=actual_seq_qlen,
+                        actual_seq_lengths_kv=actual_seq_kvlen,
+                        scale=self.scale,
+                        next_tokens=0)[0]
+                computed_tokens += actual_seq_qlen[-1]
+                
+        else:
+            attn_output.fill_(0)
+
+        if not model_extra_config.task_config.is_prefill_node:
+            assert attn_metadata is None
+            # print("prefill in decode this way")
+            if get_tensor_model_parallel_world_size() >= model_extra_config.parall_config.o_proj_tp_size:
+                merge_size = get_tensor_model_parallel_world_size() // model_extra_config.parall_config.o_proj_tp_size
+                attn_output = attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                attn_output = get_o_proj_tp_group().all_gather(attn_output, dim=1)
+                output, _ = self.o_proj.forward(
+                    attn_output.reshape(-1, merge_size * self.num_local_heads * self.v_head_dim))
+
+                output = get_tp_group().reduce_scatter(output)
+            else:
+                raise RuntimeError("not supported when tp_size < o_proj_size")
+
+        # if only set prefill_enable_mla_alltoall means prefill o_proj tp to dp
+        # if also set o_proj_tp_size means prefill o_proj tp to dp + tp
+        elif model_extra_config.operator_opt_config.prefill_enable_mla_alltoall:
+            if attn_metadata is not None and get_tensor_model_parallel_world_size() != model_extra_config.parall_config.o_proj_tp_size:
+                if model_extra_config.parall_config.o_proj_tp_size > 1:
+                    attn_output = attn_output.view(get_o_proj_dp_group().world_size, -1, self.num_local_heads, self.v_head_dim)
+                attn_output = attn_output.reshape(-1)
+                all_to_all_attn_output = torch.empty(
+                    [q.shape[0] * self.num_local_heads * self.v_head_dim],
+                    dtype=attn_output.dtype,
+                    device=current_platform.device_type
+                )
+                device_group = get_o_proj_dp_group().device_group \
+                    if model_extra_config.parall_config.o_proj_tp_size > 1 else get_tp_group().device_group
+                dist.all_to_all_single(all_to_all_attn_output, attn_output, group=device_group)
+                if model_extra_config.parall_config.o_proj_tp_size > 1:
+                    attn_output = all_to_all_attn_output.view(
+                        get_tensor_model_parallel_world_size() // get_o_proj_tp_group().world_size,
+                        q.shape[0] // get_tensor_model_parallel_world_size() * get_o_proj_tp_group().world_size,
+                        self.num_local_heads * self.v_head_dim
+                    ).transpose(0, 1).contiguous()
+                else:
+                    attn_output = all_to_all_attn_output.view(
+                        get_tensor_model_parallel_world_size(),
+                        q.shape[0] // get_tensor_model_parallel_world_size(),
+                        self.num_local_heads * self.v_head_dim
+                    ).transpose(0, 1).contiguous()
+
+            output, _ = self.o_proj.forward(
+                attn_output.reshape(-1, o_proj_tp_size * self.num_local_heads * self.v_head_dim))
+        else:
+            attn_output = attn_output.view(-1, self.num_local_heads * self.v_head_dim)
+            if model_extra_config.parall_config.o_proj_tp_size > 1:
+                output, _ = self.o_proj.forward(attn_output, q.shape[0], 1, self.num_local_heads, self.v_head_dim)
+            else:
+                output = self.o_proj.forward(attn_output, comm_group=comm_group)[0]
+                
+        if model_extra_config.operator_opt_config.use_omni_cache and \
+            attn_metadata is not None:
+            kv_states = [prefill_kv_a.unsqueeze(1), prefill_kv_pe]
+            kv_event.record(main_stream)
+            attn_metadata.omni_cache.synchronize_d2h(kv_states, self.layer_idx, kv_event)
+            attn_metadata.omni_cache.synchronize_h2d(
+                prefix_meta=attn_metadata.prefill.prefix_meta,
+                layer_idx=self.layer_idx + 1,
+            )
+        return output
+
     def _forward_prefill(
         self,
         positions: torch.Tensor,
@@ -883,7 +1155,7 @@ class DeepseekMLA(nn.Module):
             cos, sin = attn_metadata.prefill.cos, attn_metadata.prefill.sin
         q_pe = torch_npu.npu_interleave_rope(q_pe, cos, sin) # BNSD
         q_pe = q_pe.squeeze(2) #BSH
-        q[..., self.qk_nope_head_dim:] = q_pe
+
         if isinstance(kv_cache, Dict):
             kv_cache = kv_cache.get("kv_cache")
         
@@ -1137,7 +1409,8 @@ class DeepseekMLA(nn.Module):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        if not model_extra_config.operator_opt_config.use_dcp:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         nope_cache = kv_cache[0]
         rope_cache = kv_cache[1]
 
@@ -1224,6 +1497,14 @@ class DeepseekMLA(nn.Module):
             attn_mask = None
             sparse_mode = 0
 
+        # concatenate and all gather along head dimension (B, N, L + P)  
+        if model_extra_config.operator_opt_config.use_dcp:
+            decode_q = (q_nope, q_pe)
+            decode_q = torch.cat(decode_q, dim=-1)
+            decode_q = get_mla_cp_group().all_gather(decode_q, dim=1)
+            q_nope, q_pe = torch.split(
+                decode_q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            
         if self.fa_quant:
             assert dequant_scale_q_nope is not None
             dequant_scale_q_nope = dequant_scale_q_nope.squeeze(-1)
@@ -1309,9 +1590,10 @@ class DeepseekMLA(nn.Module):
         else:
             input_layout_mla = input_layout
             actual_seq_lengths_mla = self.actual_seq_lengths[bsz]
-            attn_output, _ = op_scope.npu_fused_infer_attention_score(
+            num_heads = self.num_heads if model_extra_config.operator_opt_config.use_dcp else self.num_local_heads
+            attn_output, lse = op_scope.npu_fused_infer_attention_score(
                 q_nope, k_nope, k_nope, query_rope=q_pe, key_rope=k_rope,
-                num_heads=self.num_local_heads,
+                num_heads=num_heads,
                 num_key_value_heads=1, input_layout=input_layout_mla,
                 atten_mask=attn_mask,
                 sparse_mode=sparse_mode,
@@ -1321,8 +1603,21 @@ class DeepseekMLA(nn.Module):
                 block_size=128,
                 actual_seq_lengths=actual_seq_lengths_mla,
                 actual_seq_lengths_kv=attn_metadata.decode.seq_lens,
+                softmax_lse_flag=model_extra_config.operator_opt_config.use_dcp
             )
-
+            if model_extra_config.operator_opt_config.use_dcp:
+                out_mask = attn_metadata.decode.batch_seq_out_mask
+                attn_output = torch.where(out_mask, 0, attn_output)
+                lse_mask = attn_metadata.decode.batch_seq_lse_mask
+                lse = torch.where(lse_mask, float('-inf'), lse)
+        
+        if model_extra_config.operator_opt_config.use_dcp:
+            assert lse is not None, (
+                "For a mla backend want to enable"
+                "DCP, it is mandatory that the corresponding decode attn"
+                "kernel return the softmax lse.")
+            attn_output = cp_lse_out_a2a(attn_output, lse, get_mla_cp_group())
+        
         if model_extra_config.operator_opt_config.enable_dsa:
             attn_output = attn_output.squeeze(1).transpose(0, 1)
         else:
@@ -1336,10 +1631,23 @@ class DeepseekMLA(nn.Module):
         )
         attn_output = attn_output.view(
             -1, self.num_local_heads * self.v_head_dim)
-        if model_extra_config.parall_config.o_proj_tp_size > 1:
-            output, _ = self.o_proj.forward(attn_output, bsz, q_len, self.num_local_heads, self.v_head_dim)
+
+        if model_extra_config.operator_opt_config.use_dcp:
+            if get_tensor_model_parallel_world_size() >= model_extra_config.parall_config.o_proj_tp_size:
+                merge_size = get_tensor_model_parallel_world_size() // model_extra_config.parall_config.o_proj_tp_size
+                attn_output = attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                attn_output = get_o_proj_tp_group().all_gather(attn_output, dim=1)
+                output, _ = self.o_proj.forward(
+                    attn_output.reshape(-1, merge_size * self.num_local_heads * self.v_head_dim))
+
+                output = get_o_proj_dp_group().all_reduce(output)
+            else:
+                raise RuntimeError("current not support tp < o_porj_tp")
         else:
-            output, _ = self.o_proj.forward(attn_output)
+            if model_extra_config.parall_config.o_proj_tp_size > 1:
+                output, _ = self.o_proj.forward(attn_output, bsz, q_len, self.num_local_heads, self.v_head_dim)
+            else:
+                output, _ = self.o_proj.forward(attn_output)
         return output
 
     def _forward_prefill_a2(
@@ -1541,3 +1849,104 @@ class DeepseekMLA(nn.Module):
 
         attn_output = None
         return output
+
+def update_attn_out_a2a(out: torch.Tensor, lse: torch.Tensor, cp_group: GroupCoordinator):
+    """
+    Apply the all-gathered lses to correct each local rank's attention
+    output. we still need perform a cross-rank reduction to obtain the
+    final attention output.
+    Args:
+        output: [ N, B, L ]
+        lses   :  [ B, N, 1 ]
+    Return:
+        output: [ N, B, L ]
+        lse   : [ B, N, 1 ]
+    """
+
+    num_head, bs, head_dim = out.shape
+    
+    with tng.scope.npu_stream_switch('out'):
+        with tng.scope.limit_core_num("0", "12"):
+            out_parallel = out.new_empty(cp_group.world_size, num_head // cp_group.world_size, *out.shape[1:])
+            dist.all_to_all_single(out_parallel.view(-1), out.view(-1), group=cp_group.device_group)
+            out_parallel_list = [item.view(-1, head_dim) for item in out_parallel.unbind(0)]
+    with tng.scope.npu_stream_switch('lse'):
+        with tng.scope.limit_core_num("0", "12"):
+            lse = lse.transpose(0,1).contiguous()
+            lse_parallel = lse.new_empty(cp_group.world_size, num_head // cp_group.world_size, *lse.shape[1:])
+            dist.all_to_all_single(lse_parallel.view(-1), lse.view(-1), group=cp_group.device_group)
+            lse_parallel_list = [item.view(-1) for item in lse_parallel.unbind(0)]
+    
+    output_local_head = torch_npu.npu_attention_update(lse_parallel_list, out_parallel_list, 0)   # [ N / cp_size * B , L]
+
+    output_local_head = output_local_head[0].view(num_head // cp_group.world_size, bs, head_dim)   # [ N / cp_size, B , L]
+
+    return output_local_head
+
+def update_attn_out_a2a_torch(out: torch.Tensor, lse: torch.Tensor, cp_group: GroupCoordinator):
+    """
+    Apply the all-gathered lses to correct each local rank's attention
+    output. we still need perform a cross-rank reduction to obtain the
+    final attention output.
+    Args:
+        output: [ N, B, L ]
+        lses   :  [ B, N, 1 ]
+    Return:
+        output: [ N, B, L ]
+        lse   : [ B, N, 1 ]
+    """
+
+    num_head, bs, head_dim = out.shape
+    
+    out_parallel = out.new_empty(cp_group.world_size, num_head // cp_group.world_size, *out.shape[1:])
+    dist.all_to_all_single(out_parallel.view(-1), out.view(-1), group=cp_group.device_group)
+    out_parallel = out_parallel.view(cp_group.world_size, -1, head_dim)
+    outs = out_parallel.transpose(0,1).float()
+    
+    lse = lse.transpose(0,1).contiguous()
+    lse_parallel = lse.new_empty(cp_group.world_size, num_head // cp_group.world_size, *lse.shape[1:])
+    dist.all_to_all_single(lse_parallel.view(-1), lse.view(-1), group=cp_group.device_group)
+    lse_parallel = lse_parallel.view(cp_group.world_size, -1)
+    lses = lse_parallel.transpose(0,1).float()
+    
+    assert outs.dim() == 3 and lse.dim() == 2
+    assert outs.size(0) == lse.size(0) and outs.size(1) == lse.size(1)
+    
+    # inf -> _inf
+    _inf = torch.tensor(float("-inf"), device=lses.device)
+    lses = torch.where(lses == float("inf"), _inf, lses)
+    
+    max_lses = lses.max(dim=-1)[0]
+    ses = torch.exp(lses - max_lses.view(-1, 1))
+    se = ses.sum(dim=-1)
+    valid = se > 0
+    
+    lse = torch.where(
+        valid, torch.log(se) + max_lses, _inf
+    )
+    sc = torch.where(
+        valid.view(-1, 1), ses / se.view(-1, 1), torch.zeros_like(ses)
+    ).unsqueeze(2)
+    
+    out = (outs * sc).sum(1)
+    output_local_head = out.to(torch.float16).view(num_head // cp_group.world_size, bs, head_dim)
+    return output_local_head
+    
+ 
+def cp_lse_out_a2a(cp_attn_out: torch.Tensor,
+                     cp_attn_lse: torch.Tensor,
+                     cp_group: GroupCoordinator):
+    """
+    cp_attn_out: [ N, B, D ]
+    cp_attn_lse: [ B, N, 1 ]
+    """
+    if cp_group.world_size == 1:
+        return cp_attn_out
+    cp_attn_lse = cp_attn_lse.contiguous()
+
+    if model_extra_config.operator_opt_config.use_attn_update:
+        out = update_attn_out_a2a(cp_attn_out, cp_attn_lse, cp_group)
+    else:
+        out = update_attn_out_a2a_torch(cp_attn_out, cp_attn_lse, cp_group)
+    
+    return out

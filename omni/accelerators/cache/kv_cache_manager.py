@@ -201,6 +201,7 @@ class OmniKVCacheManager(KVCacheManager):
         num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
+        dcp_size: Optional[int] = 1,
         is_swap: bool = False,
     ) -> Optional[OmniKVCacheBlocks]:
         """Add slots for a request with new tokens to append.

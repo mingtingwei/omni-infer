@@ -1,0 +1,99 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index 1e0f6fbf5..22a73c540 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -1680,7 +1680,10 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+ @dataclass
+ class ParallelConfig:
+     """Configuration for the distributed execution."""
+-
++    decode_context_parallel_size: int = 1
++    """Number of parallel groups for decoding context"""
++    dcp_kv_cache_interleave_size: int = 128
++    """Interleave size for kv cache in decode context parallelism"""
+     pipeline_parallel_size: int = 1
+     """Number of pipeline parallel groups."""
+     tensor_parallel_size: int = 1
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index f63c6c5b6..bc9064706 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -285,6 +285,8 @@ class EngineArgs:
+         DistributedExecutorBackend,
+         Type[ExecutorBase], str]] = ParallelConfig.distributed_executor_backend
+     # number of P/D disaggregation (or other disaggregation) workers
++    decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
++    dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
+     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+     data_parallel_size: int = ParallelConfig.data_parallel_size
+@@ -605,6 +607,10 @@ class EngineArgs:
+             **parallel_kwargs["pipeline_parallel_size"])
+         parallel_group.add_argument("--tensor-parallel-size", "-tp",
+                                     **parallel_kwargs["tensor_parallel_size"])
++        parallel_group.add_argument("--decode-context-parallel-size", "-dcp",
++                                    **parallel_kwargs["decode_context_parallel_size"])
++        parallel_group.add_argument("--dcp-kv-cache-interleave-size",
++                                    **parallel_kwargs["dcp_kv_cache_interleave_size"])
+         parallel_group.add_argument("--data-parallel-size", "-dp",
+                                     **parallel_kwargs["data_parallel_size"])
+         parallel_group.add_argument("--data-parallel-rank", "-dp-rank",
+@@ -1087,6 +1093,8 @@ class EngineArgs:
+             distributed_executor_backend=self.distributed_executor_backend,
+             worker_cls=self.worker_cls,
+             worker_extension_cls=self.worker_extension_cls,
++            decode_context_parallel_size=self.decode_context_parallel_size,
++            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size
+         )
+ 
+         speculative_config = self.create_speculative_config(
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index e9648cc31..2b1479db7 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -644,7 +644,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
+     num_tokens_str = f"{num_tokens:,}"
+     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+-    max_concurrency = num_tokens / vllm_config.model_config.max_model_len
++    from vllm.utils import cdiv
++    max_concurrency = num_tokens / cdiv(vllm_config.model_config.max_model_len, vllm_config.parallel_config.decode_context_parallel_size)
+     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                 max_model_len_str, max_concurrency)
+ 
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 870f132ad..5f1d97e50 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -342,7 +342,8 @@ class Scheduler(SchedulerInterface):
+                     request,
+                     num_new_tokens,
+                     num_draft_tokens=num_draft_tokens,
+-                    num_lookahead_tokens=self.num_lookahead_tokens)
++                    num_lookahead_tokens=self.num_lookahead_tokens,
++                    dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size)
+                 if new_blocks is None:
+                     # The request cannot be scheduled.
+                     # Preempt the lowest-priority request.
+@@ -566,6 +567,7 @@ class Scheduler(SchedulerInterface):
+                     num_new_local_computed_tokens,
+                     new_computed_blocks,
+                     num_lookahead_tokens=self.num_lookahead_tokens,
++                    dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+                     delay_cache_blocks=load_kv_async,
+                 )
+                 if new_blocks is None:
+diff --git a/vllm/v1/kv_cache_interface.py b/vllm/v1/kv_cache_interface.py
+index 2747fc7fa..3931379b3 100644
+--- a/vllm/v1/kv_cache_interface.py
++++ b/vllm/v1/kv_cache_interface.py
+@@ -101,7 +101,8 @@ class FullAttentionSpec(AttentionSpec):
+ 
+     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+         max_model_len = vllm_config.model_config.max_model_len
+-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
++        max_model_len_slice = cdiv(max_model_len, vllm_config.parallel_config.decode_context_parallel_size)
++        return cdiv(max_model_len_slice, self.block_size) * self.page_size_bytes
+ 
+     @classmethod
+     def merge(cls, specs: list[Self]) -> Self:

@@ -244,3 +244,6 @@ def get_attr_by_names(src_config, attrs, default_value):
         if value > 0:
             return value
     return default_value
+
+def _round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y

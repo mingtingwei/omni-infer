@@ -118,14 +118,19 @@ class ParallelPanguUltraMoEMLP(nn.Module):
 
 
     def forward(self, x, residual, attn_metadata, layerid=None):
-        x = get_mlp_tp_group().all_gather(x, dim=0)
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if not is_decode_dcp_node:
+            x = get_mlp_tp_group().all_gather(x, dim=0)
 
         gate_up, _ = self.gate_up_proj.forward(x)
         x = self.act_fn(gate_up, self.quant_symbol)
         x, _ = self.down_proj.forward(x)
 
         # P and D are both cut, and are concave at the node (16)
-        x = get_mlp_tp_group().reduce_scatter(x)
+        if not is_decode_dcp_node:
+            x = get_mlp_tp_group().reduce_scatter(x)
+        else:
+            x = get_mlp_tp_group().all_reduce(x)
         return x, residual
 
 
@@ -401,8 +406,12 @@ class PanguUltraMoEModel(nn.Module):
             self.stream1_mlp_group = get_stream1_mlp_group()
             self.stream1_moe_group = get_stream1_moe_group()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids, reduce=1)
+    def get_input_embeddings(self, input_ids: torch.Tensor, attn_metadata: AttentionMetadata) -> torch.Tensor:
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if attn_metadata is not None and is_decode_dcp_node:
+            return self.embed_tokens(input_ids, reduce=0)
+        else:
+            return self.embed_tokens(input_ids, reduce=1)
 
     def forward(
             self,
@@ -433,7 +442,7 @@ class PanguUltraMoEModel(nn.Module):
             lm_head=None
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = self.get_input_embeddings(input_ids, attn_metadata)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -479,7 +488,9 @@ class PanguUltraMoEModel(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
+        if not is_decode_dcp_node:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         if model_extra_config.operator_opt_config.use_prefetch and model_extra_config.operator_opt_config.lm_head_prefetch > 0 and lm_head is not None:
             torch_npu.npu_prefetch(lm_head.weight, hidden_states, model_extra_config.operator_opt_config.lm_head_prefetch * 1024 * 1024)
@@ -740,6 +751,7 @@ class PanguUltraMoEForCausalLM(nn.Module):
         
         self.model = self.get_model()
 
+        is_decode_dcp_node = model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node
         rl_service_mode = os.getenv("RL_SERVICE_MODE", "0") == "1"
         if rl_service_mode:
             parallel_lmhead_enable = False
@@ -749,7 +761,7 @@ class PanguUltraMoEForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       quant_config=self.quant_config,
-									  parallel_lmhead=parallel_lmhead_enable)
+									  parallel_lmhead=parallel_lmhead_enable and not is_decode_dcp_node)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 logits_as_input=True)
         self.sampler = Sampler()

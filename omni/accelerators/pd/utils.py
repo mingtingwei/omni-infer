@@ -57,6 +57,23 @@ def get_p_start_rank(p_tp_size, p_dp_size, d_tp_size, d_dp_size, d_node_num, cur
     offset = replica_index + cur_d_tp * stride
     return p_dp_index * p_tp_size + offset
 
+def get_p_start_rank_dcp(p_tp_size, p_dp_size, d_tp_size, d_dp_size, d_node_num, cur_d_node, cur_d_rank):
+    # only support full tp in prefill.
+    if p_dp_size != 1:
+        raise ValueError('p_dp_size must be 1')
+
+    # Parameter validation
+    if p_tp_size <= 0 or d_tp_size <= 0 or d_dp_size <= 0 or d_node_num <= 0:
+        raise ValueError('p_tp_size, d_tp_size, d_dp_size, d_node_num must be positive')
+
+    if cur_d_node < 0 or cur_d_node >= d_node_num:
+        raise ValueError('cur_d_node < 0 or cur_d_node >= d_node_num')
+
+    if cur_d_rank < 0:
+        raise ValueError('cur_d_rank < 0')
+
+    cur_d_tp = cur_d_rank % d_tp_size
+    return cur_d_tp
 
 def prepare_ranktables(prefill_group: ServerGroup, decode_group: ServerGroup, p_ranks: int, d_ranks: int):
     p_ranktables, d_ranktables = {}, {}

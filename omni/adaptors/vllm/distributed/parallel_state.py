@@ -25,7 +25,8 @@ from vllm.distributed import (
     init_model_parallel_group,
     get_world_group,
     get_pp_group,
-    get_ep_group
+    get_ep_group,
+    get_tp_group
 )
 from vllm.logger import logger
 from vllm.config import get_current_vllm_config
@@ -226,6 +227,7 @@ GROUP_STREAM1_MOE = "stream1_moe" # p侧使能双micro batch为第二个流创�
 _O_PROJ_TP: Optional[GroupCoordinator] = None
 _O_PROJ_DP: Optional[GroupCoordinator] = None
 _EH_PROJ_TP: Optional[GroupCoordinator] = None
+_MLA_CP: Optional[GroupCoordinator] = None
 
 
 def initialize_model_parallel(
@@ -255,6 +257,9 @@ def initialize_model_parallel(
         initialize_o_proj_tp_group(backend)
         initialize_o_proj_dp_group(backend)
 
+    if model_extra_config.operator_opt_config.use_dcp:
+        initialize_mla_cp_group(backend)
+    
     if is_device_a2 or not model_extra_config.operator_opt_config.prefill_moe_all_to_all:
 
         if not model_extra_config.operator_opt_config.two_stage_comm:
@@ -559,6 +564,15 @@ def initialize_o_proj_tp_group(backend) -> None:
         raise RuntimeError(f"o_proj TP Size ({o_proj_tp_size}) should be divisible by world size ({world_size})")
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
+    if model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node:
+        attn_tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        if attn_tp_size >= o_proj_tp_size:
+            if attn_tp_size % o_proj_tp_size != 0:
+                raise RuntimeError("attn_tp_size must be divided by o_proj_tp_size")
+            o_proj_tp_size = attn_tp_size // o_proj_tp_size   #merge_size
+        else:
+            raise RuntimeError("not support when attn_tp_size < o_proj_tp_size")
+
     global _O_PROJ_TP
     if _O_PROJ_TP is not None:
         raise RuntimeError("_O_PROJ_TP must be None")
@@ -581,13 +595,27 @@ def initialize_o_proj_dp_group(backend) -> None:
     world_size: int = get_world_group().world_size
     o_proj_tp_size = model_extra_config.parall_config.o_proj_tp_size
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
-
+    
+    if model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node:
+        attn_tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        if attn_tp_size >= o_proj_tp_size:
+            if attn_tp_size % o_proj_tp_size != 0:
+                raise RuntimeError("attn_tp_size must be divided by o_proj_tp_size")
+            merge_size = attn_tp_size // o_proj_tp_size   #merge_size
+            o_proj_tp_size = merge_size
+        else:
+            raise RuntimeError("not support when attn_tp_size < o_proj_tp_size")
+        
     dp_size: int = world_size // o_proj_tp_size
     global _O_PROJ_DP
     if _O_PROJ_DP is not None:
         raise RuntimeError("_O_PROJ_DP must be None")
     all_ranks = torch.tensor(get_world_group().ranks).reshape(dp_size, o_proj_tp_size)
     group_ranks = all_ranks.transpose(0, 1)
+    
+    if model_extra_config.operator_opt_config.use_dcp and not model_extra_config.task_config.is_prefill_node:
+        group_ranks = group_ranks.reshape(-1, attn_tp_size // merge_size)
+
     group_ranks = [x.tolist() for x in group_ranks]
     # message queue broadcaster is only used in tensor model parallel group
     _O_PROJ_DP = init_model_parallel_group(
@@ -597,6 +625,11 @@ def initialize_o_proj_dp_group(backend) -> None:
         use_message_queue_broadcaster=False,
         group_name="o_proj_dp_group",
     )
+
+def initialize_mla_cp_group(backend) -> None:
+    # dcp now is using tp 
+    global _MLA_CP
+    _MLA_CP = get_tp_group()
 
 def initialize_eh_proj_tp_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
@@ -755,6 +788,9 @@ def get_o_proj_dp_group() -> GroupCoordinator:
 
 def get_eh_proj_tp_group() -> GroupCoordinator:
     return _EH_PROJ_TP
+
+def get_mla_cp_group() -> GroupCoordinator:
+    return _MLA_CP
 
 def get_local_world_group() -> GroupCoordinator:
     return _LOCAL_WORLD

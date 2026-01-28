@@ -149,6 +149,7 @@ class MockRunner:
         self.enable_torchair_graph_mode = (
                     self.vllm_config.npu_compilation_config.level > CompilationLevel.NO_COMPILATION and supports_dynamo())
 
+        self.dcp_kv_cache_interleave_size = self.block_size
         logging.info(f"MockRunner: enable_torchair_graph_mode: {self.enable_torchair_graph_mode}")
 
         torch.cuda.get_device_properties = get_device_properties
