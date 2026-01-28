@@ -112,9 +112,7 @@ class NpuHybridScheduler(Scheduler):
         self.routed_experts_reader = RoutedExpertsReader.create() if envs.EXPORT_MOE_EXPERTS == '1' else None
         if self.routed_experts_reader is not None:
             self.routed_experts_reader.attach_buffer(
-                num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers,
-                mlp_only_layers = self.vllm_config.model_config.hf_config.mlp_only_layers,
-                num_experts_per_tok = self.vllm_config.model_config.hf_config.num_experts_per_tok,
+                hf_config = self.vllm_config.model_config.hf_config,
                 block_size = self.cache_config.block_size,
                 instance_id=self.vllm_config.instance_id
             )
@@ -533,7 +531,8 @@ class NpuHybridScheduler(Scheduler):
                     routed_experts = self.routed_experts_reader.get_routed_experts(
                         request=request,
                         kv_cache_manager=self.kv_cache_manager,
-                        stopped=stopped
+                        stopped=stopped,
+                        num_new_token=num_new
                     )
                 else:
                     routed_experts = None

@@ -443,7 +443,7 @@ class DeepseekMoE(nn.Module):
         if self.decode_experts_pruning:
             self.decode_experts_pruning_threshold= torch.tensor(
                     [0, 0.01, 0.01, 0.01, 0.0665, 0.086, 0.125, 0.135], dtype=torch.float32).npu()
-        
+
         if model_extra_config.operator_opt_config.enable_moe_prefill_multi_stream:
             self.Prefill_shared_expert_stream = torch.npu.Stream()
 
@@ -721,7 +721,9 @@ class DeepseekMoE(nn.Module):
         best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
         mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
-
+        capture = RoutedExpertsCapturer.get_instance()
+        if capture is not None:
+            capture.capture(layer_id=layer_id, topk_ids=topk_ids)
         layer = self.experts
         
         max_num_deployed_expert = self.local_expert_num * get_ep_group().world_size

@@ -1689,9 +1689,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_blocks = num_blocks,
                 num_cache_groups = len(kv_cache_config.kv_cache_groups),
                 block_size = self.cache_config.block_size,
-                num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers,
-                mlp_only_layers = self.vllm_config.model_config.hf_config.mlp_only_layers,
-                num_experts_per_tok = self.vllm_config.model_config.hf_config.num_experts_per_tok,
+                hf_config = self.vllm_config.model_config.hf_config,
                 instance_id=self.vllm_config.instance_id,
                 enable_init_shared_memory=(get_tensor_model_parallel_rank()==0)
             )
