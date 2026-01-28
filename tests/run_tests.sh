@@ -51,6 +51,12 @@ else
     bash "${SCRIPT_DIR}/download_config.sh"
 fi
 
+cd ${ROOT_DIR}
+echo "[INFO] git status"
+git status
+echo "[INFO] git branch"
+git branch --show-current && git log -5 --pretty=%s
+
 cd ${ROOT_DIR}/omni/accelerators/sched/omni_proxy/
 pkill -9 nginx || true
 bash build.sh --skip-extras -c
