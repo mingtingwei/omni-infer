@@ -142,6 +142,7 @@ class Qwen3MoeAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        kv_stream = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -225,7 +226,8 @@ class Qwen3MoeAttention(nn.Module):
                 num_kv_heads=self.num_kv_heads,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.attn"
+                prefix=f"{prefix}.attn",
+                kv_stream=kv_stream,
             )
         
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -320,6 +322,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         compilation_config: Optional[NPUCompilationConfig] = None,
         prefix: str = "",
+        kv_stream=None,
     ) -> None:
         super().__init__()
         self.layer_name = f"{prefix}.self_attn.attn"
@@ -341,6 +344,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            kv_stream=kv_stream
         )
 
         # 'mlp_only_layers' in the config.
@@ -438,13 +442,15 @@ class Qwen3MoeModel(nn.Module):
             config.hidden_size,
             prefix=f"{prefix}.embed_tokens")
 
+        self.kv_stream = torch.npu.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Qwen3MoeDecoderLayer(config=config,
                                                 cache_config=cache_config,
                                                 quant_config=quant_config,
                                                 compilation_config=compilation_config,
-                                                prefix=prefix),
+                                                prefix=prefix,
+                                                kv_stream=self.kv_stream),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNormFlashComm(config.hidden_size, eps=config.rms_norm_eps)

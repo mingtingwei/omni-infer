@@ -919,6 +919,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         omni_cache = getattr(attn_metadata, "omni_cache", None)
         block_size = kv_cache[0].shape[-2] if kv_cache[0].numel() > 0 else 128
 
+        stream_for_reshape_and_cache = torch.npu.current_stream()
         # update kv cache
         if kv_cache[0].numel() > 0 or kv_cache[1].numel():
             assert block_size == 128, f"{block_size}"
@@ -951,20 +952,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     quant_value = torch_npu.npu_quantize(value.view(-1, self.num_kv_heads * self.head_size), v_scale.view(-1), None, torch.qint8, -1, True)
                     quant_key = quant_key.view(-1, self.num_kv_heads, self.head_size).contiguous()
                     quant_value = quant_value.view(-1, self.num_kv_heads, self.head_size).contiguous()
-                    torch_npu.npu_scatter_pa_kv_cache(
-                        quant_key,
-                        quant_value,
-                        kv_cache[0],
-                        kv_cache[1],
-                        attn_metadata.slot_mapping.int()
-                    )
+                    key = quant_key
+                    value = quant_value
+                    slot_mapping = attn_metadata.slot_mapping.int()
                 else:
+                    slot_mapping = attn_metadata.slot_mapping
+                if self.kv_stream is not None and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+                    stream_for_reshape_and_cache = self.kv_stream
+                    self.kv_stream.wait_stream(torch.npu.current_stream())
+                with torch.npu.stream(stream_for_reshape_and_cache):
                     torch_npu.npu_scatter_pa_kv_cache(
                         key,
                         value,
                         kv_cache[0],
                         kv_cache[1],
-                        attn_metadata.slot_mapping
+                        slot_mapping
                     )
   
 
@@ -1034,6 +1036,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_qlen=list(accumulate(attn_metadata.query_lens_list)),
                 actual_seq_kvlen=attn_metadata.seq_lens_list,
             )[0]
+        if stream_for_reshape_and_cache != torch.npu.current_stream():
+            torch.npu.current_stream().wait_stream(stream_for_reshape_and_cache)
 
         output = output.view_as(attn_output)
         output.copy_(attn_output)
