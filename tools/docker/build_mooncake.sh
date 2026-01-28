@@ -48,18 +48,10 @@ fi
 GOVER=\$2
 EOF
 
-
-#清除多余的repo文件
-#openEuler_file=/etc/yum.repos.d/openEuler.repo
-#if [ -f $openEuler_file ];then
-#  rm -rf $openEuler_file
-#fi
-
 # 把待插入的脚本块整体转义后，通过 here-document 传给 sed
 sed -i '/^apt-get install -y \$SYSTEM_PACKAGES$/{
 r /dev/stdin
 }' "/workspace/Mooncake/dependencies.sh" <<'EOF'
-rm -rf /etc/yum.repos.d/openEuler.repo
 if [ "$ENV" == "x86_64" ]; then
     yum install -y $SYSTEM_PACKAGES
 else
@@ -68,17 +60,11 @@ fi
 EOF
 
 ## 调整为openeuler的安装方案，采用yum安装
-#注释掉下面一行
-#apt-get install -y $SYSTEM_PACKAGES
 sed -i '/apt-get install -y \$SYSTEM_PACKAGES/s/^/# /' $dependencies_file
 
 # 将apt-get 替换成yum
 sed -i 's/apt-get/yum/g' $dependencies_file
 sed -i 's/\byum update\b/yum -y update/g' $dependencies_file
-#sed -i 's/^[[:space:]]*yum update[[:space:]]*$/# &/' $dependencies_file
-## 删除下载go gz包
-#wget -q --show-progress https://go.dev/dl/go$GOVER.linux-$ARCH.tar.gz
-#check_success "Failed to download Go $GOVER"
 sed -i '/wget -q --show-progress https:\/\/go.dev\/dl\/go$GOVER.linux-$ARCH.tar.gz/s/^/# /' $dependencies_file
 sed -i '/check_success "Failed to download Go $GOVER"/s/^/# /' $dependencies_file
 
@@ -163,9 +149,6 @@ sed -i -e '
 
 cd Mooncake
 
-#export http_proxy=$proxy
-#export https_proxy=$proxy
-
 sh /workspace/Mooncake/dependencies.sh $arch $go_version -y yes
 
 mkdir /workspace/Mooncake/build
@@ -181,10 +164,7 @@ sh scripts/build_wheel.sh #构造whl包，默认构造完的路径在	-wheel/dis
 #直接安装wheel
 pip install /workspace/Mooncake/mooncake-wheel/dist/mooncake*.whl
 
-
 #设置pip url
-#pip config set global.index-url "http://mirrors.tools.huawei.com/pypi/simple"
-#pip config set global.trusted-host "mirrors.tools.huawei.com"
 source ~/.bashrc
 
 #容器内部pip

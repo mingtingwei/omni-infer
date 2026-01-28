@@ -6,6 +6,7 @@ ARG PIP_INDEX_URL
 ARG PIP_TRUSTED_HOST
 ARG ARCHITECTURE
 ARG CUSTOM_OPS
+ARG NPU_PLATFORM
 ARG GO_VERSION=1.24.1
 
 
@@ -20,7 +21,7 @@ copy ./copy_data/omniinfer /workspace/omniinfer
 RUN export http_proxy=${HTTP_PROXY} && export https_proxy=${HTTP_PROXY} && \
     echo "export HCCL_OP_RETRY_ENABLE=\"L0:0, L1:0, L2:0\"" >> ~/.bashrc; \
     echo "export HCCL_IF_BASE_PORT=59000" >> ~/.bashrc; \
-    yum -y install pcre-devel && \
+    yum -y install pcre-devel libuuid-devel && \
     pip config set global.index-url ${PIP_INDEX_URL} && \
     pip config set global.trusted-host ${PIP_TRUSTED_HOST} && \
     sh /workspace/build_mooncake.sh -a ${ARCHITECTURE} -g ${GO_VERSION} && \
@@ -49,5 +50,7 @@ RUN export http_proxy=${HTTP_PROXY} && export https_proxy=${HTTP_PROXY} && \
             fi; \
         done; \
     fi && \
+    bash /workspace/dist/codes/install_ops_by_whl.sh && \
     pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
+     -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
         transformers==4.57.1 openai==2.7.1 openai_harmony==0.0.8 xgrammar==0.1.23

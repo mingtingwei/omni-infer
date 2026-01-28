@@ -20,15 +20,19 @@ START_SERVER="True"
 ## Python version to use during image build (e.g. 3.10, 3.11)
 PYTHON_VERSION="3.11.12"
 # base image tags
-BASE_IMAGE=test-infer-base:0.1
+SYSTEM_IMAGE=test-infer-base:0.1
+# L0 image tags (system base with Python)
+BASE_IMAGE=test-infer-system:0.1
 # L1 image tags
 L1_IMAGE=test-infer-meddle:0.1
 L2_IMAGE=test-infer-omniinfer:0.1
 BRANCH=master
-## BUILD_TARGET: which Dockerfiles to build: L1, L2, or both
-# - L1: only build Dockerfile.base
+## BUILD_TARGET: which Dockerfiles to build: L0, L1, L2, or combinations
+# - L0: only build Dockerfile.system (Python base)
+# - L1: only build Dockerfile.base (CANN + PyTorch)
 # - L2: only build Dockerfile.omniinfer
-# - both: build Dockerfile.base first, then Dockerfile.omniinfer (default)
+# - both: build L1 first, then L2 (default, assumes L0 already exists)
+# - all: build L0, L1, then L2
 BUILD_TARGET="both"
 FRAMEWORK_TYPE="vllm"
 BUILD_FOR_ROMA="false"
@@ -51,26 +55,31 @@ Options:
     --cann-install-mode <mode>        CANN install mode for Dockerfile.base: whole or split (default: ${CANN_INSTALL_MODE})
     --npu-platform <platform>         NPU platform (910B or 910C) (default: ${NPU_PLATFORM})
     --base-image <image>              Tag for the base image build (default: ${BASE_IMAGE})
-    --L1-image <image>               Tag for the dev image build (default: ${L1_IMAGE})
-    --L2-image <image>              Tag for the apiserver/user image build (default: ${L2_IMAGE})
+    --L0-image <image>                Tag for the system/Python image build (default: ${L0_IMAGE})
+    --L1-image <image>                Tag for the dev image build (default: ${L1_IMAGE})
+    --L2-image <image>                Tag for the apiserver/user image build (default: ${L2_IMAGE})
     --custom-ops <ops>                Custom operator packages to include (default: ${CUSTOM_OPS})
-    --roma-image <image>          Tag for the Roma image build (default: ${ROMA_IMAGE})
+    --roma-image <image>              Tag for the Roma image build (default: ${ROMA_IMAGE})
     --branch <tag>                    Omni code version/branch to include (default: ${BRANCH})
     --python-version <version>        Python version to use during build (default: ${PYTHON_VERSION})
-    --build-target <L1|L2|both|skip> Select which builds to run (default: ${BUILD_TARGET})
-    --start-server <True|False>     Whether to start the apiserver after build (default: ${START_SERVER})
-    --build-for-roma <True|False>  Whether to build image for Roma environment (default: ${BUILD_FOR_ROMA})
-    --framework-type <type>          Framework type to build (default: ${FRAMEWORK_TYPE})
+    --build-target <L0|L1|L2|both|all|skip> Select which builds to run (default: ${BUILD_TARGET})
+    --start-server <True|False>       Whether to start the apiserver after build (default: ${START_SERVER})
+    --build-for-roma <True|False>     Whether to build image for Roma environment (default: ${BUILD_FOR_ROMA})
+    --framework-type <type>           Framework type to build (default: ${FRAMEWORK_TYPE})
 
 Examples:
     $0 --arch aarch64 --L2-image my-image:latest --model-name "Qwen/Qwen2.5-0.5B"
     $0 --build-target L1 --cann-install-mode split
-    # Only build the base image
-    $0 --build-target L1
-    # Only build the omniinfer/apiserver image (skip Dockerfile.base)
+    # Only build the system/Python image (L0)
+    $0 --build-target L0
+    # Only build the CANN/PyTorch image (L1, requires L0 exists)
+    $0 --build-target L1 --L0-image my-l0:latest
+    # Only build the omniinfer/apiserver image (L2, skip L0 and L1)
     $0 --build-target L2 --L2-image my-image:latest
-    # Build both (default)
+    # Build L1 and L2 (default, assumes L0 already exists)
     $0 --build-target both
+    # Build all layers: L0, L1, L2
+    $0 --build-target all
 EOF
 }
 
@@ -109,6 +118,9 @@ parse_long_option() {
             ;;
         --base-image)
             BASE_IMAGE="$2"
+            ;;
+        --system-image)
+            SYSTEM_IMAGE="$2"
             ;;
         --L1-image)
             L1_IMAGE="$2"
@@ -179,6 +191,7 @@ echo "MODEL_NAME: ${MODEL_NAME}"
 echo "CANN_INSTALL_MODE: ${CANN_INSTALL_MODE}"
 echo "NPU_PLATFORM: ${NPU_PLATFORM}"
 echo "BASE_IMAGE: ${BASE_IMAGE}"
+echo "SYSTEM_IMAGE: ${SYSTEM_IMAGE}"
 echo "L1_IMAGE: ${L1_IMAGE}"
 echo "L2_IMAGE: ${L2_IMAGE}"
 echo "ROMA_IMAGE: ${ROMA_IMAGE}"
@@ -192,8 +205,8 @@ echo "BUILD_FOR_ROMA: ${BUILD_FOR_ROMA}"
 echo "=================="
 
 # Validate BUILD_TARGET
-if [[ ! "${BUILD_TARGET}" =~ ^(L1|L2|both|skip)$ ]]; then
-    echo "Unknown build target: ${BUILD_TARGET}. Use one of: L1, L2, both, skip." >&2
+if [[ ! "${BUILD_TARGET}" =~ ^(L0|L1|L2|both|all|skip)$ ]]; then
+    echo "Unknown build target: ${BUILD_TARGET}. Use one of: L0, L1, L2, both, all, skip." >&2
     exit 2
 fi
 
@@ -209,8 +222,29 @@ if [[ ! "${NPU_PLATFORM}" =~ ^(910B|910C)$ ]]; then
     exit 2
 fi
 
-## BASE_IMAGE: build base image with CANN pytorch torch_npu
-if [[ "${BUILD_TARGET}" == "L1" || "${BUILD_TARGET}" == "both" ]]; then
+## L0_IMAGE: build system image with Python (Dockerfile.system)
+if [[ "${BUILD_TARGET}" == "L0" || "${BUILD_TARGET}" == "all" ]]; then
+    echo "Building system image (Dockerfile.system) -> ${L0_IMAGE}"
+    docker build --progress=plain --no-cache -f Dockerfile.system \
+        --build-arg ARCHITECTURE="${ARCH}" \
+        --build-arg HTTP_PROXY="${PROXY}" \
+        --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+        --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+        --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
+        --build-arg BASE_IMAGE=${SYSTEM_IMAGE} \
+        --target system_base \
+        -t ${BASE_IMAGE} .
+    # If the user only wanted to build the L0 image, stop here
+    if [[ "${BUILD_TARGET}" == "L0" ]]; then
+        echo "BUILD_TARGET=L0 selected — finished building L0 image. Exiting."
+        exit 0
+    fi
+else
+    echo "Skipping Dockerfile.system build (BUILD_TARGET=${BUILD_TARGET})"
+fi
+
+## L1_IMAGE: build base image with CANN pytorch torch_npu (Dockerfile.base)
+if [[ "${BUILD_TARGET}" == "L1" || "${BUILD_TARGET}" == "both" || "${BUILD_TARGET}" == "all" ]]; then
     echo "Building base image (Dockerfile.base) -> ${L1_IMAGE}"
     docker build --progress=plain --no-cache -f Dockerfile.base \
         --build-arg ARCHITECTURE="${ARCH}" \
@@ -218,10 +252,10 @@ if [[ "${BUILD_TARGET}" == "L1" || "${BUILD_TARGET}" == "both" ]]; then
         --build-arg CANN_INSTALL_MODE="${CANN_INSTALL_MODE}" \
         --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
         --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
-        --build-arg PYTHON_VERSION="${PYTHON_VERSION}" \
         --build-arg BASE_IMAGE=${BASE_IMAGE} \
+        --target cann_pytorch \
         -t ${L1_IMAGE} .
-    # If the user only wanted to build the base image, stop here
+    # If the user only wanted to build the L1 image, stop here
     if [[ "${BUILD_TARGET}" == "L1" ]]; then
         echo "BUILD_TARGET=L1 selected — finished building L1 image. Exiting."
         exit 0
@@ -236,7 +270,7 @@ fi
 # docker run --rm -it -u root ${DEV_IMAGE}
 
 ## L2_IMAGE user image with apiserver
-if [[ "${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both" ]]; then
+if [[ "${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both" || "${BUILD_TARGET}" == "all" ]]; then
     if [[ "${FRAMEWORK_TYPE}" == "VLLM" || "${FRAMEWORK_TYPE}" == "vllm" ]]; then
         echo "Building omniinfer_vllm image (Dockerfile.omniinfer) -> ${L2_IMAGE}"
         docker build --progress=plain --no-cache -f Dockerfile.omniinfer \
@@ -258,13 +292,14 @@ if [[ "${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both" ]]; then
             --build-arg BASE_IMAGE=${L1_IMAGE} \
             --build-arg CUSTOM_OPS="${CUSTOM_OPS}" \
             --build-arg ARCHITECTURE="${ARCH}" \
+            --build-arg NPU_PLATFORM="${NPU_PLATFORM}" \
             -t ${L2_IMAGE} .
     fi
 else
     echo "Skipping L2 image build (BUILD_TARGET=${BUILD_TARGET})"
 fi
 
-if [[ ("${BUILD_FOR_ROMA}" == "True" || "${BUILD_FOR_ROMA}" == "true" || "${BUILD_FOR_ROMA}" == "1")  && "${BUILD_TARGET}" != "L1" ]]; then
+if [[ ("${BUILD_FOR_ROMA}" == "True" || "${BUILD_FOR_ROMA}" == "true" || "${BUILD_FOR_ROMA}" == "1")  && "${BUILD_TARGET}" != "L0" && "${BUILD_TARGET}" != "L1" ]]; then
     echo "Building Roma image (Dockerfile.roma) -> ${ROMA_IMAGE}"
     docker build --progress=plain --no-cache -f Dockerfile.roma \
         --build-arg BASE_IMAGE=${L2_IMAGE} \
@@ -278,7 +313,7 @@ fi
 # Create a temp container name that includes a sanitized L2 image identifier
 # so it's easy to distinguish artifacts when building different images.
 # Sanitize image tag to allowed Docker name characters (alphanumeric, . _ -)
-if [[ ("${FRAMEWORK_TYPE}" == "VLLM" || "${FRAMEWORK_TYPE}" == "vllm") && ("${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both") ]]; then
+if [[ ("${FRAMEWORK_TYPE}" == "VLLM" || "${FRAMEWORK_TYPE}" == "vllm") && ("${BUILD_TARGET}" == "L2" || "${BUILD_TARGET}" == "both" || "${BUILD_TARGET}" == "all") ]]; then
     SAFE_L2_IMAGE=$(echo "${L2_IMAGE}" | sed 's/[:\/]/_/g; s/[^a-zA-Z0-9._-]/_/g')
     TEMP_CONTAINER="dist_${SAFE_L2_IMAGE}_$(date +"%Y-%m-%d_%H%M%S")"
     echo "Using temporary container: ${TEMP_CONTAINER}"

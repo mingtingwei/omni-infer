@@ -1,0 +1,65 @@
+# The Dockerfile is used to construct system base image with Python.
+# This builds the L0 image layer.
+
+ARG BASE_IMAGE
+#################### PYTHON BUILD IMAGE ####################
+FROM ${BASE_IMAGE} AS tmp_base
+ARG ARCHITECTURE
+COPY openEuler.repo /etc/yum.repos.d/openEuler.repo
+RUN sed -i "s/aarch64/${ARCHITECTURE}/g" /etc/yum.repos.d/openEuler.repo
+
+FROM tmp_base AS builder
+
+ARG HTTP_PROXY
+ARG PYTHON_VERSION
+
+# Install tools for build python
+RUN export http_proxy=${HTTP_PROXY} && \
+    export https_proxy=${HTTP_PROXY} && \
+    yum -y install gcc g++ make wget libffi-devel zlib-devel bzip2-devel openssl-devel ncurses-devel sqlite-devel readline-devel tk-devel findutils cronie crontabs logrotate zeromq zeromq-devel boost-devel
+
+COPY install_python.sh /tmp/install_python.sh
+RUN chmod +x /tmp/install_python.sh && \
+    export http_proxy=${HTTP_PROXY} && \
+    export https_proxy=${HTTP_PROXY} && \
+    /tmp/install_python.sh /usr/local ${PYTHON_VERSION}
+#################### PYTHON BUILD IMAGE ####################
+
+#################### SYSTEM BASE IMAGE ####################
+FROM tmp_base AS system_base
+
+ARG HTTP_PROXY
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+
+USER root
+WORKDIR /workspace
+
+COPY --from=builder /usr/local /usr/local/
+COPY ./copy_data/msgpack-c-6.1.0.tar.gz /workspace/
+ARG PYTHON_VERSION
+# Install python and packages
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/python${PYTHON_VERSION%.*}.conf && \
+    ln -sf /usr/local/bin/python${PYTHON_VERSION%.*} /usr/bin/python && \
+    ln -sf /usr/local/bin/pip3 /usr/bin/pip && \
+    ln -sf /usr/local/bin/pip3 /usr/bin/pip3 && \
+    export http_proxy=${HTTP_PROXY} && \
+    export https_proxy=${HTTP_PROXY} && \
+    yum -y install zeromq findutils zeromq-devel boost-devel && \
+    python -m pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --upgrade pip==25.1.1 && \
+    pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --no-cache-dir --upgrade \
+    setuptools requests wheel && \
+    pip cache purge && \
+    echo "export PYTHONPATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages/:$PYTHONPATH" >> ~/.bashrc;
+
+RUN export http_proxy=${HTTP_PROXY} && \
+    export https_proxy=${HTTP_PROXY} && \
+    yum install -y make cmake gcc-c++ gcc && \
+    tar -zxf msgpack-c-6.1.0.tar.gz && \
+    cd msgpack-c-6.1.0 && \
+    mkdir build && cd build && \
+    cmake .. -DMSGPACK_BUILD_EXAMPLES=OFF -DMSGPACK_BUILD_TESTS=OFF -DMSGPACK_USE_BOOST=OFF -DCMAKE_INSTALL_PREFIX=/usr && \
+    make -j8 && make install && \
+    rm -rf /workspace/msgpack-c-6.1.0 /workspace/msgpack-c-6.1.0.tar.gz 
+#################### SYSTEM BASE IMAGE ####################
+

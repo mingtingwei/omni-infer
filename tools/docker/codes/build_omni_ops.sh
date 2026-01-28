@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 使用默认值（未传参时）
-if [ -z "$OMNI_OPS_PATH" ]; then
+if [[ -z "$OMNI_OPS_PATH" ]]; then
     OMNI_OPS_PATH="$DEFAULT_OMNI_OPS_PATH"
 fi
 
@@ -43,23 +43,23 @@ echo "omni code path: $OMNI_OPS_PATH"
 
 # 设置 ASCEND_PATH
 ASCEND_PATH=""
-if [ -d /usr/local/Ascend/ascend-toolkit ]; then
+if [[ -d /usr/local/Ascend/ascend-toolkit ]]; then
     ASCEND_PATH="/usr/local/Ascend/ascend-toolkit"
 else
     ASCEND_PATH="/usr/local/Ascend"
 fi
 
-if [ -f "$ASCEND_PATH/set_env.sh" ]; then
+if [[ -f "$ASCEND_PATH/set_env.sh" ]]; then
     source "$ASCEND_PATH/set_env.sh"
 fi
 
 # 根据 npu_platform 动态调整 build.sh 参数
 cd "$OMNI_OPS_PATH/inference/ascendc"
-if [ "$npu_platform" != "$DEFAULT_NPU_PLATFORM" ]; then
+if [[ "$npu_platform" != "$DEFAULT_NPU_PLATFORM" ]]; then
     echo "Using custom compute unit: ascend910b (NPU platform: $npu_platform)"
     bash build.sh --disable-check-compatible --compute-unit ascend910b
 else
-    bash build.sh --disable-check-compatible
+    bash build.sh --disable-check-compatible --compute-unit ascend910_93
 fi
 
 cd "$OMNI_OPS_PATH/inference/ascendc/output"
@@ -80,3 +80,8 @@ cd "$OMNI_OPS_PATH/inference/ascendc/torch_ops_extension"
 bash build_and_install.sh
 
 echo "Success: Custom ops installed successfully."
+
+DIST_OPS_DIR="/workspace/dist/ops/omni/inference"
+mkdir -p "$DIST_OPS_DIR"
+cp "$OMNI_OPS_PATH/inference/ascendc/output"/*.run "$DIST_OPS_DIR"
+cp "$OMNI_OPS_PATH/inference/ascendc/torch_ops_extension/dist"/*.whl "$DIST_OPS_DIR"

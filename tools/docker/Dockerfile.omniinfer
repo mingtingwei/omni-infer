@@ -121,6 +121,7 @@ RUN export http_proxy=${HTTP_PROXY} && \
             fi; \
         done; \
     fi && \
+    bash /workspace/dist/codes/install_ops_by_whl.sh && \
     # rm -rf /workspace/dist && \
     pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} \
         -r /workspace/requirements/develop.txt && \

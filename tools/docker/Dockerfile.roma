@@ -27,9 +27,16 @@ RUN groupadd -g 100 ma-group && \
 # 设置权限
 RUN chmod -R 750 /home/ma-user && \
     chown -R ma-user:ma-group /etc/yum.repos.d && \
-    chown -R ma-user:ma-group /usr/local/lib/python3.11 && \
+    PYTHON_DIR=$(ls -d /usr/local/lib/python3.* 2>/dev/null | head -n 1) && \
+    if [ -n "$PYTHON_DIR" ] && [ -d "$PYTHON_DIR" ]; then \
+    chown -R ma-user:ma-group "$PYTHON_DIR" && \
+    chmod -R 755 "$PYTHON_DIR"; \
+    fi && \
     chmod -R 755 /etc/yum.repos.d && \
-    chmod -R 755 /usr/local/lib/python3.11 && \
+    if [ -d "/usr/local/nginx" ]; then \
+    chmod -R 777 /usr/local/nginx/conf && \
+    chmod -R 777 /usr/local/nginx; \
+    fi && \
     # 复制 root 的 .bashrc 到 ma-user
     cp -f /root/.bashrc /home/ma-user/.bashrc && \
     chown ma-user:ma-group /home/ma-user/.bashrc && \

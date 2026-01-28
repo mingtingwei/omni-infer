@@ -43,13 +43,13 @@ echo "CANN recipes code path: $OPS_CODE_PATH"
 echo "Target NPU platform: $NPU_PLATFORM"
 
 ASCEND_PATH=""
-if [ -d /usr/local/Ascend/ascend-toolkit ]; then
+if [[ -d /usr/local/Ascend/ascend-toolkit ]]; then
     ASCEND_PATH="/usr/local/Ascend/ascend-toolkit"
 else
     ASCEND_PATH="/usr/local/Ascend"
 fi
 
-if [ -f "$ASCEND_PATH/set_env.sh" ]; then
+if [[ -f "$ASCEND_PATH/set_env.sh" ]]; then
     source "$ASCEND_PATH/set_env.sh"
 fi
 
@@ -79,3 +79,8 @@ cd "$OPS_CODE_PATH/ops/ascendc/torch_ops_extension"
 bash build_and_install.sh
 
 echo "Success: Custom ops installed successfully."
+
+DIST_OPS_DIR="/workspace/dist/ops/cann"
+mkdir -p "$DIST_OPS_DIR"
+cp "$OPS_CODE_PATH/ops/ascendc/output"/*.run "$DIST_OPS_DIR"
+cp "$OPS_CODE_PATH/ops/ascendc/torch_ops_extension/dist"/*.whl "$DIST_OPS_DIR"
