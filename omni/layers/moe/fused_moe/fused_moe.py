@@ -1013,7 +1013,12 @@ def fused_experts_moe_dispatch_combine(layer: torch.nn.Module,
             global fake_expand_x
             hidden_states_experts = fake_expand_x[hidden_states.shape[0]]
             if shared_expert_rank_num <= 0:
-                hidden_states_shared_experts = layer(hidden_states)
+                if model_extra_config.task_config.enable_graph_mode and attn_metadata is not None and hasattr(attn_metadata, "decode"):
+                    tng.scope.npu_wait_tensor(hidden_states, expand_x)
+                    hidden_states_shared_experts = layer(hidden_states)
+                    tng.scope.npu_wait_tensor(hidden_states_experts, hidden_states_shared_experts)
+                else:
+                    hidden_states_shared_experts = layer(hidden_states)
         # moeCombine
         kwargs = {
             "expand_x": hidden_states_experts,
