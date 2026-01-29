@@ -183,3 +183,17 @@ index 9b848fac5..66c050801 100644
      def sync_and_slice_intermediate_tensors(
              self, num_tokens: int, intermediate_tensors: IntermediateTensors,
 
+
+diff --git a/vllm/v1/structured_output/backend_xgrammar.py b/vllm/v1/structured_output/backend_xgrammar.py
+index 25eb0a68a..f679d4451 100644
+--- a/vllm/v1/structured_output/backend_xgrammar.py
++++ b/vllm/v1/structured_output/backend_xgrammar.py
+@@ -176,7 +176,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
+         """
+         for token in tokens:
+             if not self.matcher.accept_token(token):
+-                logger.error(
++                logger.warning(
+                     "Failed to advance FSM for request %s "
+                     "for tokens %s. Please file an issue.", request_id, token)
+                 return False
