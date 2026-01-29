@@ -1370,6 +1370,14 @@ class NPUModelRunner(GPUModelRunner):
                 output.finished_recving_headers[req_id] = json.loads(headers_str)
             output.finished_sending = finished_sending_raw
             output.finished_recving = finished_recving_raw
+        
+        if self.use_spec_decode:
+            for req_data in scheduler_output.scheduled_cached_reqs:
+                req_id = req_data.req_id
+                req_state = self.requests[req_id]
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                req_state.output_token_ids.extend(cached_sampled_token_ids[req_index][:-1])
+
         return output
 
     def recompute_fallback(self, scheduler_output: "SchedulerOutput"):
