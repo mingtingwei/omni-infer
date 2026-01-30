@@ -88,7 +88,7 @@ esac
 
 cmd=(
   pytest 
-  --tb=no -v
+  --tb=long -v
   "${target_path[@]}"
   --cov
   "${extra_args[@]}"
