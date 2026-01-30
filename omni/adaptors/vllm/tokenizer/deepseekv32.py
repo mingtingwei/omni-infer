@@ -5,9 +5,12 @@ from pathlib import Path
 from transformers import BatchEncoding
 from typing import Optional
 from vllm.transformers_utils.tokenizer_base import TokenizerBase
+from vllm.logger import init_logger
 
 from .deepseek_v32_encoding import encode_messages
 from .hf import HfTokenizer
+
+logger = init_logger(__name__)
 
 
 class DeepseekV32Tokenizer(HfTokenizer):
@@ -42,7 +45,20 @@ class DeepseekV32Tokenizer(HfTokenizer):
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
+
         conversation = kwargs.get("conversation", messages)
+
+        try:
+            if isinstance(conversation, (list, tuple)) and (
+                isinstance(conversation[0], (list, tuple)) or hasattr(conversation[0], "messages")
+            ):
+                conversation = conversation
+        except Exception as e:
+            # Log and report any library-related exceptions for further investigation.
+            logger.exception(
+                "An error occurred in `transformers` while applying chat template")
+            raise ValueError from e
+
         messages = conversation.copy()
         drop_thinking = True
         if tools is not None and len(tools) > 0:
