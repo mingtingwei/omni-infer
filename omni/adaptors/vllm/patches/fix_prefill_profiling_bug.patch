@@ -1,0 +1,38 @@
+From b3d8b46fae8ba98796b058016768cfd50124d13d Mon Sep 17 00:00:00 2001
+From: DaaaBei <fubei5@huawei.com>
+Date: Sat, 31 Jan 2026 11:18:18 +0800
+Subject: [PATCH] fix prefill profilling
+
+---
+ vllm/executor/ray_utils.py | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/executor/ray_utils.py b/vllm/executor/ray_utils.py
+index 7bc98a16f..45b5690db 100644
+--- a/vllm/executor/ray_utils.py
++++ b/vllm/executor/ray_utils.py
+@@ -22,6 +22,7 @@ if TYPE_CHECKING:
+ 
+ logger = init_logger(__name__)
+ PG_WAIT_TIMEOUT = 1800
++ENABLE_PREFILL_PROFILING = os.getenv("ENABLE_PREFILL_PROFILING", "0") == "1"
+ 
+ try:
+     import ray
+@@ -131,8 +132,11 @@ try:
+                 scheduler_output, intermediate_tensors = scheduler_output
+             else:
+                 scheduler_output, intermediate_tensors = scheduler_output, None
+-            output = self.worker.model_runner.execute_model(
+-                scheduler_output, intermediate_tensors)
++            if ENABLE_PREFILL_PROFILING:
++                output = self.worker.execute_model(scheduler_output)
++            else:
++                output = self.worker.model_runner.execute_model(
++                    scheduler_output, intermediate_tensors)
+             if isinstance(output, IntermediateTensors):
+                 output = scheduler_output, output
+             return output
+-- 
+2.33.0
+
