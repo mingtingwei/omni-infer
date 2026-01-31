@@ -136,7 +136,9 @@ class ModelOperatorOptConfig:
     load_rms_bias: bool = False # RMSNorm是否启用bias
     enable_e_score_correction_bias: bool = False # moe部分是否启用e_score_correction_bias
     use_ascend_cloud_ops: bool = False # 是否使用ascend_cloud_ops算子
-    skip_mtp_hidden_states: bool = False
+    skip_mtp_hidden_states: bool = False # mtp是否忽略上次mtp的hidden_state
+    enable_limit_topk: bool = False # 是否限制topk的值[1, 1024]
+
     def __post_init__(self):
 
         # Check the dependencies of use_prefetch and prefetch_Mb

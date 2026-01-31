@@ -243,6 +243,8 @@ class AscendSamplerV1(SamplerV1):
                     k = k.type(torch.int32)
                 else:
                     k = torch.ones((logits.shape[0],), dtype=torch.int32, device=logits.device) * logits.shape[1]
+                if model_extra_config.operator_opt_config.enable_limit_topk:
+                    k = torch.clamp(k, min=1, max=1024)
                 q = self.generate_random_sequence(
                     logits, sampling_metadata, spec_metadata,
                 ).type(torch.float32)

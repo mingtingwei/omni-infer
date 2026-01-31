@@ -15,6 +15,7 @@
         "load_rms_bias": true,
         "use_ascend_cloud_ops": true,
         "skip_mtp_hidden_states": true,
+        "enable_limit_topk": true,
         "enable_e_score_correction_bias": true
     }
 }
