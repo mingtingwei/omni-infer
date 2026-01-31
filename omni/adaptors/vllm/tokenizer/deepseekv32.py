@@ -21,6 +21,37 @@ class DeepseekV32Tokenizer(HfTokenizer):
         self._added_vocab_size = len(self._added_vocab)
 
     @classmethod
+    def validate_messages(cls, messages):
+        try:
+            for index in range(len(messages)):
+                msg = messages[index]
+                role = msg.get("role")
+                content = msg.get("content")
+
+                if role not in ["system", "developer", "user", "tool","assistant"]:
+                    return False, f"Unkown role: {role}. Role just can be [system, developer, user, tool,assistant]"
+
+                if role == "developer":
+                    if not content:
+                        return False, f"Invalid message for {role}: {msg}"
+
+                elif role == "tool":
+                    pre_assistant_idx = index - 1
+                    assistant_msg = messages[pre_assistant_idx]
+                    while pre_assistant_idx >= 0 and assistant_msg.get("role") == "tool":
+                        pre_assistant_idx -= 1
+                        assistant_msg = messages[pre_assistant_idx]
+                    if not (index ==0 or pre_assistant_idx >= 0 and assistant_msg.get("role") == "assistant"):
+                        return False, f"Invalid message at {index}\n{assistant_msg}"
+                    tool_call_order = index - pre_assistant_idx
+                    assistant_tool_calls = assistant_msg.get("tool_calls")
+                    if not (assistant_tool_calls and len(assistant_tool_calls) >= tool_call_order):
+                        return False, "No tool calls but found tool output"
+            return True, ""
+        except Exception as e:
+            return True, ""
+
+    @classmethod
     def from_pretrained(
         cls,
         path_or_repo_id: str | Path,

@@ -266,9 +266,6 @@ def render_message(
         summary_content = content or ""
 
         if thinking_mode == "thinking" and index > last_user_idx:
-            assert reasoning_content or tool_calls, (
-                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"
-            )
             thinking_part = (
                 thinking_template.format(reasoning_content=reasoning_content or "")
                 + thinking_end_token
@@ -301,7 +298,7 @@ def drop_thinking_messages(
             messages_wo_thinking.append(msg)
             continue
 
-        elif role == "assistant":
+        elif role == "assistant" or role == "developer":
             msg_wo_thinking = copy.copy(msg)
             msg_wo_thinking.pop("reasoning_content", None)
             msg_wo_thinking.pop("reasoning", None)

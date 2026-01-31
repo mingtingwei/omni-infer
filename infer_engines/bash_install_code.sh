@@ -65,3 +65,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/export_moe_experts.patch
 git apply --whitespace=nowarn $PATCH_ROOT/api_server_print_uvicorn_kwargs.patch
 git apply --whitespace=nowarn $PATCH_ROOT/think_compress_api_refactor.patch
 git apply --whitespace=nowarn $PATCH_ROOT/decode_context_parallel.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_internal_server_error.patch
