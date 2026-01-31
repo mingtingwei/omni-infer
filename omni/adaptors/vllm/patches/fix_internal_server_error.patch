@@ -1,0 +1,27 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 37d5e17..65bf5b8 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -54,7 +54,7 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+ from vllm.utils import random_uuid, as_list
+ from omni.tools.profiler.trace.tracing import parent_ctx_var, span_start_time
+ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+-
++from vllm.transformers_utils.tokenizers import DeepseekV32Tokenizer
+ original_init = RequestOutput.__init__
+ def new_init(self, *args, **kwargs):
+     trace_headers = kwargs.pop('trace_headers', None)
+@@ -230,6 +230,11 @@ class OpenAIServingChat(OpenAIServing):
+                     request.chat_template_kwargs = (request.chat_template_kwargs or {}) | {
+                             "reasoning_effort": REASONING_EFFORT[request.reasoning_effort]
+                         }
++                if isinstance(tokenizer, DeepseekV32Tokenizer):
++                    is_validate, error_info = DeepseekV32Tokenizer.validate_messages(request.messages)
++                    if not is_validate:
++                        return self.create_error_response(error_info)
++
+                 # Common case.
+                 (
+                     conversation,
+-- 
+
