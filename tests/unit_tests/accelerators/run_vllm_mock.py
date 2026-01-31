@@ -140,7 +140,7 @@ def cleanup_subprocess(processes):
     #     if lf.exists():
     #         lf.unlink()
 
-def strart_vllm_mock(prefill_num=0, decode_num=0):
+def start_vllm_mock(prefill_num=0, decode_num=0):
     processes = []
     log_files = []
 
@@ -209,13 +209,13 @@ if __name__ == "__main__":
     args = sys.argv[1:]
 
     if len(args) == 0:
-        strart_vllm_mock()
+        start_vllm_mock()
     elif len(args) == 2:
         try:
             numeric_args = []
             for arg in args:
                 numeric_args.append(int(arg))
-            strart_vllm_mock(*numeric_args)
+            start_vllm_mock(*numeric_args)
         except ValueError as e:
             print(f"Error: All four arguments must be valid numbers. Got: {args}")
             print("Usage: python script.py <prefill_num> <decode_num>")

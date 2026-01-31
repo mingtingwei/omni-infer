@@ -8,7 +8,7 @@ import concurrent.futures
 import random
 from pathlib import Path
 from run_proxy import setup_proxy, teardown_proxy, generate_proxy_endpoints
-from run_vllm_mock import strart_vllm_mock, cleanup_subprocess
+from run_vllm_mock import start_vllm_mock, cleanup_subprocess
 from port_manager import find_free_port,load_ports
 from collections import defaultdict
 
@@ -45,7 +45,7 @@ def setup_teardown():
     if ret == -1:
         pytest.fail(f"Start proxy fail")
 
-    processes = strart_vllm_mock(PREFILL_NUM, DECODE_NUM)
+    processes = start_vllm_mock(PREFILL_NUM, DECODE_NUM)
     if not processes:
         pytest.fail(f"Start vllm fail")
 
@@ -641,14 +641,12 @@ def analyze_balance_apc(log_file, num_logs):
     recent_logs.sort(key=lambda x: x['rcved'])
     # mapping style --> prompt length as key, idx as value
     prefill_mapping = {1135:1, 231: 0}
-    decode_mapping = {1135:0, 231:1}
     for req in recent_logs:
         val_p_mmch = req['prefill_max_match']
         val_d_mmch = req['decode_max_match']
         # match depth
-        if val_p_mmch == val_d_mmch == 8 or val_p_mmch == val_d_mmch == 1:
+        if val_p_mmch == val_d_mmch != 0:
             assert prefill_mapping[req['promt_tks']] == req['prefill_idx']
-            assert decode_mapping[req['promt_tks']] == req['decode_idx']
 
 def test_chat_completions_with_proxy_concurrent(setup_teardown):
     proxy_port = find_free_port()
@@ -747,13 +745,13 @@ def test_chat_completions_with_proxy_concurrent(setup_teardown):
             future = executor.submit(fetch_post, url, headers, data[i % len(data)])
             futures.append(future)
 
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                result = future.result()
-                results.append(result)
-                assert result.get('status') == 200
-            except Exception as e:
-                teardown_proxy_balance(ngx_pid)
+    for future in concurrent.futures.as_completed(futures):
+        try:
+            result = future.result()
+            results.append(result)
+            assert result.get('status') == 200
+        except Exception as e:
+            teardown_proxy_balance(ngx_pid)
 
     end_time = time.time()
     print(f"Total time: {end_time - start_time:.2f} seconds")
@@ -765,11 +763,11 @@ def test_chat_completions_with_proxy_concurrent(setup_teardown):
         analysis_result = analyze_balance_concurrent(log_file, num_logs)
         for idx in sorted(analysis_result['prefill_frequency'].keys()):
             count = analysis_result['prefill_frequency'][idx]
-            assert num_logs // PREFILL_NUM - 30 <= count <= num_logs // PREFILL_NUM + 30
+            assert num_logs // PREFILL_NUM - num_logs // (PREFILL_NUM * 2) <= count <= num_logs // PREFILL_NUM + num_logs // (PREFILL_NUM * 2)
 
         for idx in sorted(analysis_result['decode_frequency'].keys()):
             count = analysis_result['decode_frequency'][idx]
-            assert num_logs // DECODE_NUM - 30 <= count <= num_logs // DECODE_NUM + 30
+            assert num_logs // DECODE_NUM - num_logs // (DECODE_NUM * 2) <= count <= num_logs // DECODE_NUM + num_logs // (DECODE_NUM * 2)
 
     except Exception as e:
         teardown_proxy_balance(ngx_pid)

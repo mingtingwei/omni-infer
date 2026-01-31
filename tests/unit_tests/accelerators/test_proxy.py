@@ -6,7 +6,7 @@ import requests
 import json
 from pathlib import Path
 from run_proxy import setup_proxy, teardown_proxy
-from run_vllm_mock import strart_vllm_mock, cleanup_subprocess
+from run_vllm_mock import start_vllm_mock, cleanup_subprocess
 import port_manager
 
 # Configuration
@@ -40,7 +40,7 @@ def setup_teardown():
     if ret == -1:
         pytest.fail(f"Start proxy fail")
 
-    processes = strart_vllm_mock(PREFILL_NUM, DECODE_NUM)
+    processes = start_vllm_mock(PREFILL_NUM, DECODE_NUM)
     if not processes:
         pytest.fail(f"Start vllm fail")
 

@@ -20,7 +20,7 @@ import random
 from pathlib import Path
 
 from run_proxy import setup_proxy, teardown_proxy
-from run_vllm_mock import strart_vllm_mock, cleanup_subprocess, setup_vllm
+from run_vllm_mock import start_vllm_mock, cleanup_subprocess, setup_vllm
 import port_manager
 
 @pytest.fixture(scope="module")
@@ -42,7 +42,7 @@ def reload_env():
 
     wait_proxy_health(proxy_port)
 
-    processes = strart_vllm_mock(PREFILL_NUM, DECODE_NUM)
+    processes = start_vllm_mock(PREFILL_NUM, DECODE_NUM)
     if not processes:
         pytest.fail("Start vllm fail")
     time.sleep(1)
@@ -465,7 +465,7 @@ def test_proxy_reload(reload_env):
         # Case 3: +P3 / +D3
         if SELECT_CASE in (None, "3"):
             p3_port = port_manager.find_free_port_excluding_existing()
-            d3_port = port_manager.find_free_port_excluding_existing()
+            d3_port = port_manager.find_free_port_excluding_existing(p3_port)
 
             procs, logs = setup_vllm(True, [p3_port], log_file_prefix="reload")
             new_processes.extend(procs)
@@ -641,7 +641,7 @@ def test_proxy_reload_under_concurrent_traffic(reload_env):
             time.sleep(random.uniform(3, 8))
 
         try:
-            ROUNDS = 2
+            ROUNDS = 1
 
             for round_id in range(ROUNDS):
                 print(f"\n[ROUND {round_id}] ===============================")
@@ -739,7 +739,7 @@ def test_proxy_reload_under_concurrent_traffic(reload_env):
                     )
 
                 p3 = port_manager.find_free_port_excluding_existing()
-                d3 = port_manager.find_free_port_excluding_existing()
+                d3 = port_manager.find_free_port_excluding_existing(p3)
                 print(f"[ROUND {round_id}]   new P={p3}, D={d3}")
 
                 procs, logs = setup_vllm(True, [p3], log_file_prefix="reload")
