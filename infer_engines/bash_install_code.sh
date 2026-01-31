@@ -57,3 +57,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/openai_harmony_max_tokens_exclude_reas
 git apply --whitespace=nowarn $PATCH_ROOT/fix-stream-no-id-and-type.patch
 git apply --whitespace=nowarn $PATCH_ROOT/api_server_print_uvicorn_kwargs.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_internal_server_error.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_reasoning_max_token_bug.patch
