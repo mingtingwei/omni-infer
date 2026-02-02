@@ -421,8 +421,11 @@ class _RoutedExpertsReader:
         indices = indices.flatten()[start_tokens:num_tokens]
         if not is_prefill and is_stream:
             indices = indices[-num_new_token:]
+        expect_token_num = indices.size
+        if is_prefill or not self.is_pd_disaggregation:
+            expect_token_num = indices.size - request.num_cached_tokens
         while (
-            struct.unpack_from(FMT, self._shm_total_token_num.buf, 0)[0] < indices.size
+            struct.unpack_from(FMT, self._shm_total_token_num.buf, 0)[0] < expect_token_num
         ):
             pass
 
@@ -433,7 +436,7 @@ class _RoutedExpertsReader:
                     FMT,
                     self._shm_total_token_num.buf,
                     0,
-                    struct.unpack_from(FMT, self._shm_total_token_num.buf, 0)[0] - indices.size,
+                    struct.unpack_from(FMT, self._shm_total_token_num.buf, 0)[0] - expect_token_num,
                 )
                 if self._host_buffer_view is None:
                     raise RuntimeError("Buffer not attached.")
