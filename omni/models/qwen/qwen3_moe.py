@@ -441,8 +441,9 @@ class Qwen3MoeModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
             prefix=f"{prefix}.embed_tokens")
-
-        self.kv_stream = torch.npu.Stream()
+        self.kv_stream = None
+        if model_extra_config.operator_opt_config.enable_kv_stream:
+            self.kv_stream = torch.npu.Stream()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Qwen3MoeDecoderLayer(config=config,

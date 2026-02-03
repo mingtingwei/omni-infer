@@ -139,6 +139,8 @@ class ModelOperatorOptConfig:
     skip_mtp_hidden_states: bool = False # mtp是否忽略上次mtp的hidden_state
     enable_limit_topk: bool = False # 是否限制topk的值[1, 1024]
 
+    enable_kv_stream: bool = False # 是否开启Prefill的双流并行
+
     def __post_init__(self):
 
         # Check the dependencies of use_prefetch and prefetch_Mb
