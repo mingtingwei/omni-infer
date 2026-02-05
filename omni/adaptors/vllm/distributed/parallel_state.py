@@ -69,14 +69,22 @@ class GroupCoordinator(GroupCoordinatorGPU):
         self.cpu_group = None
 
         torch_distributed_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-        if group_name != "ep":
+        if group_name != "ep" and torch_distributed_backend != "hccl":
             hccl_buffer_size = os.getenv('HCCL_BASIC_BUFFSIZE', os.getenv('HCCL_BUFFSIZE', 200))
             torch_distributed_options.hccl_config = {"hccl_buffer_size":int(hccl_buffer_size)}
 
         for ranks in group_ranks:
+            if group_name == "ep" and torch_distributed_backend == "hccl":
+                torch_distributed_options.hccl_config = {"group_name":group_name}
+
+            if group_name != "ep" and torch_distributed_backend == "hccl":
+                hccl_buffer_size = os.getenv('HCCL_BASIC_BUFFSIZE', os.getenv('HCCL_BUFFSIZE', 200))
+                torch_distributed_options.hccl_config = {"hccl_buffer_size":int(hccl_buffer_size), "group_name":group_name}
+
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend, pg_options=torch_distributed_options,
                 use_local_synchronization=self.use_local_synchronization)
+
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo", use_local_synchronization=self.use_local_synchronization)
