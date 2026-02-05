@@ -1,0 +1,18 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 9a39c4b0b..ee71cd200 100755
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -655,6 +655,11 @@ class OpenAIServingChat(OpenAIServing):
+                                     key: request.kv_transfer_params[key]
+                                     for key in required_keys
+                                 }
++                        else:
++                            expert_ids = getattr(res, 'routed_experts', None)
++                            if expert_ids is not None:
++                                chunk.routed_experts = {}
++                                self.add_ndarray_info_to_dict(expert_ids, chunk.routed_experts)
+
+                         # if continuous usage stats are requested, add it
+                         if include_continuous_usage:
+
+

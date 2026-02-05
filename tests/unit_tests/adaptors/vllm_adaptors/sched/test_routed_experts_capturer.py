@@ -978,9 +978,10 @@ def test_save_data_without_dir():
     """测试在无保存目录时保存数据"""
     data = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8)
     indices = np.array([0, 1], dtype=np.int64)
+    part_key  = 'total'
     
     # save_dir 为 None 应该直接返回
-    save_data(indices, data, None)
+    save_data(indices, data, None, part_key)
 
 def test_save_data_with_dir(tmp_dir):
     """测试在指定目录保存数据"""
@@ -988,9 +989,10 @@ def test_save_data_with_dir(tmp_dir):
     
     data = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8)
     indices = np.array([0, 1], dtype=np.int64)
+    part_key  = 'total'
     
     # 保存数据
-    save_data(indices, data, tmp_dir_abs)
+    save_data(indices, data, tmp_dir_abs, part_key)
     
     # 验证文件已创建
     files = os.listdir(tmp_dir_abs)
@@ -1002,7 +1004,7 @@ def test_save_data_with_dir(tmp_dir):
     import gzip
     import pickle
     with gzip.open(file_path, "rb") as f:
-        saved_data = pickle.load(f)
+        saved_data = pickle.load(f)[part_key]
     
     # 正确比较 numpy 数组
     assert isinstance(saved_data, dict), f"Expected dict but got {type(saved_data)}"
@@ -1015,9 +1017,10 @@ def test_save_indices_without_dir():
     """测试在无保存目录时保存索引"""
     indices = np.array([0, 1, 2], dtype=np.int64)
     request_id = "test_req"
+    part_key  = 'total'
     
     # save_dir 为 None 应该直接返回
-    save_indices(indices, request_id, None)
+    save_indices(indices, request_id, None, part_key)
 
 def test_save_indices_with_dir(tmp_dir):
     """测试在指定目录保存索引"""
@@ -1025,9 +1028,10 @@ def test_save_indices_with_dir(tmp_dir):
     
     indices = np.array([0, 1, 2], dtype=np.int64)
     request_id = "test_req"
+    part_key  = 'total'
     
     # 保存索引
-    save_indices(indices, request_id, tmp_dir_abs)
+    save_indices(indices, request_id, tmp_dir_abs, part_key)
     
     # 验证文件已创建
     files = os.listdir(tmp_dir_abs)
@@ -1043,4 +1047,4 @@ def test_save_indices_with_dir(tmp_dir):
     
     assert isinstance(saved_data, dict), f"Expected dict but got {type(saved_data)}"
     assert request_id in saved_data
-    assert saved_data[request_id] == indices.tolist()
+    assert saved_data[request_id][part_key] == indices.tolist()
