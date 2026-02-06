@@ -375,7 +375,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
-        is_prefill = attn_metadata is None or not attn_metadata.is_pd_seperate_d
+        is_prefill = os.environ.get("ROLE", "") == "prefill"
         # Self Attention
         if residual is None:
             residual = hidden_states

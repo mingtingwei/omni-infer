@@ -174,8 +174,6 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         self.block_table = block_table
         self.decode_gear_list = model_extra_config.task_config.decode_gear_list
         self.mc2_mask = None
-        if self.decode_gear_list:
-            self.mc2_mask = torch.zeros(self.decode_gear_list[-1], dtype=torch.bool, device=current_platform.device_type)
 
         self.decode_num_tokens = torch.zeros(
             runner.max_num_reqs, dtype=torch.int32, device=runner.device
@@ -193,12 +191,15 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
         self.omni_cache = getattr(self.runner, "omni_cache", None)
 
     def generate_activate_mask(self, actual_seqs_num, batch_size):
-        if len(self.decode_gear_list) > 1:
-            gear = next((g for g in self.decode_gear_list if g >= batch_size), self.decode_gear_list[-1])
-            self.mc2_mask = torch.zeros(gear, dtype=torch.bool, device=current_platform.device_type)
-        else:
-            self.mc2_mask.zero_()
-        self.mc2_mask[:actual_seqs_num].fill_(True)
+        if self.decode_gear_list:
+            if self.mc2_mask is None:
+                self.mc2_mask = torch.zeros(self.decode_gear_list[-1], dtype=torch.bool, device=current_platform.device_type)
+            if len(self.decode_gear_list) > 1:
+                gear = next((g for g in self.decode_gear_list if g >= batch_size), self.decode_gear_list[-1])
+                self.mc2_mask = torch.zeros(gear, dtype=torch.bool, device=current_platform.device_type)
+            else:
+                self.mc2_mask.zero_()
+            self.mc2_mask[:actual_seqs_num].fill_(True)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -448,7 +449,8 @@ class AscendAttentionMetadataBuilder(DummyAttentionMetadataBuilder):
     def build_dummy(self, num_tokens: int, max_pad_size: int = -1) -> AscendMetadata:
         if max_pad_size == -1:
             max_pad_size = self.runner.max_batch_size
-        self.generate_activate_mask(0, max_pad_size)
+        if self.runner.attn_state == AscendAttentionState.DecodeOnly:
+            self.generate_activate_mask(0, max_pad_size)
         slot_mapping = torch.zeros(max_pad_size,
                                    dtype=self.runner.slot_mapping_cpu.dtype,
                                    device=self.runner.device)
