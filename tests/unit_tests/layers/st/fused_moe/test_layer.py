@@ -7,6 +7,11 @@ from unittest.mock import MagicMock, patch
 # Adjust import path based on your project structure
 from ..distributed_test_common import distributed_worker_pool
 
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
 # --- Golden References ---
 
 def moe_golden_constant(

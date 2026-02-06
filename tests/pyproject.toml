@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+markers = [
+    "npu_2cards_4dies: Tests that require 2 NPU cards with 4 dies",
+    "npu",
+]

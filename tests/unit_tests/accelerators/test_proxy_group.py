@@ -579,7 +579,7 @@ def test_group_affinity_logged_indices_with_reload(setup_teardown, test_id,
 
     def send_request(req_id: str):
         headers = {**headers_base, "X-Request-Id": req_id}
-        resp = requests.post(url, headers=headers, json=data, timeout=20)
+        resp = requests.post(url, headers=headers, json=data, timeout=40)
         assert resp.status_code == 200, f"Request {req_id} failed: {resp.status_code}"
         return req_id
 

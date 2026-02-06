@@ -20,6 +20,12 @@ from unittest.mock import MagicMock, patch
 from typing import Optional, Tuple
 
 from ..distributed_test_common import parse_ascend_devices, distributed_worker_pool, _persistent_worker_loop
+
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
 TEST_SEED = 0
 FIRST_DIE, _ = parse_ascend_devices()
 

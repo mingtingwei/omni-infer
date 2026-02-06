@@ -11,22 +11,7 @@ import torch
 TEST_SEED = 0
 
 def parse_ascend_devices():
-    # Get the environment variable, default to empty string if not found
-    env_val = os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '')
-    
-    if not env_val.strip():
-        # Handle case where env var is missing or empty
-        return 0, [0, 1]
-    try:
-        # Split by comma and convert to integers
-        visible_die_list = [int(x.strip()) for x in env_val.split(',') if x.strip()]
-        device_no_list = sorted(list(set(x // 2 for x in visible_die_list)))
-        first_device_no = device_no_list[0]
-    except ValueError as e:
-        print(f"Error parsing ASCEND_RT_VISIBLE_DEVICES: {e}, using default values.")
-        return 0, [0, 1]
-
-    return first_device_no, device_no_list
+    return 0, [0, 1]
 
 def _persistent_worker_loop(device: int, rank: int, world_size: int, temp_file_path: str, 
                             task_queue: mp.Queue, result_queue: mp.Queue, master_port: int):

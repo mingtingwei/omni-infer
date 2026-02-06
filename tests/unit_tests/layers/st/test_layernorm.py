@@ -15,6 +15,12 @@ from omni.models.config_loader.loader import model_extra_config
 
 from .distributed_test_common import parse_ascend_devices, distributed_worker_pool, _persistent_worker_loop
 
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
+
 FIRST_DIE, _ = parse_ascend_devices()
 TEST_SEED = 0
 @pytest.fixture

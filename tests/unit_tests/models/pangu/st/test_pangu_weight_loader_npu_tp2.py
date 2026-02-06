@@ -7,6 +7,11 @@ import pytest
 import torch
 from torch.nn import Parameter
 
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
 torch_npu = pytest.importorskip("torch_npu")
 
 

@@ -8,6 +8,11 @@ from omni.layers.vocab_parallel_embedding import (
 )
 from .distributed_test_common import distributed_worker_pool
 
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
 def _logic_masking_helper(device, rank, world_size):
     """
     Tests the standalone helper function get_masked_input_and_mask.

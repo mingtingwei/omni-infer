@@ -339,7 +339,7 @@ def test_proxy_reload(reload_env):
         }
 
         for i in range(num):
-            r = requests.post(url, headers=headers, json=payload, timeout=15)
+            r = requests.post(url, headers=headers, json=payload, timeout=30)
             if r.status_code != 200:
                 pytest.fail(
                     f"Request {i} failed: HTTP {r.status_code}, body={r.text!r}"

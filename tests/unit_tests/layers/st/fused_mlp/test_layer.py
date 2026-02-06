@@ -9,6 +9,11 @@ from omni.layers.fused_mlp.layer import FusedMLP, W8A8DynamicFusedMLPMethod
 from omni.models.config_loader.loader import model_extra_config
 from ..distributed_test_common import distributed_worker_pool
 
+pytestmark = [
+    pytest.mark.npu_2cards_4dies,
+    pytest.mark.npu,
+]
+
 
 def mlp_golden(x: torch.Tensor, 
                gate_up_weight: torch.Tensor, 
