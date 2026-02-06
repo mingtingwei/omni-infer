@@ -25,6 +25,8 @@ class _DummyTorchNPUAttr:
         def __init__(self, *args, **kwargs):
             self._args = args
             self._kwargs = kwargs
+        def wait_stream(self, _s):
+            return None
 
     def default_stream(self):
         return _DummyDefaultStream()
