@@ -89,8 +89,11 @@ class TestPanguProMoEV2LoadWeights(unittest.TestCase):
         value_scale.weight_loader = Mock()
         kv_scale = Parameter(torch.empty(1))
         kv_scale.weight_loader = Mock()
-        sink_key = Parameter(torch.empty(1))
-        sink_value = Parameter(torch.empty(1))
+        # param_sink_key and param_sink_value need to have at least 2 dimensions
+        # to match the expected shape when accessing shape[-2]
+        # Don't set weight_loader here - it will be set by set_weight_attrs when is_2_dims is set
+        sink_key = Parameter(torch.randn(2, 2))
+        sink_value = Parameter(torch.randn(2, 2))
 
         params = {
             "model.layers.0.self_attn.attn.key_antiquant_scale": key_scale,
@@ -115,8 +118,13 @@ class TestPanguProMoEV2LoadWeights(unittest.TestCase):
         def _set_weight_attrs(param, attrs):
             for key, val in attrs.items():
                 setattr(param, key, val)
+            # If is_2_dims is set and param doesn't have weight_loader, set it to sharded_weight_loader
+            if "is_2_dims" in attrs and not hasattr(param, "weight_loader"):
+                param.weight_loader = sharded_loader
 
         with patch.object(self.M, "get_tp_group", return_value=_DummyGroup(), create=True), \
+             patch.object(self.M, "get_tensor_model_parallel_rank", return_value=0, create=True), \
+             patch.object(self.M, "get_tensor_model_parallel_world_size", return_value=1, create=True), \
              patch.object(self.M, "FusedMoE", _FusedMoEStub, create=True), \
              patch.object(self.M, "default_weight_loader", Mock(), create=True), \
              patch.object(self.M, "sharded_weight_loader", side_effect=_sharded_weight_loader, create=True), \
@@ -147,6 +155,7 @@ class TestPanguProMoEV2LoadWeights(unittest.TestCase):
     def test_moe_block_forward_selects_prefill_and_decode_paths(self):
         block = self.M.PanguProMoEV2MoEBlock.__new__(self.M.PanguProMoEV2MoEBlock)
         block.is_init_gate = True
+        block.is_A2 = False
         block._forward_prefill_norm = Mock(return_value="prefill")
         block._forward_decode_norm = Mock(return_value="decode")
 

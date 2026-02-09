@@ -19,6 +19,7 @@ def test_pangu_moe_paths_on_npu(npu_device):
 
     block = pangu_mod.PanguProMoEV2MoEBlock.__new__(pangu_mod.PanguProMoEV2MoEBlock)
     block.is_init_gate = False
+    block.is_A2 = False
     block.gate = SimpleNamespace(
         weight=torch.nn.Parameter(
             torch.randn((1, 1), device=npu_device, dtype=torch.float16)

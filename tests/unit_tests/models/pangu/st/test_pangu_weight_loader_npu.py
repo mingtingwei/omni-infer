@@ -32,6 +32,8 @@ def _fake_weight_loader(param, weight, *_args, **_kwargs):
 
 def test_load_weights_on_npu(npu_device, monkeypatch):
     monkeypatch.setattr(pangu_mod, "get_tp_group", lambda: _DummyGroup())
+    monkeypatch.setattr(pangu_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(pangu_mod, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pangu_mod, "FusedMoE", _FusedMoEStub)
     monkeypatch.setattr(pangu_mod, "default_weight_loader", _fake_weight_loader)
     monkeypatch.setattr(pangu_mod, "sharded_weight_loader", lambda dim: _fake_weight_loader)
