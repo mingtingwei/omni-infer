@@ -140,6 +140,7 @@ class ModelOperatorOptConfig:
     enable_limit_topk: bool = False # 是否限制topk的值[1, 1024]
 
     enable_kv_stream: bool = False # 是否开启Prefill的双流并行
+    flashcomm1_threshold : int = -1 # 开启flashcomm1的阈值设置,大于的开启
 
     def __post_init__(self):
 

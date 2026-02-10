@@ -69,7 +69,7 @@ from omni.layers.attention.layer import attention_init_c8
 
 from omni.layers.utils import ConditionalTNGScope
 from omni.models.config_loader.loader import model_extra_config
-from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.utils import get_attr_by_names, NPU_W8A8_DYNAMIC
 from omni.adaptors.vllm.compilation.compile_config import NPUCompilationConfig
 from omni.layers.attention.layer import attention_init_c8
 
@@ -107,7 +107,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
-    def forward(self, hidden_states: torch.Tensor, is_prefill: bool = False) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, is_prefill: bool = False, flashcomm1: bool = True) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
@@ -116,12 +116,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits,
-                                           is_prefill=is_prefill)
+                                           is_prefill=is_prefill,
+                                           flashcomm1=flashcomm1)
         final_hidden_states = final_hidden_states
 
-        if is_prefill or \
+        if flashcomm1 and (is_prefill or \
             model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            model_extra_config.operator_opt_config.decode_flash_comm_1):
             return final_hidden_states.view(orig_shape)
         return final_hidden_states
 
@@ -238,12 +239,13 @@ class Qwen3MoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        attn_metadata: AttentionMetadata
+        attn_metadata: AttentionMetadata,
+        flashcomm1: Optional[bool] = True,
     ) -> torch.Tensor:
         is_prefill = os.environ.get("ROLE", "") == "prefill"
-        if is_prefill or \
+        if flashcomm1 and (is_prefill or \
             model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            model_extra_config.operator_opt_config.decode_flash_comm_1):
             qkv, _ = self.qkv_proj(hidden_states, x_transform='AG', is_prefill = is_prefill)
         else:
             qkv, _ = self.qkv_proj(hidden_states, is_prefill = is_prefill)
@@ -304,9 +306,9 @@ class Qwen3MoeAttention(nn.Module):
             ).transpose(0, 1).contiguous().view(local_s, -1)
             output,_ = self.o_proj.forward(attn_output)
         else:
-            if is_prefill or \
+            if flashcomm1 and (is_prefill or \
                 model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-                model_extra_config.operator_opt_config.decode_flash_comm_1:
+                model_extra_config.operator_opt_config.decode_flash_comm_1):
                 output, _ = self.o_proj(attn_output, reduce_type="RS")
             else:
                 output, _ = self.o_proj(attn_output, reduce_type="AR")
@@ -371,7 +373,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: Optional[AttentionMetadata]
+        attn_metadata: Optional[AttentionMetadata],
+        flashcomm1: Optional[bool] = True,
     ) -> torch.Tensor:
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[self.layer_name]
@@ -392,7 +395,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata
+            attn_metadata=attn_metadata,
+            flashcomm1=flashcomm1
         )
 
         # Fully Connected
@@ -411,11 +415,11 @@ class Qwen3MoeDecoderLayer(nn.Module):
             hidden_states_list = hidden_states.split(SEQ_SPLIT_LENGTH)
             hidden_states_out = []
             for i in range(len(hidden_states_list)):
-                hidden_states = self.mlp(hidden_states_list[i], is_prefill=is_prefill)
+                hidden_states = self.mlp(hidden_states_list[i], is_prefill=is_prefill, flashcomm1 = flashcomm1)
                 hidden_states_out.append(hidden_states)
             hidden_states = torch.cat(hidden_states_out)[:local_length]
         else:
-            hidden_states = self.mlp(hidden_states, is_prefill=is_prefill)
+            hidden_states = self.mlp(hidden_states, is_prefill=is_prefill, flashcomm1 = flashcomm1)
         return hidden_states, residual
 
 
@@ -499,9 +503,21 @@ class Qwen3MoeModel(nn.Module):
 
         aux_hidden_states = []
         is_prefill = os.environ.get("ROLE", "") == "prefill"
-        if is_prefill or \
+
+        flashcomm1_threshold = model_extra_config.operator_opt_config.flashcomm1_threshold
+        flashcomm1 = 1
+
+        # prefill + quant + ag_rs + dp 1 + flashcomm1_threshold
+        if is_prefill and \
+            self.quant_config is not None and self.quant_config.get_name() == NPU_W8A8_DYNAMIC and \
+            os.environ.get('MOE_DISPATCH_COMBINE', '0') == '0' and \
+            get_dp_group().world_size == 1 and \
+            hidden_states.shape[0] <= flashcomm1_threshold:
+            flashcomm1 = 0
+
+        if flashcomm1 and (is_prefill or \
             model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            model_extra_config.operator_opt_config.decode_flash_comm_1):
             # 采用FlashComm1.0, 通过slice使用hidden_states转为DP
             hidden_states = self.get_tp_slice(hidden_states)
         for i in range(self.start_layer, self.end_layer):
@@ -512,17 +528,18 @@ class Qwen3MoeModel(nn.Module):
                                             hidden_states,
                                             residual,
                                             kv_caches[i] if kv_caches is not None else None,
-                                            attn_metadata
+                                            attn_metadata,
+                                            flashcomm1
                                             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
+            return IntermediateTensorss({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        if is_prefill or \
+        if flashcomm1 and (is_prefill or \
             model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-            model_extra_config.operator_opt_config.decode_flash_comm_1:
+            model_extra_config.operator_opt_config.decode_flash_comm_1):
             hidden_states, _ = self.norm(hidden_states, residual, y_transform='AG')
         else:
             hidden_states, _ = self.norm(hidden_states, residual)

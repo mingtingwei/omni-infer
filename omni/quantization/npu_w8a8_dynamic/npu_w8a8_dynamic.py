@@ -328,6 +328,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input: bool = False,
             activation: str = 'silu',
             is_prefill: bool = False,
+            flashcomm1: bool = True
     ) -> torch.Tensor:
         moe_dispatch_combine = os.environ.get('MOE_DISPATCH_COMBINE', '0') == '1'
         self.ones_scale = torch.ones((len(layer.w13_weight), layer.intermediate_size_per_partition), dtype=torch.float32, device='npu')
@@ -386,7 +387,8 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias,
                 apply_router_weight_on_input,
                 activation,
-                is_prefill
+                is_prefill,
+                flashcomm1
             )
 
     def apply_all2all(
@@ -675,6 +677,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = 'silu',
         is_prefill: bool = False,
+        flashcomm1: bool = True
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -718,7 +721,7 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
                                     for n in n_tokens_list]
             get_ep_group().all_gather_v(topk_ids_output_list, topk_ids)
             topk_ids = torch.cat(topk_ids_output_list)
-        else:
+        elif flashcomm1:
             x_int8 = get_ep_group().all_gather(x_int8, dim=0)
             x_scale = get_ep_group().all_gather(x_scale, dim=0)
             topk_weights = get_ep_group().all_gather(topk_weights, dim=0)
@@ -792,7 +795,12 @@ class NpuW8A8DynamicFusedMoEMethod(FusedMoEMethodBase):
             get_ep_group().reduce_scatter_v(y_output, y_list)
             y = y_output
         else:
-            y = get_ep_group().reduce_scatter(y)
+            if flashcomm1 and (is_prefill or \
+            model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
+            model_extra_config.operator_opt_config.decode_flash_comm_1):
+                y = get_ep_group().reduce_scatter(y)
+            else:
+                y = get_ep_group().all_reduce(y)
 
         return y
 

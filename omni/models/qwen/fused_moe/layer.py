@@ -698,6 +698,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = 'silu',
         is_prefill: bool = False,
+        flashcomm1: bool = True
     ) -> torch.Tensor:
         if is_prefill:
             if model_extra_config.operator_opt_config.prefill_moe_all_to_all:
@@ -1339,7 +1340,8 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
-                is_prefill: bool = False):
+                is_prefill: bool = False,
+                flashcomm1: bool = True):
 
         assert self.quant_method is not None
 
@@ -1347,9 +1349,9 @@ class FusedMoE(torch.nn.Module):
         if isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata[next(iter(attn_metadata))]
         if attn_metadata is not None and attn_metadata.mc2_mask is not None:
-            if self.is_prefill or \
+            if flashcomm1 and (self.is_prefill or \
                 model_extra_config.operator_opt_config.decode_moe_dispatch_combine or \
-                model_extra_config.operator_opt_config.decode_flash_comm_1:
+                model_extra_config.operator_opt_config.decode_flash_comm_1):
                 mc2_mask_slice_size = hidden_states.shape[0]
                 mc2_mask_slice_id = get_tp_group().rank_in_group
                 self.mc2_mask = attn_metadata.mc2_mask[mc2_mask_slice_id * mc2_mask_slice_size : (mc2_mask_slice_id + 1) * mc2_mask_slice_size]
@@ -1372,7 +1374,8 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            is_prefill=is_prefill
+            is_prefill=is_prefill,
+            flashcomm1=flashcomm1
         )
 
         return final_hidden_states

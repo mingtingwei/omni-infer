@@ -6,6 +6,7 @@ from typing import Iterable, List, Optional, Tuple, Set
 import os
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from transformers import PretrainedConfig
 
@@ -27,6 +28,8 @@ from vllm.distributed.parallel_state import (
 
 from .qwen3_moe import Qwen3MoeDecoderLayer
 
+from omni.models.config_loader.loader import model_extra_config
+from omni.adaptors.vllm.utils import get_attr_by_names, NPU_W8A8_DYNAMIC
 from omni.layers.layernorm import RMSNorm  # zxp: not use
 from omni.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from omni.layers.moe.fused_moe.layer import FusedMoE
@@ -132,13 +135,27 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
         selected_indices: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        tok_embeds = self.enorm(self.get_input_embeddings(input_ids))
+
+        is_prefill = os.environ.get("ROLE", "") == "prefill"
+        flashcomm1_threshold = model_extra_config.operator_opt_config.flashcomm1_threshold
+        flashcomm1 = 1
+
+        # prefill + quant + ag_rs + dp 1 + flashcomm1_threshold
+        if is_prefill and \
+            self.quant_config is not None and self.quant_config.get_name() == NPU_W8A8_DYNAMIC and \
+            os.environ.get('MOE_DISPATCH_COMBINE', '0') == '0' and \
+            get_dp_group().world_size == 1 and \
+            previous_hidden_states.shape[0] <= flashcomm1_threshold:
+            flashcomm1 = 0
+
+        
+        tok_embeds = self.enorm(self.get_input_embeddings(input_ids, flashcomm1))
         if len(tok_embeds.shape) > 2:
             tok_embeds = tok_embeds.view(-1, self.config.hidden_size)
 
         tp_size = get_tensor_model_parallel_world_size()
         rank_in_group = get_tensor_model_parallel_rank()
-        if tp_size > 1:
+        if tp_size > 1 and flashcomm1:
             token_num = previous_hidden_states.shape[0]
             start_range = rank_in_group * (token_num // tp_size)
             end_range = (rank_in_group + 1) * (token_num // tp_size)
@@ -146,10 +163,15 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
 
         previous = self.hnorm(previous_hidden_states)
         cat_hidden_states = torch.cat([tok_embeds, previous], dim=-1)
-        if self.eh_tp_size > 1:
+
+        if self.eh_tp_size > 1 and flashcomm1:
             cat_hidden_states = get_eh_proj_tp_group().all_gather(cat_hidden_states, dim=0)
         hidden_states,_= self.eh_proj.forward(cat_hidden_states)
-        if self.eh_tp_size > 1:
+
+        if not flashcomm1:
+            hidden_states = get_eh_proj_tp_group().all_gather(hidden_states)
+
+        if self.eh_tp_size > 1 and flashcomm1:
             hidden_states = get_eh_proj_tp_group().all_to_all(hidden_states)
 
         encoded_states, residual = Qwen3MoeDecoderLayer.forward(
@@ -158,11 +180,14 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
             kv_cache=kv_caches[self.layer_idx] if kv_caches is not None else None,
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
-            residual=None
+            residual=None,
+            flashcomm1=flashcomm1
         )
 
         hidden_states, _ = self.shared_head.norm(encoded_states, residual)
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+
+        if flashcomm1:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         if attn_metadata is None:
             logits = self.compute_lmhead(hidden_states[-1:, ...], None)
@@ -171,8 +196,10 @@ class Qwen3MultiTokenPredictorLayer(Qwen3MoeDecoderLayer):
 
         return logits, hidden_states
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids, reduce=1)
+    def get_input_embeddings(self, input_ids: torch.Tensor, flashcomm1: bool = True) -> torch.Tensor:
+        if flashcomm1:
+            return self.embed_tokens(input_ids, reduce=1)
+        return self.embed_tokens(input_ids, reduce=0)
 
     def compute_lmhead(
         self,
