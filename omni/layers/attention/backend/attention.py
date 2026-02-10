@@ -1001,8 +1001,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value_quant_mode=0,
                 block_table=attn_metadata.block_tables,
                 block_size=block_size,
-                sparse_mode=sparse_mode,
-                atten_mask=atten_mask,
                 actual_seq_kvlen=attn_metadata.seq_lens,
                 inner_precise=1
             )[0]
