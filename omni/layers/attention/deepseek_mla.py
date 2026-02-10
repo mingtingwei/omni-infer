@@ -56,10 +56,6 @@ from omni.adaptors.vllm.distributed.parallel_state import (
 from omni.models.config_loader.loader import model_extra_config
 from omni.layers.utils import ConditionalTNGScope
 
-try:
-    import custom_ops
-except:
-    pass
 from vllm.logger import logger
 
 KVCACHE_NZ_DIM = 16
@@ -179,7 +175,7 @@ class Indexer(nn.Module):
         }
 
         if model_extra_config.operator_opt_config.enable_indexer_quant:
-            li_fusion = torch.ops.custom.npu_lightning_indexer_quant
+            li_fusion = torch_npu.npu_quant_lightning_indexer
             li_fusion_input_kwargs.update({
                 "key_dequant_scale": kv_cache[3].view(-1, 128, kv_cache[3].shape[-1]),
                 "key_quant_mode": 0,
@@ -188,8 +184,10 @@ class Indexer(nn.Module):
                 "weights": weights.type(torch.float16),
             })
         else:
-            li_fusion = torch.ops.custom.npu_lightning_indexer
+            li_fusion = torch_npu.npu_lightning_indexer
         topk_indices = li_fusion(**li_fusion_input_kwargs)
+        if isinstance(topk_indices, tuple):
+            topk_indices = topk_indices[0]
         return topk_indices
 
     def forward(self, 
@@ -607,22 +605,28 @@ class DeepseekMLA(nn.Module):
                 else:
                     actual_seq_kvlen = computed_seq_len + (actual_seq_kvlen - computed_seq_len) * (sp_rank + 1)
 
-            attn_output = torch.ops.custom.npu_sparse_flash_attention(
+            attn_output = torch_npu.npu_sparse_flash_attention(
                 query=q_nope,
                 key=k_nope,
                 value=k_nope,
                 sparse_indices=topk_indices,
                 scale_value=self.scale,
-                sparse_block_size=1,
                 block_table=prefill_metadata.block_table,
                 actual_seq_lengths_query=actual_seq_qlen.to(torch.int32),# todo 等接口支持后切换成tensor
                 actual_seq_lengths_kv=actual_seq_kvlen.to(torch.int32),
                 query_rope=q_rope,
                 key_rope=k_rope,
+                sparse_block_size=1,
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
+                pre_tokens=(1<<63)-1,
+                next_tokens=(1<<63)-1,
+                attention_mode=2,
+                return_softmax_lse=False,
             )
+            if isinstance(attn_output, tuple):
+                attn_output = attn_output[0]
         else:
             is_attn_output_reshape = model_extra_config.operator_opt_config.prefill_enable_mla_alltoall
             o_proj_tp_size = get_o_proj_dp_group().world_size \
@@ -1095,7 +1099,7 @@ class DeepseekMLA(nn.Module):
             if model_extra_config.parall_config.attn_sp_size > 1:
                 dq_wight = self.q_a_proj_weight_copy
                 dkv_kr_weight = self.kv_a_proj_with_mqa_weight_copy
-            q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch.ops.custom.npu_mla_prolog_v3(
+            q_nope, q_pe, dequant_scale_q_nope, q_norm, dequant_scale_q_norm = torch_npu.npu_mla_prolog_v3(
                 token_x=hidden_states_mla_prolog.view(bsz, 1, -1),
                 weight_dq=dq_wight,
                 weight_uq_qr=self.q_b_proj.weight,
@@ -1309,22 +1313,28 @@ class DeepseekMLA(nn.Module):
                 kv_actual_seqlen_dsa = attn_metadata.decode.seq_lens.to(torch.int32)
                 key_rope_dsa = k_rope
 
-            attn_output = torch.ops.custom.npu_sparse_flash_attention(
+            attn_output = torch_npu.npu_sparse_flash_attention(
                 query=q_nope,
                 key=kv_dsa,
                 value=kv_dsa,
                 sparse_indices=topk_indices_dsa,
                 scale_value=self.scale,
-                sparse_block_size=1,
                 block_table=block_table_dsa,
                 actual_seq_lengths_query=self.actual_seq_lengths[bsz].to(torch.int32),
                 actual_seq_lengths_kv=kv_actual_seqlen_dsa,
                 query_rope=q_pe,
                 key_rope=key_rope_dsa,
+                sparse_block_size=1,
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
+                pre_tokens=(1<<63)-1,
+                next_tokens=(1<<63)-1,
+                attention_mode=2,
+                return_softmax_lse=False,
             )
+            if isinstance(attn_output, tuple):
+                attn_output = attn_output[0]
         else:
             if model_extra_config.operator_opt_config.use_omni_cache:
                 num_tokens = attn_metadata.decode.seq_lens.size(0)
