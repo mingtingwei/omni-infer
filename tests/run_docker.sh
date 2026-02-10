@@ -35,6 +35,8 @@ for CONTAINER_NAME in "${!CONTAINERS[@]}"; do
   docker run -it -d --shm-size=500g \
     -e PYTHONHASHSEED=123 \
     -e ASCEND_RT_VISIBLE_DEVICES="${ASCEND_DEVICES}" \
+    -e http_proxy \
+    -e https_proxy \
     --privileged=true \
     -u root \
     -w /home \

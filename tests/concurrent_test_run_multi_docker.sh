@@ -30,6 +30,7 @@ DT1_TESTS=(
   "$PROXY_DIR/test_api_server.py"
   "$PROXY_DIR/test_chunked_prefill_scheduler.py"
   "$PROXY_DIR/test_proxy.py"
+  "$UNIT_TESTS/api"
 ) # DT_1
 
 ALL_SELECT_PROXY_TESTS=(
@@ -46,15 +47,15 @@ for t in "${ALL_SELECT_PROXY_TESTS[@]}"; do
 done
 
 # DT_6-7 配置
-COMMON_SPLITTED_ARGS="$UNIT_TESTS --ignore $PROXY_DIR -m \"not(npu_2cards_4dies)\" --splits 2 --splitting-algorithm least_duration --durations-path $DURATIONS"
+COMMON_SPLITTED_ARGS="$UNIT_TESTS --ignore $PROXY_DIR --ignore $UNIT_TESTS/api -m \"not(npu_2cards_4dies)\" --splits 2 --splitting-algorithm least_duration --durations-path $DURATIONS"
 
 # ==============================
 # 📦 容器测试参数
 # ==============================
 declare -A CONTAINER_TEST_ARGS=(
   [DT_1]="$DT1_RUN_LIST"
-  [DT_2]="${ALL_SELECT_PROXY_TESTS[3]}"
-  [DT_3]="${ALL_SELECT_PROXY_TESTS[4]}"
+  [DT_2]="${ALL_SELECT_PROXY_TESTS[4]}"
+  [DT_3]="${ALL_SELECT_PROXY_TESTS[5]}"
   [DT_4]="$PROXY_DIR$IGNORE_ALL_ACCEL"
   [DT_5]='-m "npu_2cards_4dies"'
   [DT_6]="$COMMON_SPLITTED_ARGS --group 1"
@@ -79,12 +80,11 @@ for CONTAINER_NAME in "${!CONTAINER_TEST_ARGS[@]}"; do
     rm -rf ${CONTAINER_OMNI_ROOT}/.??* || true
     cp -r ${OMNI_ROOT}/* ${CONTAINER_OMNI_ROOT}/
     cp -r ${OMNI_ROOT}/.git ${CONTAINER_OMNI_ROOT}/
+    yum install -y libuuid-devel
 
-    export http_proxy=\"http://p_atlas:proxy%40123@172.18.100.92:8080\"
-    export https_proxy=\"http://p_atlas:proxy%40123@172.18.100.92:8080\"
     export PYTHONPATH=/workspace/omniinfer/infer_engines/vllm:/workspace/omniinfer:\$PYTHONPATH
 
-    bash /workspace/omniinfer/tests/run_tests.sh --skip-cov-collect --source-bashrc ${TEST_ARGS_STR}
+    bash /workspace/omniinfer/tests/run_tests.sh --skip-cov-collect ${TEST_ARGS_STR}
   " > "${LOG_DIR}/${CONTAINER_NAME}.log" 2>&1 &
 
   pids+=($!)
