@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -8,6 +9,11 @@ mkdir -p "${LOG_DIR}"
 OMNI_ROOT="${1:?Usage: $0 <omniinfer_root_dir>}"
 CONTAINER_OMNI_ROOT="/workspace/omniinfer"
 CONFIG_PATH="${2:-}"
+
+
+HOST_DURATIONS_DIR="${OMNI_ROOT}/tests/test_durations_from_dockers"
+CONTAINER_DURATIONS_DIR="${CONTAINER_OMNI_ROOT}/tests/test_durations_from_dockers"
+mkdir -p "${HOST_DURATIONS_DIR}"
 
 pids=()
 
@@ -82,9 +88,10 @@ for CONTAINER_NAME in "${!CONTAINER_TEST_ARGS[@]}"; do
     cp -r ${OMNI_ROOT}/.git ${CONTAINER_OMNI_ROOT}/
     yum install -y libuuid-devel
 
+    mkdir -p ${CONTAINER_DURATIONS_DIR}
     export PYTHONPATH=/workspace/omniinfer/infer_engines/vllm:/workspace/omniinfer:\$PYTHONPATH
 
-    bash /workspace/omniinfer/tests/run_tests.sh --skip-cov-collect ${TEST_ARGS_STR}
+    bash /workspace/omniinfer/tests/run_tests.sh --skip-cov-collect --durations-out "${CONTAINER_DURATIONS_DIR}/test_durations_${CONTAINER_NAME}.json" ${TEST_ARGS_STR}
   " > "${LOG_DIR}/${CONTAINER_NAME}.log" 2>&1 &
 
   pids+=($!)
@@ -101,6 +108,39 @@ for pid in "${pids[@]}"; do
     fail=1
   fi
 done
+
+# ==============================
+# Collect per-container durations and merge
+# ==============================
+echo "[INFO] Collecting per-container test durations..."
+for c in "${!CONTAINER_TEST_ARGS[@]}"; do
+  src="${CONTAINER_DURATIONS_DIR}/test_durations_${c}.json"
+  dst="${HOST_DURATIONS_DIR}/test_durations_${c}.json"
+  if docker exec "${c}" /bin/bash -c "test -f ${src}"; then
+    echo "[INFO] docker cp ${c}:${src} -> ${dst}"
+    docker cp "${c}:${src}" "${dst}"
+  else
+    echo "[WARN] durations json not found in ${c}: ${src}"
+  fi
+done
+
+MERGED_JSON="${HOST_DURATIONS_DIR}/merged_test_durations.json"
+MERGE_SCRIPT="${OMNI_ROOT}/tests/ut_CI_check/ut_CI_merge_test_durations_json.py"
+if [[ -f "${MERGE_SCRIPT}" ]]; then
+  args=("--out" "${MERGED_JSON}")
+  for f in "${HOST_DURATIONS_DIR}"/test_durations_*.json; do
+    if [[ -f "${f}" ]]; then
+      args+=("--container-json" "${f}")
+    fi
+  done
+  if [[ ${#args[@]} -gt 2 ]]; then
+    python3 "${MERGE_SCRIPT}" "${args[@]}"
+  else
+    echo "[WARN] No durations json files to merge in ${HOST_DURATIONS_DIR}"
+  fi
+else
+  echo "[WARN] merge script not found: ${MERGE_SCRIPT}"
+fi
 
 bash "${OMNI_ROOT}/tests/multi_docker_collect_coverage.sh" \
   "${OMNI_ROOT}/tests/reports" \

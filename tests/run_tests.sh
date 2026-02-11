@@ -26,6 +26,9 @@ source_bashrc=false
 # 透传给 pytest 的参数
 pytest_args=()
 
+durations_out=""
+
+
 # ==============================
 # 🔍 参数解析
 # ==============================
@@ -47,6 +50,9 @@ while [[ $# -gt 0 ]]; do
     --source-bashrc)
       source_bashrc=true
       shift ;;      
+
+    --durations-out)
+      durations_out="$2"; shift 2 ;;
 
     # 其他全部透传给 pytest
     *)
@@ -136,6 +142,9 @@ fi
 
 cmd=(pytest --tb=long -v)
 
+if [[ -n "${durations_out}" ]]; then
+  cmd+=( -p ut_CI_check.ut_CI_durations_plugin --durations-out "${durations_out}" )
+fi
 if [[ "${#target_path[@]}" -gt 0 ]]; then
   cmd+=("${target_path[@]}")
 fi

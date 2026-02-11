@@ -168,10 +168,16 @@ proxy_report/
 注意：用例更新后，请重新生成耗时文件。
 
 ### 5.1 生成各用例耗时文件
+单容器串行，生成用例耗时文件方法：
 ```bash
 cd /path/to/omniinfer/tests
 bash generate_test_durations_json.sh
 ```
+另外，多容器并发测试默认基于`tests/test_durations_unit.json`进行用例切片。测试完成后，系统会汇总各容器实际执行耗时，生成完整用例耗时数据，保存于`tests/test_durations_from_dockers/merged_test_durations.json`，并执行用例负载均衡性校验。
+
+当校验结果显示负载不均衡时，说明当前`test_durations_unit.json`已与实际执行情况存在偏差。此时建议使用
+`tests/test_durations_from_dockers/merged_test_durations.json`
+更新原有时间基准文件，以维持切片执行的时间均衡性。
 
 
 ### 5.2 多容器并发使用说明
@@ -181,6 +187,7 @@ bash generate_test_durations_json.sh
 cd /path/to/omniinfer/tests
 bash run_docker.sh <image_name> # 启动容器
 bash concurrent_test_run_multi_docker.sh /path/to/omniinfer # 并行运行并合并覆盖率
+bash rm_docker.sh # 删除容器
 ```
 
 容器与用例分配详情
@@ -197,7 +204,7 @@ bash concurrent_test_run_multi_docker.sh /path/to/omniinfer # 并行运行并合
 
 各容器测试日志保存于`/path/to/omniinfer/tests/install_logs`，汇总覆盖率报告保存于`/path/to/omniinfer/tests/report/coverage`。
 
-如需修改各容器用例分配情况，请修改`run_docker.sh`、`concurrent_test_run_multi_docker.sh`及`multi_docker_collect_coverage.sh`中的相关配置。
+如需修改各容器用例分配情况，请修改`run_docker.sh`、`concurrent_test_run_multi_docker.sh`、`multi_docker_collect_coverage.sh`及`rm_docker.sh`中的相关配置。
 
 
 ## 6. 使用示例
@@ -213,7 +220,9 @@ bash run_tests.sh --unit
 bash run_tests.sh --integrated -n 2
 
 # 使用多容器并发测试
-bash run_docker.sh <image_name> && bash concurrent_test_run_multi_docker.sh /path/to/omniinfer
+bash run_docker.sh <image_name> && \
+bash concurrent_test_run_multi_docker.sh /path/to/omniinfer && \
+bash rm_docker.sh
 
 ```
 

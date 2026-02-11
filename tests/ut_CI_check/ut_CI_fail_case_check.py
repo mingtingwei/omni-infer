@@ -377,7 +377,7 @@ if __name__ == "__main__":
     merged = aggregate_results(results)
 
     print("sessions:", merged.sessions)
-    for k in ["passed", "failed", "errors", "skipped", "warnings", "xfailed", "xpassed", "deselected", "rerun"]:
+    for k in ["passed", "failed", "errors", "skipped", "warnings", "xfailed", "xpassed", "rerun"]:
         if k in merged.counts:
             print(f"{k}: {merged.counts.get(k, 0)}")
     print("failed_tests:", len(merged.failed_tests))
