@@ -152,6 +152,13 @@ class APIProcessor:
     def __init__(self):
         self.handler = UnifiedAPIHandler()
 
+    def _get_routed_experts_from_chunk(self, chunk):
+        if "choices" in chunk and chunk["choices"]:
+            choice = chunk["choices"][0]
+            if "routed_experts" in choice:
+                return choice["routed_experts"]
+        return None
+
     def _process_stream_response(self, response_generator):
         stream_arrays = []
         request_id = None
@@ -160,12 +167,12 @@ class APIProcessor:
             if chunk.get("data") == "[DONE]":
                 break
             all_chunks.append(chunk)
-            if "routed_experts" in chunk:
-                routed_experts = chunk["routed_experts"]
+            routed_experts_data = self._get_routed_experts_from_chunk(chunk)
+            if routed_experts_data:
                 routed_experts = self._decode_numpy_array(
-                    routed_experts["routed_experts_str"],
-                    routed_experts["routed_experts_shape"],
-                    routed_experts["routed_experts_dtype"]
+                    routed_experts_data["routed_experts_str"],
+                    routed_experts_data["routed_experts_shape"],
+                    routed_experts_data["routed_experts_dtype"]
                 )
                 stream_arrays.append(routed_experts)
             if not request_id and "request_id" in chunk:
@@ -176,7 +183,8 @@ class APIProcessor:
         return concatenated_array, all_chunks
 
     def _process_normal_response(self, response):
-        routed_experts = response.get("routed_experts", {})
+        routed_experts = self._get_routed_experts_from_chunk(response)
+        routed_experts = routed_experts if routed_experts else {}
         arr = self._decode_numpy_array(
             routed_experts.get("routed_experts_str"),
             routed_experts.get("routed_experts_shape"),
@@ -186,10 +194,14 @@ class APIProcessor:
 
     @staticmethod
     def _decode_numpy_array(encoded_str, shape, dtype):
-        decoded_bytes = base64.b64decode(encoded_str)
-        decompressed_bytes = zlib.decompress(decoded_bytes)
-        arr = np.frombuffer(decompressed_bytes, dtype=dtype)
-        return arr.reshape(shape).tolist()
+        if encoded_str:
+            decoded_bytes = base64.b64decode(encoded_str)
+            decompressed_bytes = zlib.decompress(decoded_bytes)
+            arr = np.frombuffer(decompressed_bytes, dtype=dtype)
+            return arr.reshape(shape).tolist()
+        else:
+            print("请求内容中没有routed_experts")
+            return None
 
     @staticmethod
     def _save_3d_array_to_txt(array, filename):
@@ -261,7 +273,10 @@ class APIProcessor:
             return result["saved_file"]
         else:
             error_msg = result.get("error", "未知错误")
-            raise ValueError(f"请求失败或保存失败: {error_msg}")
+            if error_msg is not None:
+                raise ValueError(f"请求失败或保存失败: {error_msg}")
+            else:
+                raise ValueError(f"未保存请求数据")
 
     def close(self):
         self.handler.close()
