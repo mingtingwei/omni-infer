@@ -59,3 +59,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/api_server_print_uvicorn_kwargs.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_internal_server_error.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_reasoning_max_token_bug.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_prefill_profiling_bug.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_content_to_reasoning_content_for_nonstream.patch

@@ -1,0 +1,41 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 65bf5b8..c2e7b08 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -230,10 +230,6 @@ class OpenAIServingChat(OpenAIServing):
+                     request.chat_template_kwargs = (request.chat_template_kwargs or {}) | {
+                             "reasoning_effort": REASONING_EFFORT[request.reasoning_effort]
+                         }
+-                if isinstance(tokenizer, DeepseekV32Tokenizer):
+-                    is_validate, error_info = DeepseekV32Tokenizer.validate_messages(request.messages)
+-                    if not is_validate:
+-                        return self.create_error_response(error_info)
+ 
+                 # Common case.
+                 (
+@@ -256,6 +252,12 @@ class OpenAIServingChat(OpenAIServing):
+                     truncate_prompt_tokens=request.truncate_prompt_tokens,
+                     add_special_tokens=request.add_special_tokens,
+                 )
++
++                if isinstance(tokenizer, DeepseekV32Tokenizer):
++                    is_validate, error_info = DeepseekV32Tokenizer.validate_messages(conversation)
++                    if not is_validate:
++                        return self.create_error_response(error_info)
++
+             else:
+                 # For GPT-OSS.
+                 (
+@@ -1251,6 +1253,9 @@ class OpenAIServingChat(OpenAIServing):
+                         output.text, request=request))
+                 if not request.include_reasoning:
+                     reasoning_content = None
++                if isinstance(tokenizer, DeepseekV32Tokenizer) and "</think>" not in output.text:
++                    reasoning_content = None
++                    content = output.text
+             else:
+                 reasoning_content = None
+                 content = output.text
+-- 
+
+
