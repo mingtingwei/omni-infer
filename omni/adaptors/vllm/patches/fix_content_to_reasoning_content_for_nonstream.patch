@@ -1,0 +1,17 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 65bf5b8..c2e7b08 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -1251,6 +1253,9 @@ class OpenAIServingChat(OpenAIServing):
+                         output.text, request=request))
+                 if not request.include_reasoning:
+                     reasoning_content = None
++                if isinstance(tokenizer, DeepseekV32Tokenizer) and "</think>" not in output.text:
++                    reasoning_content = None
++                    content = output.text
+             else:
+                 reasoning_content = None
+                 content = output.text
+-- 
+
+

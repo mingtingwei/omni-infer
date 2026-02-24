@@ -67,3 +67,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/think_compress_api_refactor.patch
 git apply --whitespace=nowarn $PATCH_ROOT/decode_context_parallel.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_internal_server_error.patch
 git apply --whitespace=nowarn $PATCH_ROOT/vllm_hccl_set_comm_name.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_content_to_reasoning_content_for_nonstream.patch
