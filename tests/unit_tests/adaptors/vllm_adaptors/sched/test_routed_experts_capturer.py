@@ -81,6 +81,7 @@ class DummyKVTransferConfig:
 class FakeTPGroup:
     def __init__(self, world_size=1, rank=0):
         self.world_size = world_size
+        self.first_rank = 0
         self.device_group = SimpleNamespace(world_size=world_size)
 
 # ---- Fixture 定义 ---------------------------------------------------------

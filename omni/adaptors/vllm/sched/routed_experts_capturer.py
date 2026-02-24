@@ -238,11 +238,11 @@ class _RoutedExpertsCapturer:
             if tp_rank == 0:
                 all_data = [torch.empty_like(data) for _ in range(get_tp_group().world_size)]
                 all_real_mapping = [torch.empty_like(real_mapping) for _ in range(get_tp_group().world_size)]
-                dist.gather(data, gather_list=all_data, dst=0, group=get_tp_group().device_group)
-                dist.gather(real_mapping, gather_list=all_real_mapping, dst=0, group=get_tp_group().device_group)
+                dist.gather(data, gather_list=all_data, dst=get_tp_group().first_rank, group=get_tp_group().device_group)
+                dist.gather(real_mapping, gather_list=all_real_mapping, dst=get_tp_group().first_rank, group=get_tp_group().device_group)
             else:
-                dist.gather(data, dst=0, group=get_tp_group().device_group)
-                dist.gather(real_mapping, dst=0, group=get_tp_group().device_group)
+                dist.gather(data, dst=get_tp_group().first_rank, group=get_tp_group().device_group)
+                dist.gather(real_mapping, dst=get_tp_group().first_rank, group=get_tp_group().device_group)
                 return
             concatenated_data = torch.cat(all_data, dim=0)
             concatenated_real_mapping = torch.cat(all_real_mapping, dim=0)
