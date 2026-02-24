@@ -3,6 +3,7 @@
 
 import torch
 import torch_npu
+import multiprocessing
 from torch.nn.parameter import Parameter
 from typing import Optional, Tuple
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -242,4 +243,7 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         super().weight_loader(param, loaded_weight)
+        current_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method('spawn', force=True)
         param.data = torch_npu.npu_format_cast(param.data, 29)
+        multiprocessing.set_start_method(current_method, force=True)
