@@ -140,7 +140,7 @@ if [[ "${source_bashrc}" == true ]]; then
   set -u
 fi
 
-cmd=(pytest --tb=long -v)
+cmd=(pytest --tb=short -v)
 
 if [[ -n "${durations_out}" ]]; then
   cmd+=( -p ut_CI_check.ut_CI_durations_plugin --durations-out "${durations_out}" )
