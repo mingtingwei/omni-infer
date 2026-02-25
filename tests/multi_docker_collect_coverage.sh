@@ -171,7 +171,13 @@ docker exec "${MERGE_CONTAINER}" /bin/bash -c "
 
 echo
 # echo "===== STEP 2.4: 把报告从 DT_1 拷回宿主机 ====="
-docker cp "${MERGE_CONTAINER}:${DT1_RUN_DIR}" "${HOST_PROXY_REPORT_DIR}/"
+rm -rf "${HOST_PROXY_REPORT_DIR}"
+mkdir -p "${HOST_PROXY_REPORT_DIR}"
+docker cp "${MERGE_CONTAINER}:${DT1_RUN_DIR}/." "${HOST_PROXY_REPORT_DIR}/"
+
+echo
+# echo "===== CLEANUP: 删除宿主机 nginx_from_dockers ====="
+rm -rf "${HOST_NGINX_DIR}"
 
 
 
