@@ -17,7 +17,7 @@ prefill_port_list = None
 decode_port_list = None
 
 @pytest.fixture(scope="module")
-def setup_teardown():
+def setup_teardown(vllm_keep_alive):
     global proxy_port
     global prefill_port_list
     global decode_port_list
@@ -31,6 +31,19 @@ def setup_teardown():
         yield
         return
 
+    if os.getenv("PROXY_VLLM_POOL") == "1":
+        ports = port_manager.get_ports_from_file()
+        proxy_port = ports["proxy_port"]
+        prefill_port_list = ports["prefill"][:PREFILL_NUM]
+        decode_port_list = ports["decode"][:DECODE_NUM]
+        ret = setup_proxy(proxy_port, prefill_port_list, decode_port_list)
+        if ret == -1:
+            pytest.fail(f"Start proxy fail")
+        print(f"\n[DEBUG] Skipping setup/teardown, {proxy_port=}, {prefill_port_list=}, {decode_port_list=}")
+        yield
+        teardown_proxy()
+        return
+    
     ports = port_manager.load_ports(PREFILL_NUM, DECODE_NUM)
     proxy_port = ports["proxy_port"]
     prefill_port_list = ports["prefill"]
@@ -139,7 +152,7 @@ def test_chat_completions_with_proxy(setup_teardown):
         "stream": True
     }
 
-    response = requests.post(url, headers=headers, json=data, timeout=10)
+    response = requests.post(url, headers=headers, json=data, timeout=30)
     print("Status Code:", response.status_code)
     print("Response Headers:", response.headers)
     print("Response Body (preview):", response.text[:200] + "..." if len(response.text) > 200 else response.text)

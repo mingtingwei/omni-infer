@@ -23,12 +23,30 @@ from run_proxy import setup_proxy, teardown_proxy
 from run_vllm_mock import start_vllm_mock, cleanup_subprocess, setup_vllm
 import port_manager
 
+PREFILL_NUM = 3
+DECODE_NUM = 3
+VLLM_POOL = os.getenv("PROXY_VLLM_POOL")
+
 @pytest.fixture(scope="module")
-def reload_env():
+def reload_env(vllm_keep_alive):
     os.environ["no_proxy"] = "localhost,127.0.0.1"
 
-    PREFILL_NUM = 3
-    DECODE_NUM = 3
+    if os.getenv("PROXY_VLLM_POOL") == "1":
+        ports = port_manager.get_ports_from_file()
+        proxy_port = ports["proxy_port"]
+        prefill_ports = ports["prefill"][:PREFILL_NUM]
+        decode_ports = ports["decode"][:DECODE_NUM]
+        ret = setup_proxy(proxy_port, prefill_ports, decode_ports)
+        if ret == -1:
+            pytest.fail(f"Start proxy fail")
+        print(f"\n[DEBUG] Skipping setup/teardown, {proxy_port=}, {prefill_ports=}, {decode_ports=}")
+        yield {
+        "proxy_port": proxy_port,
+        "prefill_ports": prefill_ports,
+        "decode_ports": decode_ports,
+        }
+        teardown_proxy()
+        return
 
     ports = port_manager.load_ports(PREFILL_NUM, DECODE_NUM)
 
@@ -230,20 +248,44 @@ def wait_reload_complete_from_log(
     raise RuntimeError("reload did not complete")
 
 def get_nginx_pids(tag=""):
-    out = subprocess.check_output(
-        "ps -ef | grep nginx | grep -v grep",
-        shell=True
-    ).decode()
-
     master = None
     workers = []
 
-    for line in out.splitlines():
-        parts = line.split()
-        if "master process" in line:
-            master = int(parts[1])
-        elif "worker process" in line:
-            workers.append(int(parts[1]))
+    try:
+        master_out = subprocess.check_output(
+            "pgrep -f 'nginx: master process' | head -n1",
+            shell=True,
+            text=True,
+        ).strip()
+        master = int(master_out) if master_out else None
+    except Exception:
+        master = None
+    
+    time.sleep(0.5)  # small delay to ensure workers have started after master
+
+    if master:
+        try:
+            worker_out = subprocess.check_output(
+                f"pgrep -P {master} -f 'nginx: worker process'",
+                shell=True,
+                text=True,
+            ).strip()
+            if worker_out:
+                workers = [int(x) for x in worker_out.splitlines()]
+        except subprocess.CalledProcessError:
+            workers = []
+    else:
+        out = subprocess.check_output(
+            "ps -ef | grep nginx | grep -v grep",
+            shell=True,
+            text=True,
+        ).strip()
+        for line in out.splitlines():
+            parts = line.split()
+            if "master process" in line:
+                master = int(parts[1])
+            elif "worker process" in line:
+                workers.append(int(parts[1]))
 
     print(f"\n[NGINX PID] {tag}")
     print(f"  master : {master}")
@@ -282,8 +324,8 @@ def _response_body_is_valid_json_or_sse_json(r) -> bool:
 
 def test_proxy_reload(reload_env):
     proxy_port = reload_env["proxy_port"]
-    prefill_port_list = reload_env["prefill_ports"]
-    decode_port_list = reload_env["decode_ports"]
+    prefill_port_list = reload_env["prefill_ports"].copy()
+    decode_port_list = reload_env["decode_ports"].copy()
     """
     Health-based proxy reload test (enhanced).
 
@@ -464,18 +506,23 @@ def test_proxy_reload(reload_env):
 
         # Case 3: +P3 / +D3
         if SELECT_CASE in (None, "3"):
-            p3_port = port_manager.find_free_port_excluding_existing()
-            d3_port = port_manager.find_free_port_excluding_existing(p3_port)
+            if VLLM_POOL == 1:
+                ports = port_manager.get_ports_from_file()
+                p3_port = ports["prefill"][PREFILL_NUM]
+                d3_port = ports["decode"][DECODE_NUM]
+            else:
+                p3_port = port_manager.find_free_port_excluding_existing()
+                d3_port = port_manager.find_free_port_excluding_existing(p3_port)
 
-            procs, logs = setup_vllm(True, [p3_port], log_file_prefix="reload")
-            new_processes.extend(procs)
-            new_logs.extend(logs)
+                procs, logs = setup_vllm(True, [p3_port], log_file_prefix="reload")
+                new_processes.extend(procs)
+                new_logs.extend(logs)
 
-            procs2, logs2 = setup_vllm(False, [d3_port], log_file_prefix="reload")
-            new_processes.extend(procs2)
-            new_logs.extend(logs2)
+                procs2, logs2 = setup_vllm(False, [d3_port], log_file_prefix="reload")
+                new_processes.extend(procs2)
+                new_logs.extend(logs2)
 
-            wait_vllm_ready(procs2, logs2)
+                wait_vllm_ready(procs2, logs2)
 
             run_case(
                 "Case 3: +P3 / +D3",
@@ -737,20 +784,24 @@ def test_proxy_reload_under_concurrent_traffic(reload_env):
                         f"[Round {round_id} Case 3] master pid changed before reload: "
                         f"{master_pid_baseline} -> {master_before}"
                     )
+                if VLLM_POOL:
+                    ports = port_manager.get_ports_from_file()
+                    p3 = ports["prefill"][PREFILL_NUM]
+                    d3 = ports["prefill"][DECODE_NUM]
+                else:
+                    p3 = port_manager.find_free_port_excluding_existing()
+                    d3 = port_manager.find_free_port_excluding_existing(p3)
+                    print(f"[ROUND {round_id}]   new P={p3}, D={d3}")
 
-                p3 = port_manager.find_free_port_excluding_existing()
-                d3 = port_manager.find_free_port_excluding_existing(p3)
-                print(f"[ROUND {round_id}]   new P={p3}, D={d3}")
+                    procs, logs = setup_vllm(True, [p3], log_file_prefix="reload")
+                    new_processes.extend(procs)
+                    new_logs.extend(logs)
 
-                procs, logs = setup_vllm(True, [p3], log_file_prefix="reload")
-                new_processes.extend(procs)
-                new_logs.extend(logs)
+                    procs2, logs2 = setup_vllm(False, [d3], log_file_prefix="reload")
+                    new_processes.extend(procs2)
+                    new_logs.extend(logs2)
 
-                procs2, logs2 = setup_vllm(False, [d3], log_file_prefix="reload")
-                new_processes.extend(procs2)
-                new_logs.extend(logs2)
-
-                wait_vllm_ready(procs2, logs2)
+                    wait_vllm_ready(procs2, logs2)
 
                 apply_case_3_append_existing(cur_prefill, cur_decode, p3, d3)
 
@@ -837,7 +888,8 @@ def test_proxy_reload_under_concurrent_traffic(reload_env):
         except Exception as e:
             reload_errors.append(e)
         finally:
-            cleanup_subprocess(new_processes)
+            if new_processes:
+                cleanup_subprocess(new_processes)
 
     t_req = threading.Thread(target=request_worker, daemon=True)
     t_reload = threading.Thread(target=reload_worker)

@@ -100,7 +100,7 @@ def setup_vllm(is_prefill, port_list, log_file_prefix=None):
             "--block_size", "128",
             "--kv-events-config", f"{KV_EVENTS_CONFIG}",
         ]
-        log_file = Path(f"{node_type}_{log_file_prefix}_{idx}.log")
+        log_file = CUR_DIR / Path(f"{node_type}_{log_file_prefix}_{idx}.log")
         log_list.append(log_file)
 
         # Clean existing log

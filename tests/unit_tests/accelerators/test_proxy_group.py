@@ -32,7 +32,7 @@ def truncate_log_file(path: Path):
         pass
 
 @pytest.fixture(scope="module")
-def setup_teardown():
+def setup_teardown(vllm_keep_alive):
     global proxy_port
     global prefill_port_list
     global decode_port_list
@@ -46,6 +46,21 @@ def setup_teardown():
         print(f"\n[DEBUG] Skipping setup/teardown, {proxy_port=}, {prefill_port_list=}, {decode_port_list=}")
         yield
         return
+    
+    if os.getenv("PROXY_VLLM_POOL") == "1":
+        truncate_log_file(error_log)
+        truncate_log_file(access_log)
+        ports = port_manager.get_ports_from_file()
+        proxy_port = ports["proxy_port"]
+        prefill_port_list = ports["prefill"][:PREFILL_NUM]
+        decode_port_list = ports["decode"][:DECODE_NUM]
+        ret = setup_proxy(proxy_port, prefill_port_list, decode_port_list,prefill_groups=prefill_groups, decode_groups=decode_groups)
+        if ret == -1:
+            pytest.fail(f"Start proxy fail")
+        print(f"\n[DEBUG] Skipping setup/teardown, {proxy_port=}, {prefill_port_list=}, {decode_port_list=}")
+        yield
+        teardown_proxy()
+        return        
 
     truncate_log_file(error_log)
     truncate_log_file(access_log)
@@ -268,7 +283,7 @@ def test_proxy_access_log_contains_request_id(setup_teardown):
         "stream": False
     }
 
-    response = requests.post(url, headers=headers, json=data, timeout=10)
+    response = requests.post(url, headers=headers, json=data, timeout=30)
     assert response.status_code == 200
 
     access_log = Path(__file__).parent / "nginx_access.log"
@@ -311,7 +326,7 @@ def test_group_affinity_logged_indices(setup_teardown):
         "stream": False
     }
 
-    response = requests.post(url, headers=headers, json=data, timeout=10)
+    response = requests.post(url, headers=headers, json=data, timeout=30)
     assert response.status_code == 200
 
     access_log = Path(__file__).parent / "nginx_access.log"

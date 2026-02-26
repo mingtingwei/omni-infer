@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export COVERAGE_RCFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.coveragerc"
+export PROXY_VLLM_POOL=1 # A switch for preparing vLLM to speed up proxy UT
 
 # 安装必要依赖（兼容单机 & 多容器）
 pip install pytest-cov diff-cover beautifulsoup4 gcovr pytest-shard pytest-split numpy==1.26 transformers==4.53.2 xgrammar==0.1.19
