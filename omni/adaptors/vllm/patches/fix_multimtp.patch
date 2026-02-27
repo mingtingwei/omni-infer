@@ -1,0 +1,53 @@
+diff --git a/vllm/entrypoints/openai/api_server.py b/vllm/entrypoints/openai/api_server.py
+index 4b6a3937d..4cc341cc1 100644
+--- a/vllm/entrypoints/openai/api_server.py
++++ b/vllm/entrypoints/openai/api_server.py
+@@ -1302,6 +1302,7 @@ async def init_app_state(
+         tool_parser=args.tool_call_parser,
+         reasoning_parser=args.reasoning_parser,
+         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
++        speculative_config=vllm_config.speculative_config,
+     ) if model_config.runner_type == "generate" else None
+     state.openai_serving_completion = OpenAIServingCompletion(
+         engine_client,
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 52092867b..705cc44f6 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -55,6 +55,7 @@ from vllm.utils import random_uuid, as_list
+ from omni.tools.profiler.trace.tracing import parent_ctx_var, span_start_time
+ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+ from vllm.transformers_utils.tokenizers import DeepseekV32Tokenizer
++from vllm.config import SpeculativeConfig
+ original_init = RequestOutput.__init__
+ def new_init(self, *args, **kwargs):
+     trace_headers = kwargs.pop('trace_headers', None)
+@@ -88,6 +89,7 @@ class OpenAIServingChat(OpenAIServing):
+         enable_auto_tools: bool = False,
+         tool_parser: Optional[str] = None,
+         enable_prompt_tokens_details: bool = False,
++        speculative_config: Optional[SpeculativeConfig] = None,
+     ) -> None:
+         super().__init__(engine_client=engine_client,
+                          model_config=model_config,
+@@ -100,6 +102,9 @@ class OpenAIServingChat(OpenAIServing):
+         self.chat_template_content_format: Final = chat_template_content_format
+         self.headers_map = {}
+ 
++        self.num_spec_tokens = 0
++        if speculative_config is not None:
++            self.num_spec_tokens = speculative_config.num_speculative_tokens
+         # set up tool use
+         self.enable_auto_tools: bool = enable_auto_tools
+         if self.enable_auto_tools:
+@@ -306,7 +311,8 @@ class OpenAIServingChat(OpenAIServing):
+                         else:
+                             engine_prompt["prefilled_token_ids"] = request.kv_transfer_params["prefilled_token"]
+                             engine_prompt["prefilled_texts"] = delta_text
+-                            engine_prompt["max_tokens"] = min(request.max_tokens or self.max_model_len, self.max_model_len-len(engine_prompt["prompt_token_ids"]))
++                            max_model_len = self.max_model_len - max(0, self.num_spec_tokens + (self.num_spec_tokens - 1) - 1)
++                            engine_prompt["max_tokens"] = min(request.max_tokens or self.max_model_len, max(1, max_model_len-len(engine_prompt["prompt_token_ids"])))
+                             request.kv_transfer_params["max_tokens"] = engine_prompt["max_tokens"]
+                 default_max_tokens = self.max_model_len - len(
+                     engine_prompt["prompt_token_ids"])
+
