@@ -206,8 +206,21 @@ bash rm_docker.sh # 删除容器
 
 如需修改各容器用例分配情况，请修改`run_docker.sh`、`concurrent_test_run_multi_docker.sh`、`multi_docker_collect_coverage.sh`及`rm_docker.sh`中的相关配置。
 
+## 6. 增量覆盖率
+当前增量覆盖率实现代码在 `tests/ut_CI_check/ut_CI_diff_cov.py`，并且**只检测工作区已暂存（staged）的改动**（使用 `git diff --cached`）。
 
-## 6. 使用示例
+示例：
+
+```bash
+python3 tests/ut_CI_check/ut_CI_diff_cov.py \
+  --repo-root /path/to/omniinfer \
+  --coverage-xml /path/to/coverage.xml \
+  --out-html /path/to/diffcov.html \
+  --out-txt /path/to/diffcov.txt
+```
+
+
+## 7. 使用示例
 
 ```bash
 # 运行全部测试，2 并发
