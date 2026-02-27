@@ -399,18 +399,33 @@ def _render_chatml_template(messages: List[Dict[str, Any]], add_generation_promp
         prompt += "<|im_start|>assistant\n"
     
     return prompt
+    
+def _message_to_text(message: Dict[str, Any]) -> str:
+    # 1) normal content
+    if "content" in message and message["content"] is not None:
+        return message["content"] if isinstance(message["content"], str) else json.dumps(message["content"], ensure_ascii=False)
+
+    # 2) tool_calls (OpenAI new)
+    if "tool_calls" in message and message["tool_calls"] is not None:
+        return json.dumps({"tool_calls": message["tool_calls"]}, ensure_ascii=False)
+
+    # 3) function_call (old)
+    if "function_call" in message and message["function_call"] is not None:
+        return json.dumps({"function_call": message["function_call"]}, ensure_ascii=False)
+
+    # 4) fallback
+    return ""
 
 def _render_generic_template(messages: List[Dict[str, Any]], add_generation_prompt: bool) -> str:
-    """vLLM's exact generic template rendering"""
     prompt = ""
-    
     for message in messages:
-        role, content = message["role"], message["content"]
+        role = message.get("role", "user")
+        content = _message_to_text(message)
         prompt += f"{role}: {content}\n"
-    
+
     if add_generation_prompt:
         prompt += "assistant: "
-    
+
     return prompt
 
 def _tokenize_batch_optimized(

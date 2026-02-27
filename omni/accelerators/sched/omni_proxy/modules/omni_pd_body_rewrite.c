@@ -648,6 +648,12 @@ void gen_prefill_json_str_jsmn(
     int stream_options_key_idx = -1, stream_options_val_idx = -1;
     char keybuf[64];
 
+    // Early return for invalid/empty input
+    if (json == NULL || len == 0) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, 
+                      "gen prefill json: empty json input");
+        return;
+    }
     tokens = ngx_palloc(r->pool, tokens_size * sizeof(jsmntok_t));
     if (!tokens)
     {
@@ -779,7 +785,7 @@ void gen_prefill_json_str_jsmn(
         }
     }
     // Copy the remainder before closing }
-    if (src < len - 1)
+    if (len > 1 && src < len - 1)
     {
         ngx_memcpy(newjson + pos, json + src, len - 1 - src);
         pos += len - 1 - src;

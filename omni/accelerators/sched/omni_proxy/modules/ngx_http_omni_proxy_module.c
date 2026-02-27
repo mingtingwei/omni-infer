@@ -1108,7 +1108,11 @@ static ngx_int_t omni_proxy_get_peer(ngx_peer_connection_t *pc,
 
 static ngx_int_t omni_proxy_upstream_init(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *uscf)
 {
-
+    
+    omni_req_context_t *ctx = ngx_http_get_module_ctx(r, ngx_http_omni_proxy_module);
+    if (ctx == NULL || ctx->req == NULL) {
+        return ngx_http_upstream_init_round_robin_peer(r, uscf);
+    }
     omni_req_t *req = omni_get_req(r);
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "[-%d] init upstream at phase: %u",
                   req->slot_index, req->phase_state);

@@ -439,7 +439,7 @@ EOF
     cat >> "$nginx_conf_file" <<EOF
         server_name localhost;
 
-        location /v1 {
+        location ~ ^/v1(/chat)?/completions$ {
             set_request_id on;
             set_trace_headers_force off;
             omni_proxy decode_endpoints;
@@ -469,6 +469,12 @@ EOF
             proxy_buffering off;
             send_timeout 1h;
             postpone_output 0;
+        }
+
+        location /v1 {
+            proxy_pass http://decode_endpoints;
+            proxy_http_version 1.1;
+            proxy_set_header Connection Keep-Alive;
         }
 
         location = /omni_proxy/metrics {
