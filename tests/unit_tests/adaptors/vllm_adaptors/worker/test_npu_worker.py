@@ -170,6 +170,7 @@ class TestNPUWorker(unittest.TestCase):
         w.rank = 0
         w.distributed_init_method = "tcp://127.0.0.1:23456"
         w.is_driver_worker = is_driver_worker
+        w.world_ranks = None
 
         # for _compute_kv_cache_bytes
         w.init_npu_memory = 0
