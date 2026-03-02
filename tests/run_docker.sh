@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/ut_config.sh"
+
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <docker_image>"
   exit 1
@@ -8,31 +12,26 @@ fi
 
 IMAGE_NAME="$1"
 
-# 定义容器名称及对应的ASCEND设备信息
-declare -A CONTAINERS=(
-  ["DT_1"]="0,1"
-  ["DT_2"]="2,3"
-  ["DT_3"]="4,5"
-  ["DT_4"]="6,7"
-  ["DT_5"]="8,9,10,11"
-  ["DT_6"]="12,13"
-  ["DT_7"]="14,15"
-)
+echo "[INFO] Starting containers: ${CONTAINER_NAMES[*]}"
+echo "[INFO] Image: ${IMAGE_NAME}"
+echo "[INFO] shm-size: ${DOCKER_SHM_SIZE}"
 
-echo "[INFO] Starting containers (using array and loop)"
+for CONTAINER_NAME in "${CONTAINER_NAMES[@]}"; do
+  ASCEND_DEVICES="${CONTAINER_DEVICES[$CONTAINER_NAME]:-}"
+  if [[ -z "${ASCEND_DEVICES}" ]]; then
+    echo "[ERROR] Missing devices mapping for ${CONTAINER_NAME} in ut_config.sh"
+    exit 1
+  fi
 
-for CONTAINER_NAME in "${!CONTAINERS[@]}"; do
-  ASCEND_DEVICES="${CONTAINERS[$CONTAINER_NAME]}"
-  
   echo "[INFO] Starting ${CONTAINER_NAME}"
   echo "       ASCEND_RT_VISIBLE_DEVICES=${ASCEND_DEVICES}"
-  
+
   if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
     echo "[WARN] Container ${CONTAINER_NAME} already exists. Removing..."
     docker rm -f "${CONTAINER_NAME}" >/dev/null
   fi
 
-  docker run -it -d --shm-size=500g \
+  docker run -it -d --shm-size="${DOCKER_SHM_SIZE}" \
     -e PYTHONHASHSEED=123 \
     -e ASCEND_RT_VISIBLE_DEVICES="${ASCEND_DEVICES}" \
     -e http_proxy \

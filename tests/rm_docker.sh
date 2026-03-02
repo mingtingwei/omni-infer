@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 定义要删除的容器名称
-CONTAINERS=(
-  "DT_1"
-  "DT_2"
-  "DT_3"
-  "DT_4"
-  "DT_5"
-  "DT_6"
-  "DT_7"
-)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/ut_config.sh"
 
-echo "[INFO] Removing containers: ${CONTAINERS[*]}"
+echo "[INFO] Removing containers: ${CONTAINER_NAMES[*]}"
 
-for CONTAINER_NAME in "${CONTAINERS[@]}"; do
+for CONTAINER_NAME in "${CONTAINER_NAMES[@]}"; do
   if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
     echo "[INFO] Removing container ${CONTAINER_NAME}"
     docker rm -f "${CONTAINER_NAME}" >/dev/null

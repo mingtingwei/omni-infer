@@ -87,10 +87,10 @@ def print_totals_and_balance(totals: List[Tuple[str, float]],) -> Tuple[float, b
     for name, total in sorted(totals, key=lambda x: x[0]):
         print(f"  {name}: {total:.2f}")
 
-    # 时间均衡规则 260210：DT_6 DT_7中 最大值与最小值的比值不超过1.5
-    min_between_DT_6_DT_7 = min(t for n, t in totals[5:7])
-    max_between_DT_6_DT_7 = max(t for n, t in totals[5:7])
-    ratio = max_between_DT_6_DT_7 / min_between_DT_6_DT_7 if min_between_DT_6_DT_7 > 0 else 1.0
+    # 时间均衡规则 260224：DT_5 DT_6 DT_7中 最大值与最小值的比值不超过1.5
+    min_between_DT_567 = min(t for n, t in totals[4:7])
+    max_between_DT_567 = max(t for n, t in totals[4:7])
+    ratio = max_between_DT_567 / min_between_DT_567 if min_between_DT_567 > 0 else 1.0
     threshold = 1.5
     ok = ratio <= threshold
     print(f"[INFO] balance check: max(DT_6,DT_7)/min(DT_6,DT_7) = {ratio:.2f} (threshold {threshold:.2f})")
