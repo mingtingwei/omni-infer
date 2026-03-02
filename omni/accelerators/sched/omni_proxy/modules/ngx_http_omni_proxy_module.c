@@ -311,14 +311,27 @@ static void omni_proxy_post_tokenized(omni_req_t *req)
     req->max_decode_match_depth = (uint32_t)computed_max_decode;
 
     /* Finally perform phase transition and timestamp updates */
-    omni_phase_transition_all(req, 0, PHASE_PREFILL_WAITING_SCHEDULE);
-    struct timeval tv;
-    omni_get_current_time(&tv);
-    req->metrics.time_enter_wait_prefill = tv;
+    if (g_state->pd_policy == PD_AGGREGATION) {
+        omni_phase_transition_all(req, PHASE_TOKENIZING, PHASE_DECODE_WAITING_SCHEDULE);
 
-    ngx_http_request_t *r = omni_get_http_request(req);
-    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+        struct timeval tv;
+        omni_get_current_time(&tv);
+        req->metrics.time_enter_wait_decode = tv;
+
+        ngx_http_request_t *r = omni_get_http_request(req);
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                    "<<<Action: Enter state D waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+    } else {
+        omni_phase_transition_all(req, PHASE_TOKENIZING, PHASE_PREFILL_WAITING_SCHEDULE);
+
+        struct timeval tv;
+        omni_get_current_time(&tv);
+        req->metrics.time_enter_wait_prefill = tv;
+
+        ngx_http_request_t *r = omni_get_http_request(req);
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                     "<<<Action: Enter state P waiting; Timestamp:%d.%06d; RequestID:%s", tv.tv_sec, tv.tv_usec, req->request_id);
+    }
 }
 
 static void omni_proxy_req_body_handler(ngx_http_request_t *r)
@@ -2946,11 +2959,15 @@ static char *ngx_http_omni_proxy_pd_policy(ngx_conf_t *cf, ngx_command_t *cmd, v
 
     if (ngx_strcmp(value[1].data, "sequential") == 0)
     {
-        olcf->pd_policy = 0;
+        olcf->pd_policy = PD_SEQUENTIAL;
     }
     else if (ngx_strcmp(value[1].data, "parallel") == 0)
     {
-        olcf->pd_policy = 1;
+        olcf->pd_policy = PD_PARALLEL;
+    }
+    else if (ngx_strcmp(value[1].data, "aggregation") == 0)
+    {
+        olcf->pd_policy = PD_AGGREGATION;
     }
     else
     {

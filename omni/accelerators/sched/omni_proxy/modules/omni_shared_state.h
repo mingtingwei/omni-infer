@@ -211,7 +211,8 @@ typedef struct omni_upstream_decode_s
 typedef enum omni_proxy_pd_policy_s
 {
     PD_SEQUENTIAL,
-    PD_PARALLEL
+    PD_PARALLEL,
+    PD_AGGREGATION
 } omni_proxy_pd_policy_t;
 
 typedef struct omni_global_state_s

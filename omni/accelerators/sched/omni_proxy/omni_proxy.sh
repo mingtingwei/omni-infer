@@ -47,7 +47,7 @@ print_help() {
     echo "  --log-file <path>               Log file path (default: /tmp/nginx_error.log)"
     echo "  --log-level <LEVEL>             Log level (default: notice)"
     echo "  --access-log-file <path>        Access log file path (default: /tmp/nginx_access.log)"
-    echo "  --omni-proxy-pd-policy <policy> sequential or parallel (default: sequential)"
+    echo "  --omni-proxy-pd-policy <policy> sequential, parallel or aggregation(default: sequential)"
     echo "  --omni-proxy-model-path <path>  Path to model directory (default: unset)"
     echo "  --omni-proxy-max-batch-num-token <N>      max_batch_num_token (default: 32000)"
     echo "  --omni-proxy-max-tokens-weight <N>        max_tokens_weight coefficient (default: 0)"
@@ -121,8 +121,8 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --omni-proxy-pd-policy)
-            if [[ "$2" != "sequential" && "$2" != "parallel" ]]; then
-                echo "Error: --omni-proxy-pd-policy must be 'sequential' or 'parallel'"
+            if [[ "$2" != "sequential" && "$2" != "parallel" && "$2" != "aggregation" ]]; then
+                echo "Error: --omni-proxy-pd-policy must be 'sequential', 'parallel', or 'aggregation'"
                 exit 1
             fi
             omni_proxy_pd_policy="$2"
@@ -420,7 +420,9 @@ http {
     proxy_connect_timeout 600s;
     proxy_send_timeout 600s;
 
-$(gen_upstream_block "prefill_endpoints" "$prefill_endpoints")
+$(if [[ "$omni_proxy_pd_policy" != "aggregation" ]]; then
+    gen_upstream_block "prefill_endpoints" "$prefill_endpoints"
+fi)
     
 $(gen_upstream_block "decode_endpoints" "$decode_endpoints")
 
@@ -504,8 +506,13 @@ EOF
 }
 
 function do_start() {
-    if [[ -z "$prefill_endpoints" || -z "$decode_endpoints" ]]; then
-        echo "Error: --prefill-endpoints and --decode-endpoints are required"
+    if [[ -z "$decode_endpoints" ]]; then
+        echo "Error: --decode-endpoints are required"
+        exit 1
+    fi
+
+    if [[ "$omni_proxy_pd_policy" != "aggregation" && -z "$prefill_endpoints" ]]; then
+        echo "Error: --prefill-endpoints is required when pd policy is not aggregation"
         exit 1
     fi
 

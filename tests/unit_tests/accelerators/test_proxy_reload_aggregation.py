@@ -20,7 +20,6 @@ from proxy_reload_test_methods import proxy_reload, proxy_reload_under_concurren
 
 PREFILL_NUM = 3
 DECODE_NUM = 3
-VLLM_POOL = os.getenv("PROXY_VLLM_POOL")
 
 @pytest.fixture(scope="module")
 def reload_env(vllm_keep_alive):
@@ -31,7 +30,7 @@ def reload_env(vllm_keep_alive):
         proxy_port = ports["proxy_port"]
         prefill_ports = ports["prefill"][:PREFILL_NUM]
         decode_ports = ports["decode"][:DECODE_NUM]
-        ret = setup_proxy(proxy_port, prefill_ports, decode_ports)
+        ret = setup_proxy(proxy_port, prefill_ports, decode_ports, pd_policy="aggregation")
         if ret == -1:
             pytest.fail(f"Start proxy fail")
         print(f"\n[DEBUG] Skipping setup/teardown, {proxy_port=}, {prefill_ports=}, {decode_ports=}")
@@ -49,7 +48,7 @@ def reload_env(vllm_keep_alive):
     prefill_ports = ports["prefill"]
     decode_ports = ports["decode"]
 
-    ret = setup_proxy(proxy_port, prefill_ports, decode_ports)
+    ret = setup_proxy(proxy_port, prefill_ports, decode_ports, pd_policy="aggregation")
     if ret == -1:
         pytest.fail("Start proxy fail")
 
@@ -73,6 +72,8 @@ def reload_env(vllm_keep_alive):
         teardown_proxy()
     except Exception as e:
         print(f"[TEARDOWN] teardown_proxy ignored: {e}")
+
+
 
 def test_proxy_reload(reload_env):
     proxy_reload(reload_env)

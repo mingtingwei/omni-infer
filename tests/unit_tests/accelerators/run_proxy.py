@@ -13,7 +13,7 @@ def generate_proxy_endpoints(port_list) -> str:
     return ",".join(f"127.0.0.1:{port}" for port in port_list)
 
 def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None,
-                prefill_groups=None, decode_groups=None, dry_run=False):
+                prefill_groups=None, decode_groups=None, dry_run=False, pd_policy="sequential"):
     env = os.environ.copy()
     env['PYTHONHASHSEED'] = '123'
 
@@ -24,8 +24,8 @@ def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None,
             "bash", proxy_script_path,
             "--nginx-conf-file", f"{CUR_DIR}/nginx.conf",
             "--core-num", "1",
+            "--omni-proxy-pd-policy", f"{pd_policy}",
             "--listen-port", f"{proxy_port}",
-            "--prefill-endpoints", prefill_list,
             "--decode-endpoints", decode_list,
             "--log-file", f"{CUR_DIR}/nginx_error.log",
             "--log-level", "info",
@@ -34,6 +34,8 @@ def setup_proxy(proxy_port=7000, prefill_port_list=None, decode_port_list=None,
             "--omni-proxy-model-path", f"{CUR_DIR}/mock_model",
             "--no-reuseport"
         ]
+        if pd_policy != "aggregation":
+            cmd.extend(["--prefill-endpoints", prefill_list])
         if prefill_groups:
             cmd.extend(["--omni-proxy-prefill-groups", prefill_groups])
         if decode_groups:

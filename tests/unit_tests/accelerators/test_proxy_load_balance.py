@@ -68,7 +68,7 @@ def setup_teardown(vllm_keep_alive):
     print(f"\n[TEARDOWN] Shutting down {PREFILL_NUM + DECODE_NUM} instances...")
     cleanup_subprocess(processes)
 
-def setup_proxy_basic(proxy_port=7000, prefill_port_list=None, decode_port_list=None):
+def setup_proxy_basic(proxy_port=7000, prefill_port_list=None, decode_port_list=None, pd_policy="sequential"):
     env = os.environ.copy()
     env['PYTHONHASHSEED'] = '123'
     ports = port_manager.get_ports_from_file()
@@ -79,8 +79,8 @@ def setup_proxy_basic(proxy_port=7000, prefill_port_list=None, decode_port_list=
             "bash", proxy_script_path,
             "--nginx-conf-file", f"{CUR_DIR}/nginx_balance.conf",
             "--core-num", "4",
+            "--omni-proxy-pd-policy", f"{pd_policy}",
             "--listen-port", f"{proxy_port}",
-            "--prefill-endpoints", prefill_list,
             "--decode-endpoints", decode_list,
             "--log-file", f"{CUR_DIR}/nginx_error_balance.log",
             "--log-level", "info",
@@ -89,6 +89,8 @@ def setup_proxy_basic(proxy_port=7000, prefill_port_list=None, decode_port_list=
             "--no-reuseport",
             "--keepalive-nginx"
         ]
+        if pd_policy != "aggregation":
+            cmd.extend(["--prefill-endpoints", prefill_list])
         result = subprocess.run(
             cmd,
             env=env,
@@ -368,7 +370,132 @@ def analyze_balance_basic(log_file, num_logs = 5):
         prefill_counts[req['prefill_idx']] += 1
         decode_counts[req['decode_idx']] += 1
     assert prefill_counts[prompt_prefill_min_idx] == 2 
-    assert decode_counts[prompt_decode_min_idx] == 2 
+    assert decode_counts[prompt_decode_min_idx] == 2
+
+def test_chat_completions_with_proxy_basic_aggregation(setup_teardown):
+    proxy_port = find_free_port()
+    ret = setup_proxy_basic(proxy_port, pd_policy="aggregation")
+    if not ret == 0:
+        pytest.fail(f"Start proxy fail")
+    ngx_pid = get_ngx_pid()
+    url = f"http://127.0.0.1:{proxy_port}/v1/chat/completions"
+    data = [
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,#prompt length:181
+            "messages": [{"role": "user", "content": "On a crisp autumn morning, I wandered into an old alley tucked between high-rise buildings, where time seemed to slow down. The walls were stained with years of rain and sunlight, and a few ginkgo trees by the roadside dropped golden leaves that swirled in the gentle wind. An elderly tailor sat behind a wooden counter, his gnarled hands stitching a worn coat with meticulous care. A tabby cat curled on his windowsill, dozing off to the sound of his sewing machine. I stopped to watch, and he lifted his head with a warm smile, telling me this alley had been his home for forty years. He’d sewn clothes for generations of locals, from children’s tiny jackets to elders’ thick winter coats. As I chatted with him, a little girl ran by, holding a lollipop, and the tailor waved at her softly. When I left, the sun had climbed higher, gilding the alley’s corners. This quiet spot, far from the city’s hustle, held simple warmth that made the ordinary day feel precious and unforgettable. Please continue the novel based on the above plot with no less than 1200 words."}],
+            "stream": True
+        },
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,#prompt length:1123
+            "messages": [{"role": "user", "content": "Last summer, driven by a deep passion for biodiversity conservation, I joined a wilderness exploration team composed of biologists, photographers, and local guides, heading to a remote mountain valley nestled in the southwest of China. Our core mission was to conduct a comprehensive survey of the local flora and fauna, recording their distribution and living conditions to provide data support for potential ecological protection initiatives. The journey proved far more arduous than I had anticipated—we trekked for three consecutive days through primeval dense forests, where towering ancient trees intertwined their crowns, blocking most of the sunlight. Only scattered beams of light managed to filter through the canopy, casting dappled shadows on the thick layer of humus beneath our feet. The air was perpetually thick with the earthy scent of damp soil, mixed with the sweet fragrance of wild flowers like rhododendrons and osmanthus, and the faint mustiness of decaying leaves. Our boots sank into the soft mud at every step, and we had to wield machetes to clear the tangled vines that blocked our path, our clothes soaked through with sweat and mist by the end of each day. On the fourth morning, as we crossed a shallow stream with crystal-clear water gurgling over smooth pebbles, Lin, our team's ornithologist, suddenly froze and gestured for us to be quiet. Following her gaze, we spotted a young red-crowned crane lying weakly by the bank, its snow-white feathers matted with mud and grass, and its left wing drooping lifelessly. The crane's bright red crown, which should have been vivid and striking, looked dull, and it let out occasional faint chirps that were full of pain. We rushed over as carefully as possible, fearing that any sudden movement would startle the already fragile creature. Kneeling down gently, we found a deep, jagged gash on its wing, the edges of which were still oozing dark red blood. “It's likely caused by a hunter's trap,” our guide, Uncle Wang, whispered, his face grave. “Poachers often set wire traps here to catch wild birds and animals.” We immediately took out the first-aid kit we carried with us, disinfected the wound with iodophor, and gently wrapped it with sterile gauze, taking extra care not to exert too much pressure. Then, two strong team members fashioned a simple stretcher with bamboo poles and canvas, carefully lifting the crane onto it and carrying it to our temporary campsite. Back at the campsite, we cleared a dry, shaded area and built a small enclosure with thick branches and dry leaves, laying a layer of soft moss at the bottom to make it comfortable for the crane. In the days that followed, we established a rotation system to take care of it—someone was always responsible for fetching fresh fish from the stream (we made sure to only catch small, abundant species to avoid disrupting the local ecosystem), changing its dressing, and cleaning the enclosure. At first, the crane was extremely wary of us. Whenever we approached, it would flail its good wing frantically, let out hoarse, threatening cries, and try to huddle in the corner of the enclosure. Even when we placed fish and clean water in front of it, it would refuse to eat, as if fearing the food was poisoned. We didn't push it; instead, we stayed a few meters away, talking to it in soft, gentle voices, letting it gradually get used to our presence.  Slowly but surely, the crane's wariness faded. After three days, it would tentatively peck at the fish when we placed them down, and when we approached to change its dressing, it no longer flailed its wings, but instead tilted its head slightly, as if understanding that we were trying to help it. One morning, I was changing its gauze when it suddenly rubbed its head gently against my hand—its feathers were soft and warm, and that small gesture made my heart fill with warmth, as if all our efforts had been worthwhile. While taking care of the crane, we didn't stop our exploration work. We divided into small groups, investigating different areas of the valley and recording every detail meticulously. We photographed rare alpine azaleas that bloomed on steep cliffs, their petals ranging from bright pink to deep purple; we noted the tracks of sambar deer and red pandas in the mud by the stream, and even heard the faint call of a golden monkey deep in the forest. However, we also witnessed disturbing scenes: large areas of forest had been cut down, leaving only stumps and scattered branches; we found several abandoned wire traps and empty bullet casings, evidence of illegal poaching. Every time we saw these, our hearts grew heavy—this beautiful valley, with its rich biodiversity, was under severe threat. One evening, the weather suddenly took a turn for the worse. Dark clouds gathered over the valley, and strong winds began to howl, bending the treetops. Before we could fully secure our tents, a heavy rain poured down, the raindrops as big as beans, beating against the tent canvas with a loud “thud-thud” sound. Within minutes, the ground turned into a muddy mess, and water began to accumulate in low-lying areas of the campsite—including the crane's enclosure. We didn't hesitate for a second; several of us grabbed raincoats and rushed to the enclosure. The crane was huddled in the corner, trembling with fear, its feathers soaked through. We quickly dismantled the enclosure, carefully lifted the crane, and carried it to a higher, drier area near our tents. We propped up a large tarpaulin to shield it from the rain, and several of us huddled around it, using our own bodies to block the wind. The crane leaned closely against us, its soft feathers brushing our hands, and it no longer made any cries—just stayed quietly by our side, as if it knew we were protecting it. The rain lasted for nearly two hours. When it finally stopped, the sky cleared up, and a beautiful rainbow arched over the valley, its seven colors shining brightly against the blue sky. At that moment, the crane suddenly let out a clear, loud cry—its first loud cry since we found it. The cry echoed through the mountains, crisp and resonant. We all cheered, hugging each other with excitement; we knew that this cry was a sign of its recovery, a testament to its growing strength. Two weeks later, the crane's wound had healed significantly—the gash had scabbed over, and it could flap its left wing slightly without showing signs of pain. We decided to test its flying ability, leading it to an open meadow covered in lush wild clover. At first, it took a few tentative steps, flapping both wings gently to get used to the feeling. Then, with a sudden burst of strength, it spread its wings wide and soared a few meters above the ground, hovering for a moment before landing steadily. We clapped and cheered loudly; tears of joy filled my eyes as I watched it—this little creature, which had been on the verge of death, was now able to fly again. Another week passed, and the crane's flying skills became more proficient. On a bright, windless morning, we decided it was time to let it return to the wild. We took it to a high slope on the edge of the valley, where a flock of red-crowned cranes was circling in the sky, their clear cries echoing back and forth. As soon as our little crane heard the calls, it lifted its head, let out a loud response, then spread its wings and soared into the air. It circled above us three times—slowly, as if saying goodbye—then flew toward the flock, joining them seamlessly. We stood there, watching them fly toward the distant mountains until they disappeared from sight, our hearts filled with both sadness and pride. As we packed up our campsite to leave, we all felt a deep sense of fulfillment. We had not only rescued an injured red-crowned crane but also completed a comprehensive survey of the valley's ecosystem, recording dozens of rare plant and animal species and documenting the threats posed by illegal logging and poaching. After returning, we sorted out all the data and photos, submitting a detailed report to the local environmental protection bureau. To our delight, the bureau attached great importance to our report, launching a protection program for the valley within a month. They set up a nature reserve, stationed rangers to patrol regularly, and carried out publicity campaigns to raise local residents' awareness of ecological protection, effectively curbing illegal logging and poaching. Please continue the novel based on the above plot with no less than 1200 words."}],
+            "stream": True
+        },
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,#prompt length:450
+            "messages": [{"role": "user", "content": "In the old town's central street, there's a small repair shop run by Uncle Chen, who fixes everything from broken watches to faded umbrellas. The shop is no bigger than ten square meters, with shelves lined with all kinds of small parts—tiny screws, clock gears, and colorful threads. A vintage radio sits on the counter, playing soft folk songs that match the slow pace of the old town. I often go there to fix my old bicycle or get my watch adjusted, and every time, Uncle Chen greets me with a gentle smile, his hands always stained with oil but his eyes clear and warm. Last month, my favorite childhood watch stopped working—it was a gift from my grandfather, with a worn leather strap and a dial that had faded over the years. I was worried Uncle Chen couldn't fix it, but he took it carefully, turning it over in his hands and examining every part with a magnifying glass. He told me the mainspring was broken, a common problem for old watches, and that he had a matching part in his collection. For three days, he worked on it after closing time, carefully replacing the spring and adjusting the gears, his movements slow but precise. When I went to pick it up, the watch ticked steadily, and the dial, which had been dull, was polished to a soft shine. I tried to pay him more, but he shook his head, saying the watch carried precious memories and that fixing it was a pleasure. Uncle Chen never rushes his work, no matter how busy he is. Once, a mother brought in a broken music box that her daughter had cherished since childhood. The box's mechanism was stuck, and many repair shops had turned her down. Uncle Chen spent a whole week taking it apart, cleaning each tiny part, and fixing the stuck gears. When the music box played its soft tune again, the little girl clapped her hands in joy, and Uncle Chen's face lit up like a child's. He also knows everyone in the old town by name, remembering their little habits—Mr. Li likes his clocks to be five minutes fast, Aunt Wang's umbrella needs extra strong ribs, and the kids always come to him for lollipops hidden in a jar under the counter. The shop is more than a repair place; it's a gathering spot for the townsfolk. On slow afternoons, neighbors drop by to chat, share stories, or just sit and listen to the radio. Uncle Chen never minds, offering them a cup of hot tea and joining in the conversations, his laughter mixing with the ticking of clocks and the rustle of wind outside. As the old town slowly changes, with new shops opening and old ones closing, Uncle Chen's repair shop remains unchanged, a small haven of warmth and nostalgia. It reminds me that in a world that's always rushing forward, there are still people who take their time, cherishing every small thing and treating every job with care. Fixing broken things isn't just about repairing objects—it's about mending memories, preserving the little joys that make life warm and meaningful. Every time I walk past the shop, hearing the ticking of clocks and the soft folk songs, I feel a sense of peace, knowing that some things will always stay the same, holding the best parts of the old town's stories. Please continue the novel based on the above plot with no less than 1200 words."}],
+            "stream": True
+        },
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,#prompt length:164
+            "messages": [{"role": "user", "content": "The first snow of winter fell quietly last night, covering the world in a soft white blanket. I stepped outside early in the morning, and the air was cold and fresh, carrying the faint scent of pine. The rooftops, trees, and paths were all covered in thick snow, untouched except for a few bird footprints that wound like tiny lines across the yard. A group of sparrows hopped on the snow, pecking at the seeds I'd scattered the day before, their feathers fluffed up against the cold. I walked to the small lake nearby; its surface was frozen over, glistening like a piece of clear jade in the sunlight. The branches of the willows hung heavy with snow, bending slightly as the wind blew, sending tiny snowflakes dancing through the air. This quiet, snowy morning felt like a gentle hug, calming all the restlessness in my heart and making every ordinary moment feel magical. Please continue the novel based on the above plot with no less than 1200 words."}],
+            "stream": True
+        },
+        {
+            "model": "qwen",
+            "temperature": 0,
+            "max_tokens": 20,#prompt length:267
+            "messages": [{"role": "user", "content": "When the autumn harvest ended, the village was bathed in golden sunlight, with piles of corn cobs stacked against the walls and dried chilis hanging from the eaves, adding a bright red touch to the golden scene. Aunt Liu, who lives next door, invited our family to help her dig sweet potatoes in her field—her husband was away working, and she couldn't finish the work alone. We arrived early, carrying baskets and small shovels, and the field was full of green sweet potato vines, sprawling across the soil. My father taught me to dig gently along the vines, careful not to damage the sweet potatoes hidden underground. As we dug, the sweet potatoes rolled out one by one, round and plump, covered in wet soil that smelled of earth. Aunt Liu chatted as she worked, telling us how she'd planted the seedlings in spring, watering them every day and pulling weeds carefully. By noon, we'd filled several baskets, and Aunt Liu insisted on cooking a meal for us. She steamed some sweet potatoes, fried crispy potato slices, and made a bowl of warm sweet potato porridge, which tasted sweet and fragrant. After lunch, the neighbors came by one after another, some bringing fresh vegetables, some carrying a bag of rice, to thank Aunt Liu for her help during their harvest. She laughed and invited everyone to take some sweet potatoes home, saying the harvest was meant to be shared. As the sun set, we walked home with a bag of sweet potatoes, the sky turning a soft orange. This small act of help and sharing made the autumn feel warmer, reminding me that in the village, neighbors are like family, and every harvest brings not just food, but the warmth of mutual care that binds everyone together. Please continue the novel based on the above plot with no less than 1200 words."}],
+            "stream": True
+        }
+    ]
+
+    start_time = time.time()
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers = len(data)) as executor:
+        future_to_data = {}
+        for post_data in data:
+            headers = {
+                "Content-Type": "application/json",
+                "X-Request-Id": f"{''.join(random.choices('123456789', k=5))}",
+            }
+            future = executor.submit(fetch_post, url, headers, post_data)
+            future_to_data[future] = post_data
+            time.sleep(0.01)
+
+    for future in concurrent.futures.as_completed(future_to_data):
+        result = future.result()
+        results.append(result)
+        try:
+            print(f"Status: {result['status']}, Preview: {result['text']}")
+            assert result['status'] == 200
+        except Exception as e:
+            teardown_proxy_balance(ngx_pid)
+    end_time = time.time()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+    log_file = f"{CUR_DIR}/nginx_access_balance.log"
+    num_logs = len(data)
+    print("\n=== verifying load balance ===")
+    try:
+        analyze_balance_basic_aggregation(log_file, num_logs)
+    except Exception as e:
+        teardown_proxy_balance(ngx_pid)
+        print(f"\n=== verifying fail: {e} ===")
+        raise
+    print("\n=== verifying pass ===")
+    teardown_proxy_balance(ngx_pid)
+
+def analyze_balance_basic_aggregation(log_file, num_logs):
+    if not os.path.exists(log_file):
+        raise FileNotFoundError(f"log {log_file} does not exist")
+
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            logs = [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        raise RuntimeError(f"failed to read log: {e}")
+
+    if not logs:
+        raise ValueError("empty log")
+
+    parsed_logs = []
+    for line in logs:
+        try:
+            data_log = parse_log_line(line)
+            if not data_log:
+                continue
+            parsed_logs.append({
+                'prefill_idx': int(data_log['prefill_idx']),
+                'decode_idx': int(data_log['decode_idx']),
+                'promt_tks': int(data_log['promt_tks']),
+                'decoded_tks': int(data_log['decoded_tks']),
+                'wait_p': float(data_log['wait_p']),
+            })
+        except KeyError as e:
+            print(f"lack of description: {e} (origin log: {line[:100]}...)")
+
+    if not parsed_logs:
+        raise ValueError("could not find log")
+
+    recent_logs = parsed_logs[-num_logs:]
+    prefill_counts = 0
+    decode_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    prompt_decode_min_idx = 3
+    for req in recent_logs:
+        if req['promt_tks'] == 164:
+            prompt_decode_min_idx = req['decode_idx']
+        if req['wait_p'] < 0:
+            prefill_counts += 1
+        decode_counts[req['decode_idx']] += 1
+    assert prefill_counts == 5
+    assert decode_counts[prompt_decode_min_idx] == 2
 
 def test_chat_completions_with_proxy_earliest(setup_teardown):
     proxy_port = find_free_port()
