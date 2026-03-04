@@ -55,6 +55,8 @@ class Placement {
     Distribution *dist_ptr_ = nullptr;
     std::vector<bool> is_layer_update;
     bool enable_dynamic_ = false;
+    bool enable_new_context_ = false;
+    aclrtContext createdContext_ = nullptr;
 
   public:
     Placement()
@@ -88,7 +90,7 @@ class Placement {
                                std::vector<int64_t> placement_shape,
                                int placement_dtype);
     void check_shm_weights();
-    void placement_manager(aclrtContext currentContext);
+    void placement_manager(int32_t deviceId, aclrtContext currentContext);
     void replace_redundant_experts(int layer_id);
 
     // Thread control related operations
@@ -129,7 +131,9 @@ class Placement {
         return std::unique_lock<std::mutex>(mtx_);
     }
     Distribution *get_distribution() const { return dist_ptr_; }
-    void init_recv_buf() { dist_ptr_->allocate_recv_buffs(moe_weight_->get_expert_size()); }
+    void init_recv_buf() {
+        dist_ptr_->allocate_recv_buffs(moe_weight_->get_expert_size());
+    }
     void placement_handle_instrucions(
         std::vector<ChangeInstruction> changeInstructions_this_rank);
     void placement_handle_one_batch(

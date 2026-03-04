@@ -201,12 +201,17 @@ def apply_omni_placement_attributes(additional_config: dict, yaml_file_path: str
     
         if additional_config["enable_omni_placement"]:
             config_dict = additional_config.get("omni_placement_config", {})
-            
+            # special handling for "pattern_path" key
             if "pattern_path" in config_dict:
                 pattern_path = config_dict["pattern_path"]
                 if pattern_path is None or (isinstance(pattern_path, str) and pattern_path.strip().lower() == "null") or pattern_path == "":
                     config_dict["pattern_path"] = None
-
+            # set environment variable for "enable_new_context"
+            enable_new_context = config_dict.get("enable_new_context", False)
+            os.environ['EPLB_USE_NEW_CONTEXT'] = "1" if enable_new_context else "0"
+            print(f"Set environment variable EPLB_USE_NEW_CONTEXT to {os.environ['EPLB_USE_NEW_CONTEXT']}")
+            config_dict.pop("enable_new_context", None)
+            # update existing data with new config
             for key, value in config_dict.items():
                 existing_data[key] = value
 

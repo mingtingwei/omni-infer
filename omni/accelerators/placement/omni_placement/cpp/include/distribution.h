@@ -110,12 +110,15 @@ class Distribution {
     size_t hccl_batch_idx_;
     size_t expert_weight_num_ = 0;
     size_t num_deploy_experts_per_rank_;
+    std::string root_info_;
+    HcclCommInitType hccl_init_type_;
 
   public:
     Distribution(size_t rank, const char *rankTableFile);
     Distribution(size_t num_deploy_experts_per_rank, size_t rank,
                  size_t world_size, const char *infoStr, HcclCommInitType type);
     ~Distribution();
+    void init_hccl_comm();
     void allgather(void *src_addr, void *recv_addr, size_t length,
                    std::string dtype);
     void printCommInfo();
@@ -155,5 +158,6 @@ class Distribution {
     uint32_t get_buff_cur() { return recv_buff_cur_; }
     size_t queue_size() { return queue_size_; }
     void resume();
+    aclrtStream get_stream() { return stream_; }
 };
 #endif // ACL_CHECK_H

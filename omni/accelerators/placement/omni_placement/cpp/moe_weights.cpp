@@ -108,7 +108,6 @@ MoEWeights::MoEWeights(size_t num_experts, size_t rank, size_t world_size,
     dist_ptr_ =
         new Distribution(num_experts / world_size, rank_, world_size_,
                          rankTableFile, HcclCommInitType::RankTableFile);
-    dist_ptr_->printCommInfo();
     shm_ptr_ = nullptr;
     count_ptr_ = nullptr;
     num_deploy_experts_per_rank_ = num_experts_ / world_size_;
@@ -120,7 +119,6 @@ MoEWeights::MoEWeights(size_t num_experts, size_t rank, size_t world_size,
                        Distribution *dist_ptr)
     : rank_(rank), world_size_(world_size), num_experts_(num_experts),
       dist_ptr_(dist_ptr) {
-    dist_ptr_->printCommInfo();
     shm_ptr_ = nullptr;
     count_ptr_ = nullptr;
     shm_unlink(shm_name_.c_str());

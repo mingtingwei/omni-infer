@@ -2,6 +2,11 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 #include "distribution.h"
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 const std::map<std::string, HcclDataType> NAME2DATATYPE = {
@@ -21,37 +26,13 @@ Distribution::Distribution(size_t rank, const char *rankTableFile) {
 Distribution::Distribution(size_t num_deploy_experts_per_rank, size_t rank,
                            size_t world_size, const char *infoStr,
                            HcclCommInitType type) {
-    // 构建 HCCL 通信域
-    if (type == HcclCommInitType::RootInfoString) {
-        HcclRootInfo rootInfo;
-        memcpy(rootInfo.internal, infoStr, HCCL_ROOT_INFO_BYTES);
-        HcclCommConfig config;
-        HcclCommConfigInit(&config);
-        config.hcclBufferSize = 100;
-        config.hcclOpExpansionMode = 1;
-        HCCLCHECK(HcclCommInitRootInfoConfig(world_size, &rootInfo, rank,
-                                             &config, &hcclComm_));
-    } else {
-        HCCLCHECK(HcclCommInitClusterInfo(infoStr, rank, &hcclComm_));
-    }
-    HCCLCHECK(HcclGetRankId(hcclComm_, &rank_));
-    HCCLCHECK(HcclGetRankSize(hcclComm_, &world_size_));
-    if (world_size != world_size_) {
-        std::cout << "[DynamicEplb-Error], The world size from rank tables "
-                     "does not correspond with input parameters"
-                  << std::endl;
-        exit(0);
-    }
 
-    if (world_size == 0) {
-        std::cout << "[DynamicEplb-Error], Invalid world_size_, which is 0"
-                  << std::endl;
-        exit(0);
-    }
-
-    warmup();
-
+    root_info_ = std::string(infoStr, HCCL_ROOT_INFO_BYTES);
+    hccl_init_type_ = type;
+    rank_ = rank;
+    world_size_ = world_size;
     void *data_ptr;
+
     host_round_status_.resize(world_size_ * round_info_length_, 0);
 
     ACLCHECK(aclrtMalloc(&data_ptr,
@@ -74,6 +55,49 @@ Distribution::Distribution(size_t num_deploy_experts_per_rank, size_t rank,
     for (int i = 0; i < queue_size_; ++i) {
         completed_sync_queue_[i] = new TransDesc;
     }
+}
+
+void Distribution::init_hccl_comm() {
+    // 构建 HCCL 通信域
+    if (hccl_init_type_ == HcclCommInitType::RootInfoString) {
+        HcclRootInfo rootInfo;
+        memcpy(rootInfo.internal, root_info_.c_str(), HCCL_ROOT_INFO_BYTES);
+
+        HcclCommConfig config;
+        HcclCommConfigInit(&config);
+        config.hcclBufferSize = 100;
+        config.hcclOpExpansionMode = 1;
+        HCCLCHECK(HcclCommInitRootInfoConfig(world_size_, &rootInfo, rank_,
+                                             &config, &hcclComm_));
+    } else {
+        HCCLCHECK(
+            HcclCommInitClusterInfo(root_info_.c_str(), rank_, &hcclComm_));
+    }
+
+    uint32_t rank;
+    uint32_t world_size;
+    HCCLCHECK(HcclGetRankId(hcclComm_, &rank));
+    HCCLCHECK(HcclGetRankSize(hcclComm_, &world_size));
+    if (world_size != world_size_) {
+        std::cout << "[DynamicEplb-Error], The world size from rank tables "
+                     "does not correspond with input parameters"
+                  << std::endl;
+        exit(0);
+    }
+    if (rank != rank_) {
+        std::cout << "[DynamicEplb-Error], The rank from rank tables "
+                     "does not correspond with input parameters"
+                  << std::endl;
+        exit(0);
+    }
+
+    if (world_size == 0) {
+        std::cout << "[DynamicEplb-Error], Invalid world_size_, which is 0"
+                  << std::endl;
+        exit(0);
+    }
+
+    warmup();
 }
 
 Distribution::~Distribution() {
@@ -301,6 +325,4 @@ void Distribution::printCommInfo() {
     std::cout << "  Size: " << size << std::endl;
 }
 
-void Distribution::resume() {
-    HCCLCHECK(HcclCommResume(hcclComm_));
-}
+void Distribution::resume() { HCCLCHECK(HcclCommResume(hcclComm_)); }

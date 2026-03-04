@@ -16,6 +16,7 @@
 #include <pybind11/stl.h>
 #include <stdexcept>
 #include <string>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -51,6 +52,15 @@ std::string getTimestamp() {
         << "] "; // 微秒版
 
     return oss.str(); // 返回 "HH:MM:SS:ms" 或 "HH:MM:SS:us"
+}
+
+bool is_use_new_context() {
+    const char *use_new_context = std::getenv("EPLB_USE_NEW_CONTEXT");
+    if (use_new_context != nullptr) {
+        std::string val(use_new_context);
+        return val == "1" || val == "true" || val == "TRUE";
+    }
+    return false;
 }
 
 struct TimeTracker {
@@ -113,6 +123,8 @@ Placement::Placement(int rank, int world_size, int hccl_comm_world_size,
       num_devices_per_host_(num_devices_per_host), activations_(activations),
       mapping_(placement_mapping), enable_dynamic_(enable_dynamic) {
 
+    enable_new_context_ = is_use_new_context();
+
     // Initialize components immediately
     initialize_components(root_info);
     activations_->set_params(num_experts_);
@@ -162,6 +174,8 @@ Placement::Placement(int rank, int world_size, int num_devices_per_host,
                      std::vector<int64_t> placement_shape, int placement_dtype)
     : rank_(rank), world_size_(world_size),
       num_devices_per_host_(num_devices_per_host), activations_(activations) {
+
+    enable_new_context_ = is_use_new_context();
 
     // Initialize components immediately
     initialize_components(expert_mapping_ptr, shape, dtype,
@@ -215,6 +229,10 @@ Placement::~Placement() {
     delete optimizer_;
     // delete activations_;
     delete dist_ptr_;
+    if (createdContext_ != nullptr) {
+        aclrtDestroyContext(createdContext_);
+        createdContext_ = nullptr;
+    }
 }
 
 // 等待合适的时机等待专家权重替换
@@ -514,14 +532,27 @@ void Placement::placement_handle_instrucions(
     }
 }
 
-void Placement::placement_manager(aclrtContext currentContext) {
-    ACLCHECK(aclrtSetCurrentContext(currentContext));
+void Placement::placement_manager(int32_t deviceId,
+                                  aclrtContext currentContext) {
+
+    if (enable_new_context_) {
+        ACLCHECK(aclrtSetDevice(deviceId));
+        ACLCHECK(aclrtCreateContext(&createdContext_, deviceId));
+        ACLCHECK(aclrtSetCurrentContext(createdContext_));
+
+        std::cout << "[EPLB-Debug] New Context Created: " << createdContext_
+                  << " on Device " << deviceId << std::endl;
+    } else {
+        ACLCHECK(aclrtSetCurrentContext(currentContext));
+    }
+
     aclrtStream stream;
     ACLCHECK(aclrtCreateStream(&stream));
 
     // 设置Stream
     MoEWeights *moe_weights = get_moe_weights();
     Distribution *dist_ptr = get_distribution();
+    dist_ptr->init_hccl_comm();
     dist_ptr->set_stream(stream);
 
     if (enable_dynamic_ && !is_redundant_share_expert_rank()) {
@@ -553,7 +584,8 @@ void Placement::placement_manager(aclrtContext currentContext) {
             activations_->dump_and_collect(dist_ptr, stream, dump_count);
 
             if (!enable_dynamic_) {
-                std::this_thread::sleep_for(std::chrono::seconds(collect_times));
+                std::this_thread::sleep_for(
+                    std::chrono::seconds(collect_times));
                 continue;
             }
 
@@ -566,8 +598,8 @@ void Placement::placement_manager(aclrtContext currentContext) {
             changeInstructions = optimizer_->optimize();
 
             std::cout << "[handle ins] placement worker before handle "
-                        "instructions. total cnt: "
-                    << changeInstructions.size() << "\n";
+                         "instructions. total cnt: "
+                      << changeInstructions.size() << "\n";
             if (changeInstructions.size() > 0) {
                 TRACK_START();
                 if (check_instructions(changeInstructions))
@@ -577,11 +609,12 @@ void Placement::placement_manager(aclrtContext currentContext) {
                             " instructions.");
             }
 
-            activations_->collect(dist_ptr,
-                                stream); // Clear the old placement activations
-        }
-        catch (const std::exception& e) {
-            std::cout << "update placement activations failed: " << e.what() << "\n";
+            activations_->collect(
+                dist_ptr,
+                stream); // Clear the old placement activations
+        } catch (const std::exception &e) {
+            std::cout << "update placement activations failed: " << e.what()
+                      << "\n";
         }
         std::this_thread::sleep_for(std::chrono::seconds(collect_times));
     }
@@ -594,10 +627,16 @@ void Placement::placement_manager(aclrtContext currentContext) {
 void Placement::start_thread() {
     if (!worker_thread_.joinable()) {
         should_stop_ = false;
+        int32_t deviceId;
+        ACLCHECK(aclrtGetDevice(&deviceId));
         aclrtContext currentContext;
         ACLCHECK(aclrtGetCurrentContext(&currentContext));
-        worker_thread_ =
-            std::thread(&Placement::placement_manager, this, currentContext);
+        worker_thread_ = std::thread(&Placement::placement_manager, this,
+                                     deviceId, currentContext);
+        std::cout << getTimestamp()
+                  << "[Info-EPLB-DEBUG] EPLB Worker thread created. "
+                  << "Device ID: " << deviceId
+                  << ", Thread ID: " << worker_thread_.get_id() << std::endl;
     }
 }
 
@@ -615,9 +654,7 @@ void Placement::stop_thread() {
     }
 }
 
-void Placement::placement_pause() {
-    should_pause_ = true;
-}
+void Placement::placement_pause() { should_pause_ = true; }
 
 void Placement::placement_resume() {
     if (dist_ptr_) {
