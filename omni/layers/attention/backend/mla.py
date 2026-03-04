@@ -38,6 +38,7 @@ from omni.layers.attention.backend.utils import create_aligend_tensor
 from omni.accelerators.cache import OmniAttentionSpec, compute_omni_attn_metadata
 from omni.accelerators.cache.omni_cache import BaseOmniCache, PrefixCopyMeta
 from omni.adaptors.vllm.utils import get_attr_by_names
+from omni.adaptors.vllm.distributed.parallel_state import get_mla_cp_group
 from vllm.logger import logger
 import os, time, numpy as np, torch
 
@@ -214,6 +215,7 @@ class AscendMLADecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
     mc2_mask: Optional[torch.Tensor] = None
+    sp_mc2_mask: Optional[torch.Tensor] = None
     cos: Optional[torch.Tensor] = None
     sin: Optional[torch.Tensor] = None
     best_topk: Optional[torch.Tensor] = None
@@ -302,6 +304,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         self.decode_gear_list = model_extra_config.task_config.decode_gear_list
         if self.decode_gear_list:
             self.mc2_mask = torch.zeros(self.decode_gear_list[-1], dtype=torch.bool, device=current_platform.device_type)
+        self.sp_mc2_mask = None
         self.already_mark_static = False
 
         self.decode_num_tokens = torch.zeros(
@@ -319,6 +322,25 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         else:
             self.mc2_mask.zero_()
         self.mc2_mask[:actual_seqs_num].fill_(True)
+
+        if model_extra_config.operator_opt_config.use_dcp:
+            sp_size = get_mla_cp_group().world_size
+            sp_rank = get_mla_cp_group().rank_in_group
+
+            current_len = self.mc2_mask.size(0)
+            padded_len = ((current_len + sp_size - 1) // sp_size) * sp_size
+            
+            if current_len < padded_len:
+                pad_len = padded_len - current_len
+                padded_mask = torch.nn.functional.pad(self.mc2_mask, (0, pad_len), value=False)
+            else:
+                padded_mask = self.mc2_mask
+
+            # Chunk and select the portion for current rank
+            chunk_size = padded_mask.size(0) // sp_size
+            start = sp_rank * chunk_size
+            end = start + chunk_size
+            self.sp_mc2_mask = padded_mask[start:end].contiguous()
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -865,7 +887,13 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     cos, sin = self.runner.model.model.layers[first_layer_ind].self_attn.rotary_emb.get_cos_sin(input_positions)
                 best_topk = None
                 if model_extra_config.operator_opt_config.best_ep:
-                    best_topk = self.cal_best_topk(num_actual_tokens + graph_pad_size)
+                    if model_extra_config.operator_opt_config.use_dcp:
+                        sp_size = get_mla_cp_group().world_size
+                        current_len = num_actual_tokens + graph_pad_size
+                        chunk_len = (current_len + sp_size - 1) // sp_size
+                        best_topk = self.cal_best_topk(chunk_len)
+                    else:
+                        best_topk = self.cal_best_topk(num_actual_tokens + graph_pad_size)
             else:
                 raise NotImplementedError("Chunked prefill mode is not supported currently.")
 
@@ -874,6 +902,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                 block_table=block_table,
                 seq_lens=seq_lens,
                 mc2_mask=self.mc2_mask,
+                sp_mc2_mask=self.sp_mc2_mask,
                 cos=cos,
                 sin=sin,
                 best_topk=best_topk,
@@ -1016,6 +1045,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     block_table=omni_block_table,
                     seq_lens=omni_seq_lens,
                     mc2_mask=self.mc2_mask,
+                    sp_mc2_mask=self.sp_mc2_mask,
                     cos=cos.clone(),
                     sin=sin.clone(),
                     best_topk=best_topk)
@@ -1076,6 +1106,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     block_table=block_table,
                     seq_lens=seq_lens,
                     mc2_mask=self.mc2_mask,
+                    sp_mc2_mask=self.sp_mc2_mask,
                     cos=cos.clone(),
                     sin=sin.clone(),
                     best_topk=best_topk)
@@ -1129,12 +1160,18 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
         best_topk = None
         self.generate_activate_mask(0, max_pad_size)
         if model_extra_config.operator_opt_config.best_ep:
-            best_topk = self.cal_best_topk(max_pad_size)
+            if model_extra_config.operator_opt_config.use_dcp:
+                sp_size = get_mla_cp_group().world_size
+                chunk_len = (max_pad_size + sp_size - 1) // sp_size
+                best_topk = self.cal_best_topk(chunk_len)
+            else:
+                best_topk = self.cal_best_topk(max_pad_size)
         decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
                 block_table=block_table,
                 seq_lens=seq_lens,
                 mc2_mask=self.mc2_mask,
+                sp_mc2_mask=self.sp_mc2_mask,
                 cos=cos,
                 sin=sin,
                 best_topk=best_topk,

@@ -62,6 +62,7 @@ from omni.adaptors.vllm.distributed.parallel_state import (
     get_round_cross_group_from_list,
     get_mlp_tp_group,
     get_local_world_group,
+    get_mla_cp_group,
     GroupCoordinator
 )
 from omni.layers.moe.fused_moe.layer import FusedMoE
@@ -72,6 +73,7 @@ from omni.adaptors.vllm.sched.routed_experts_capturer import RoutedExpertsCaptur
 
 """NPU Stream Switch Names"""
 STREAM_SHARED_EXPERT = 'stream_shared_expert'
+MOE_SP = 'moe_sp'
 SEQ_SPLIT_LENGTH = 4096
 
 
@@ -589,6 +591,11 @@ class DeepseekMoE(nn.Module):
         if model_extra_config.operator_opt_config.moe_multi_stream_tune and \
             model_extra_config.operator_opt_config.decode_moe_dispatch_combine:
             return self._forward_decode_dispatch_combine(hidden_states, residual, attn_metadata, layer_id, next_attention_weights)
+        
+        if model_extra_config.operator_opt_config.use_dcp:
+            num_tokens, _ = hidden_states.shape
+            hidden_states = self.sequence_parallel_chunk(hidden_states)
+
         if model_extra_config.operator_opt_config.moe_multi_stream_tune:
             with tng.scope.npu_stream_switch('21'):
                 hidden_states = tng.scope.npu_wait_tensor(hidden_states, hidden_states)
@@ -676,11 +683,20 @@ class DeepseekMoE(nn.Module):
         else:
             final_hidden_states = final_hidden_states + shared_output
 
+        if model_extra_config.operator_opt_config.use_dcp:
+            final_hidden_states = get_mla_cp_group().all_gather(final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens]
+
         return final_hidden_states, residual
 
     def _forward_decode_dispatch_combine(self, hidden_states: torch.Tensor, residual: torch.Tensor, attn_metadata: AttentionMetadata, layer_id: int, next_attention_weights: Optional[dict]=None) -> torch.Tensor:
         is_prefill = attn_metadata is None or (hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None) or \
                     (hasattr(attn_metadata, "is_pd_seperate_d") and not attn_metadata.is_pd_seperate_d)
+        
+        if model_extra_config.operator_opt_config.use_dcp:
+            num_tokens, _ = hidden_states.shape
+            hidden_states = self.sequence_parallel_chunk(hidden_states)
+
         hidden_states_float = hidden_states.float()
         router_logits, _ = self.gate.forward(hidden_states_float)
         # Here, we do a 2D to 3D conversion, and then convert back to 2D to trigger the fusion rule, fusing add rms and cast into AddRmsNormCast.
@@ -723,7 +739,10 @@ class DeepseekMoE(nn.Module):
                                                                 )
 
         best_topk = attn_metadata.decode.best_topk if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
-        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        if model_extra_config.operator_opt_config.use_dcp:
+            mc2_mask = attn_metadata.decode.sp_mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
+        else:
+            mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and hasattr(attn_metadata, "decode") else None
         topk_ids = self.experts.apply_expert_load_balance(topk_ids=topk_ids, best_topk_ids=best_topk)
         capture = RoutedExpertsCapturer.get_instance()
         if capture is not None:
@@ -908,6 +927,13 @@ class DeepseekMoE(nn.Module):
 
         if shared_output is not None:
             final_hidden_states = (hidden_states_route, shared_output)
+
+        if model_extra_config.operator_opt_config.use_dcp:
+            final_hidden_states = hidden_states_route + shared_output
+            with tng.scope.npu_stream_switch(MOE_SP):
+                final_hidden_states = get_mla_cp_group().all_gather(final_hidden_states, 0)
+            tng.scope.npu_wait_tensor(final_hidden_states, final_hidden_states)
+            final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states, residual
 
@@ -1099,6 +1125,23 @@ class DeepseekMoE(nn.Module):
                             topk_ids=topk_ids,
                             pertoken_scale=pertoken_scale,
                             attn_metadata=attn_metadata)
+
+    def sequence_parallel_chunk(self, x):
+        sp_size = get_mla_cp_group().world_size
+        sp_rank = get_mla_cp_group().rank_in_group
+
+        seq_len = x.size(0)
+        if seq_len % sp_size != 0:
+            padded_len = ((seq_len + sp_size - 1) // sp_size) * sp_size
+            pad_len = padded_len - seq_len
+            y = nn.functional.pad(x, (0, 0, 0, pad_len))
+        else:
+            y = x
+            padded_len = seq_len
+
+        chunk = padded_len // sp_size
+        start = sp_rank * chunk
+        return torch.narrow(y, 0, start, chunk)
     
     def forward_decode_a2(self, hidden_states: torch.Tensor, residual: torch.Tensor,
                        attn_metadata: AttentionMetadata, layer_id: int, kv_prefetch: torch.Tensor = None) -> torch.Tensor:
