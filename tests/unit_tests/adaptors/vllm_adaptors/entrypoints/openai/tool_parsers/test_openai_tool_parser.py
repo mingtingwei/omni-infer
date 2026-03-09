@@ -126,6 +126,7 @@ class _FakeParser:
     def __init__(self, messages=None):
         self.messages = list(messages or [])
         self.process_calls = []
+        self.current_content = None
 
     def process(self, token_id: int):
         self.process_calls.append(token_id)

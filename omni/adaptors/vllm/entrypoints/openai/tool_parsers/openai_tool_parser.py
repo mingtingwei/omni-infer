@@ -102,6 +102,11 @@ class OpenAIToolParser(ToolParser):
                 elif msg.channel == "final":
                     final_content = msg_text
 
+        # Extract partial content from the parser state if the generation was truncated
+        if parser.current_content:
+            if parser.current_channel == "final":
+                final_content = parser.current_content
+
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
