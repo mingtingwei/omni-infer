@@ -1,0 +1,33 @@
+From 4a098b1ee87d54ae8fec8d940ce7637a181ee222 Mon Sep 17 00:00:00 2001
+From: chenyue1122 <oyoy7102@163.com>
+Date: Sat, 7 Mar 2026 21:34:20 +0800
+Subject: [PATCH] Fix reasoning content to content
+
+---
+ vllm/entrypoints/openai/serving_chat.py | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 1b6e213..867cb4e 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -1257,9 +1257,13 @@ class OpenAIServingChat(OpenAIServing):
+                         output.text, request=request))
+                 if not request.include_reasoning:
+                     reasoning_content = None
+-                if isinstance(tokenizer, DeepseekV32Tokenizer) and "</think>" not in output.text:
+-                    reasoning_content = None
+-                    content = output.text
++                if isinstance(tokenizer, DeepseekV32Tokenizer):
++                    try:
++                        if len(request.messages) >0 and request.messages[-1].get("role") not in ["user", "developer"] and "</think>" not in output.text:
++                            reasoning_content = ""
++                            content = output.text
++                    except Exception as e:
++                        logger.error("Error in file content and reasoning content: %s", str(e))
+             else:
+                 reasoning_content = None
+                 content = output.text
+-- 
+2.50.1.windows.1
+
