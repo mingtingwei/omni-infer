@@ -62,3 +62,4 @@ git apply --whitespace=nowarn $PATCH_ROOT/fix_prefill_profiling_bug.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_content_to_reasoning_content_for_nonstream.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_apc_mtp_conflict.patch
 git apply --whitespace=nowarn $PATCH_ROOT/fix_multimtp.patch
+git apply --whitespace=nowarn $PATCH_ROOT/fix_reasoning_content_to_content.patch
