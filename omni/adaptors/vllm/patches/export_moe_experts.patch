@@ -48,8 +48,8 @@ index 37d5e1746..a5569c508 100755
                              engine_prompt["prefilled_token_ids"] = request.kv_transfer_params["prefilled_token"]
 +                            engine_prompt["logprobs"] = request.kv_transfer_params["logprobs"]
                              engine_prompt["prefilled_texts"] = delta_text
-                             engine_prompt["max_tokens"] = min(request.max_tokens or self.max_model_len, self.max_model_len-len(engine_prompt["prompt_token_ids"]))
-                             request.kv_transfer_params["max_tokens"] = engine_prompt["max_tokens"]
+                 default_max_tokens = self.max_model_len - len(
+                     engine_prompt["prompt_token_ids"])
 @@ -1060,6 +1061,23 @@ class OpenAIServingChat(OpenAIServing):
                          created=created_time,
                          choices=[choice_data],
