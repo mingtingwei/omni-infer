@@ -60,6 +60,8 @@ static const char *PREFILL_URI = "/prefill_sub";
 static const size_t PREFILL_URI_LEN = sizeof("/prefill_sub") - 1;
 
 static ngx_int_t ngx_http_omni_proxy_health_status_handler(ngx_http_request_t *r);
+static ngx_int_t omni_proxy_broadcast_handler(ngx_http_request_t *r);
+static void omni_proxy_broadcast_body_handler(ngx_http_request_t *r);
 
 static char *ngx_conf_set_omni_stream_ops(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
@@ -551,6 +553,388 @@ static ngx_int_t omni_proxy_handler(ngx_http_request_t *r)
         return rc;
     }
 
+    return NGX_DONE;
+}
+
+static u_char *omni_json_escape(u_char *dst, const u_char *src, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        switch (src[i]) {
+            case '"':
+            case '\\':
+                *dst++ = '\\';
+                *dst++ = src[i];
+                break;
+            case '\n':
+                *dst++ = '\\';
+                *dst++ = 'n';
+                break;
+            case '\r':
+                *dst++ = '\\';
+                *dst++ = 'r';
+                break;
+            case '\t':
+                *dst++ = '\\';
+                *dst++ = 't';
+                break;
+            case '\b':
+                *dst++ = '\\';
+                *dst++ = 'b';
+                break;
+            case '\f':
+                *dst++ = '\\';
+                *dst++ = 'f';
+                break;
+            default:
+                *dst++ = src[i];
+                break;
+        }
+    }
+    return dst;
+}
+
+static void omni_proxy_broadcast_send_response(omni_broadcast_ctx_t *ctx)
+{
+    ngx_http_request_t *r = ctx->request;
+    size_t base_size = 1024;
+    size_t per_result_size = 256;
+    size_t out_cap = base_size + ctx->total * per_result_size;
+    out_cap = ngx_max(out_cap, 65536);
+
+    u_char *out = ngx_pnalloc(r->pool, out_cap);
+    if (out == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    u_char *p = out;
+    u_char *end = out + out_cap;
+    omni_broadcast_result_t *results = ctx->results ? ctx->results->elts : NULL;
+
+    ngx_uint_t safe_total = (results == NULL) ? 0 : ngx_min(ctx->total, ctx->results->nelts);
+
+    p = ngx_snprintf(p, end - p, "{\"uri\":\"");
+    p = omni_json_escape(p, r->uri.data, r->uri.len);
+    p = ngx_snprintf(p, end - p, "\",\"results\":[");
+    for (ngx_uint_t i = 0; i < safe_total; i++) {
+        if (i > 0) {
+            p = ngx_snprintf(p, end - p, ",");
+        }
+
+        size_t body_len = results[i].body.len;
+        size_t escaped_len = (body_len > 0) ? body_len * 4 : 0;
+        if ((size_t)(end - p) < escaped_len + 256) {
+            size_t needed = escaped_len + 256;
+            size_t offset = p - out;
+            out_cap += needed - (end - p);
+            u_char *new_out = ngx_pnalloc(r->pool, out_cap);
+            if (new_out == NULL) {
+                ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                return;
+            }
+            ngx_memcpy(new_out, out, offset);
+            p = new_out + offset;
+            out = new_out;
+            end = out + out_cap;
+        }
+        p = ngx_snprintf(p, end - p, "{\"type\":\"%V\",\"index\":%ui,\"address\":\"%V\",\"ok\":%s,\"status\":%ui,\"body\":\"",
+                         &results[i].type,
+                         results[i].index,
+                         &results[i].address,
+                         results[i].ok ? "true" : "false",
+                         results[i].status);
+        if (escaped_len > 0) {
+            p = omni_json_escape(p, results[i].body.data, body_len);
+        }
+        p = ngx_snprintf(p, end - p, "\"}");     
+    }
+
+    p = ngx_snprintf(p,
+                     end - p,
+                     "],\"summary\":{\"total\":%ui,\"success\":%ui,\"failed\":%ui}} \n",
+                     ctx->total,
+                     ctx->success,
+                     ctx->total - ctx->success);
+
+    if (p >= end) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.content_length_n = p - out;
+    ngx_str_set(&r->headers_out.content_type, "application/json");
+    r->headers_out.content_type_len = r->headers_out.content_type.len;
+
+    ngx_int_t hrc = ngx_http_send_header(r);
+    if (hrc == NGX_ERROR || hrc > NGX_OK || r->header_only) {
+        ngx_http_finalize_request(r, hrc);
+        return;
+    }
+
+    ngx_buf_t *b = ngx_calloc_buf(r->pool);
+    if (b == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    b->pos = out;
+    b->last = p;
+    b->memory = 1;
+    b->last_buf = 1;
+    b->last_in_chain = 1;
+
+    ngx_chain_t chain = {b, NULL};
+    ngx_int_t rc = ngx_http_output_filter(r, &chain);
+    ngx_http_finalize_request(r, rc == NGX_ERROR ? NGX_ERROR : NGX_OK);
+}
+
+static ngx_int_t omni_proxy_broadcast_post_subrequest(ngx_http_request_t *subr, void *data, ngx_int_t rc)
+{
+    omni_broadcast_subreq_ctx_t *sub_ctx = data;
+    omni_broadcast_ctx_t *ctx = sub_ctx->ctx;
+
+    omni_broadcast_result_t *results = ctx->results->elts;
+    omni_broadcast_result_t *result = &results[sub_ctx->array_index];
+
+    if (rc != NGX_OK) {
+        result->status = NGX_HTTP_BAD_GATEWAY;
+        result->ok = 0;
+        ngx_log_error(NGX_LOG_INFO, subr->connection->log, 0,
+                      "subrequest to %V failed, rc: %i", &result->address, rc);
+    } else {
+        result->status = subr->headers_out.status;
+        if (subr->headers_out.status >= NGX_HTTP_OK && subr->headers_out.status < NGX_HTTP_SPECIAL_RESPONSE) {
+            result->ok = 1;
+            ctx->success++;
+        } else {
+            result->ok = 0;
+            ngx_log_error(NGX_LOG_INFO, subr->connection->log, 0,
+                          "subrequest to %V returned status: %ui", &result->address, subr->headers_out.status);
+        }
+
+        size_t body_total = 0;
+        ngx_chain_t *cl;
+        for (cl = subr->out; cl; cl = cl->next) {
+            body_total += ngx_buf_size(cl->buf);
+        }
+
+        ngx_str_t *content_type = &subr->headers_out.content_type;
+        if (content_type != NULL && content_type->len > 0) {
+            result->content_type.data = ngx_pnalloc(ctx->request->pool, content_type->len + 1);
+            if (result->content_type.data != NULL) {
+                ngx_memcpy(result->content_type.data, content_type->data, content_type->len);
+                result->content_type.data[content_type->len] = '\0';
+                result->content_type.len = content_type->len;
+            }
+        }
+
+        if (body_total > 0) {
+            result->body.data = ngx_pnalloc(ctx->request->pool, body_total + 1);
+            if (result->body.data != NULL) {
+                u_char *p = result->body.data;
+                for (cl = subr->out; cl; cl = cl->next) {
+                    size_t buf_size = ngx_buf_size(cl->buf);
+                    if (buf_size > 0) {
+                        p = ngx_cpymem(p, cl->buf->pos, buf_size);
+                    }
+                }
+                *p = '\0';
+                result->body.len = body_total;
+            }
+        }
+    }
+
+    if (ngx_atomic_fetch_add(&ctx->pending, -1) == 1) {
+        omni_proxy_broadcast_send_response(ctx);
+    }
+    return NGX_OK;
+}
+
+static ngx_int_t omni_proxy_broadcast_schedule_subrequest(ngx_http_request_t *r,
+                                                          omni_broadcast_ctx_t *ctx,
+                                                          ngx_str_t *type,
+                                                          ngx_uint_t index,
+                                                          omni_upstream_address_t *addr)
+{
+    omni_broadcast_result_t *result = ngx_array_push(ctx->results);
+    if (result == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_memzero(result, sizeof(*result));
+    result->type = *type;
+    result->index = index;
+
+    result->address.data = ngx_pnalloc(r->pool, addr->text_len + 1);
+    if (result->address.data == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_memcpy(result->address.data, addr->text, addr->text_len);
+    result->address.data[addr->text_len] = '\0';
+    result->address.len = addr->text_len;
+
+    ngx_str_t sub_uri = ngx_string("/omni_proxy_broadcast_sub");
+    
+    size_t args_len = sizeof("target=") - 1 + addr->text_len;
+
+    u_char *args_buf = ngx_pnalloc(r->pool, args_len + 1);
+    if (args_buf == NULL) {
+        return NGX_ERROR;
+    }
+
+    u_char *ap = args_buf;
+    ap = ngx_cpymem(ap, "target=", sizeof("target=") - 1);
+    ap = ngx_cpymem(ap, addr->text, addr->text_len);
+    *ap = '\0';
+    
+    ngx_str_t args;
+    args.data = args_buf;
+    args.len = ap - args_buf;
+    
+    ngx_http_post_subrequest_t *psr = ngx_pcalloc(r->pool, sizeof(ngx_http_post_subrequest_t));
+    omni_broadcast_subreq_ctx_t *sub_ctx = ngx_pcalloc(r->pool, sizeof(omni_broadcast_subreq_ctx_t));
+    if (psr == NULL || sub_ctx == NULL) {
+        return NGX_ERROR;
+    }
+    
+    sub_ctx->ctx = ctx;
+    sub_ctx->array_index = ctx->results->nelts - 1;
+    psr->handler = omni_proxy_broadcast_post_subrequest;
+    psr->data = sub_ctx;
+    
+    ngx_http_request_t *sr;
+    ngx_int_t rc = ngx_http_subrequest(r, &sub_uri, &args, &sr, psr, NGX_HTTP_SUBREQUEST_IN_MEMORY);
+    if (rc != NGX_OK) {
+        result->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return NGX_ERROR;
+    }
+    
+    sr->method = r->method;
+    sr->method_name = r->method_name;
+    sr->request_body = r->request_body;
+    sr->headers_in.content_length_n = r->headers_in.content_length_n;
+    // sr->uri = r->uri;
+    sr->unparsed_uri = r->unparsed_uri;
+    sr->valid_unparsed_uri = r->valid_unparsed_uri;
+    
+    ngx_atomic_fetch_add(&ctx->pending, 1);
+    return NGX_OK;
+}
+
+static void omni_proxy_broadcast_body_handler(ngx_http_request_t *r)
+{
+    omni_global_state_t *gs = omni_get_global_state();
+    if (gs == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    omni_req_context_t *req_ctx = ngx_http_get_module_ctx(r, ngx_http_omni_proxy_module);
+    if (req_ctx == NULL || req_ctx->broadcast_ctx == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    omni_broadcast_ctx_t *ctx = req_ctx->broadcast_ctx;
+
+    ngx_str_t prefill = ngx_string("prefill");
+    ngx_str_t decode = ngx_string("decode");
+
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Broadcast handler called");
+
+    ngx_shmtx_lock(&gs->shmtx);
+
+    for (ngx_uint_t i = 0, active = 0; i < MAX_PREFILL_UPSTREAMS && active < gs->num_prefill_endpoints; i++) {
+        if (gs->prefill_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        active++;
+
+        ctx->total++;
+        if (omni_proxy_broadcast_schedule_subrequest(r, ctx, &prefill, i, &gs->prefill_states[i].comm.address) != NGX_OK) {
+            omni_broadcast_result_t *res = ngx_array_push(ctx->results);
+            if (res != NULL) {
+                ngx_memzero(res, sizeof(*res));
+                res->ok = 0;
+                res->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+
+    for (ngx_uint_t i = 0, active = 0; i < MAX_DECODE_UPSTREAMS && active < gs->num_decode_endpoints; i++) {
+        if (gs->decode_states[i].comm.status != STATUS_ENABLE) {
+            continue;
+        }
+        active++;
+
+        ctx->total++;
+        if (omni_proxy_broadcast_schedule_subrequest(r, ctx, &decode, i, &gs->decode_states[i].comm.address) != NGX_OK) {
+            omni_broadcast_result_t *res = ngx_array_push(ctx->results);
+            if (res != NULL) {
+                ngx_memzero(res, sizeof(*res));
+                res->ok = 0;
+                res->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+    ngx_shmtx_unlock(&gs->shmtx);
+    if (ctx->pending == 0) {
+        omni_proxy_broadcast_send_response(ctx);
+        return;
+    }
+
+    ngx_http_run_posted_requests(r->connection);
+}
+
+static ngx_int_t omni_proxy_broadcast_handler(ngx_http_request_t *r)
+{
+    if (r->method != NGX_HTTP_POST && r->method != NGX_HTTP_GET) {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    omni_req_context_t *req_ctx = ngx_http_get_module_ctx(r, ngx_http_omni_proxy_module);
+    if (req_ctx == NULL) {
+        req_ctx = ngx_pcalloc(r->pool, sizeof(omni_req_context_t));
+        if (req_ctx == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+        ngx_http_set_ctx(r, req_ctx, ngx_http_omni_proxy_module);
+    }
+
+    req_ctx->broadcast_ctx = ngx_pcalloc(r->pool, sizeof(omni_broadcast_ctx_t));
+    if (req_ctx->broadcast_ctx == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    omni_broadcast_ctx_t *ctx = req_ctx->broadcast_ctx;
+    ctx->request = r;
+    ctx->pending = 0;
+    ctx->total = 0;
+    ctx->success = 0;
+    omni_global_state_t *gs = omni_get_global_state();
+    if (gs == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_shmtx_lock(&gs->shmtx);
+
+    ngx_uint_t max_results = gs->num_prefill_endpoints + gs->num_decode_endpoints;
+
+    ngx_shmtx_unlock(&gs->shmtx);
+
+    ctx->results = ngx_array_create(r->pool, max_results, sizeof(omni_broadcast_result_t));
+    if (ctx->results == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_int_t rc = ngx_http_read_client_request_body(r, omni_proxy_broadcast_body_handler);
+    if (rc == NGX_AGAIN) {
+        return NGX_DONE;
+    }
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+        return rc;
+    }
     return NGX_DONE;
 }
 
@@ -2914,6 +3298,24 @@ static void omni_proxy_exit_process(ngx_cycle_t *cycle)
                   "Omni proxy process exited, tokenizer worker cleaned up");
 }
 
+static char *omni_proxy_broadcast_conf(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t *value = cf->args->elts;
+    if (cf->args->nelts != 2) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid number of arguments in \"%V\"", &cmd->name);
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_strcmp(value[1].data, "on") != 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "omni_proxy_broadcast_conf only supports \"on\"");
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_http_core_loc_conf_t *clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = omni_proxy_broadcast_handler;
+    return NGX_CONF_OK;
+}
+
 static char *omni_proxy_init_conf(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_core_loc_conf_t *clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
@@ -3251,6 +3653,13 @@ static ngx_command_t omni_proxy_commands[] = {
     {ngx_string("omni_proxy"),
      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
      omni_proxy_init_conf,
+     NGX_HTTP_LOC_CONF_OFFSET,
+     0,
+     NULL},
+
+    {ngx_string("omni_proxy_broadcast"),
+     NGX_HTTP_LOC_CONF | NGX_CONF_FLAG,
+     omni_proxy_broadcast_conf,
      NGX_HTTP_LOC_CONF_OFFSET,
      0,
      NULL},
