@@ -3,7 +3,7 @@ import torch
 import torch_npu
 
 def create_aligend_tensor(shape, dtype, device, pin_memory=False):
-    enable_2mb_alignment = os.getenv("ENABLE_KV_CACHE_TENSOR_2MB_ALIGNMENT", "0") == "1"
+    enable_2mb_alignment = os.getenv("VLLM_ENABLE_KV_CACHE_TENSOR_2MB_ALIGNMENT", "0") == "1"
 
     if not enable_2mb_alignment:
         return torch.zeros(shape, dtype=dtype, pin_memory=pin_memory, device=device)
