@@ -569,6 +569,7 @@ void omni_proxy_prepare_decode_request_body(ngx_http_request_t *r, omni_req_cont
 typedef enum
 {
     R_MAX_TOKENS,
+    R_MAX_COMPLETION_TOKENS,
     R_STREAM,
     R_STREAM_OPTIONS
 } region_type_t;
@@ -587,12 +588,20 @@ void gen_prefill_json_str_jsmn(
     int tokens_size = 256;
     jsmntok_t *tokens = NULL;
     int ret = -1;
-    region_info_t region_infos[3];
+    region_info_t region_infos[4];
     int region_infos_count = 0;
     int max_tokens_val_idx = -1;
+    int max_completion_tokens_val_idx = -1;
     int stream_val_idx = -1;
     int stream_options_key_idx = -1, stream_options_val_idx = -1;
     char keybuf[64];
+
+    // Early return for invalid/empty input
+    if (json == NULL || len == 0) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, 
+                      "gen prefill json: empty json input");
+        return;
+    }
 
     tokens = ngx_palloc(r->pool, tokens_size * sizeof(jsmntok_t));
     if (!tokens)
@@ -637,6 +646,12 @@ void gen_prefill_json_str_jsmn(
                 max_tokens_val_idx = i + 1;
                 region_infos[region_infos_count++] = (region_info_t){
                     R_MAX_TOKENS, max_tokens_val_idx, tokens[max_tokens_val_idx].start, tokens[max_tokens_val_idx].end};
+            }
+            if (max_completion_tokens_val_idx == -1 && strcmp(keybuf, "max_completion_tokens") == 0)
+            {
+                max_completion_tokens_val_idx = i + 1;
+                region_infos[region_infos_count++] = (region_info_t){
+                    R_MAX_COMPLETION_TOKENS, max_completion_tokens_val_idx, tokens[max_completion_tokens_val_idx].start, tokens[max_completion_tokens_val_idx].end};
             }
             if (stream_val_idx == -1 && strcmp(keybuf, "stream") == 0)
             {
@@ -703,6 +718,11 @@ void gen_prefill_json_str_jsmn(
             pos += 1;
             src = ri->end;
             break;
+        case R_MAX_COMPLETION_TOKENS:
+            ngx_memcpy(newjson + pos, "1", 1);
+            pos += 1;
+            src = ri->end;
+            break;
         case R_STREAM:
             ngx_memcpy(newjson + pos, "false", 5);
             pos += 5;
@@ -713,15 +733,16 @@ void gen_prefill_json_str_jsmn(
             break;
         }
     }
+    
     // Copy the remainder before closing }
-    if (src < len - 1)
+    if (len > 1 && src < len - 1)
     {
         ngx_memcpy(newjson + pos, json + src, len - 1 - src);
         pos += len - 1 - src;
     }
 
-    // If "max_tokens" was missing, insert before '}'
-    if (max_tokens_val_idx == -1)
+    // If both "max_tokens" and "max_completion_tokens" were missing, insert "max_tokens":1 before '}'
+    if (max_tokens_val_idx == -1 && max_completion_tokens_val_idx == -1)
     {
         if (pos > 0 && newjson[pos - 1] != '{')
         {
@@ -887,11 +908,15 @@ ngx_int_t omni_proxy_prepare_prefill_subrequest(
                       "prefill: jsmn_parse return %d tokens", ntok);
 
         int key_idx = find_jsmn_key(r, (char *)body_data, tokens, ntok, "max_tokens");
+        int completion_key_idx = find_jsmn_key(r, (char *)body_data, tokens, ntok, "max_completion_tokens");
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "prefill: find_jsmn_key returned %d", key_idx);
+                      "prefill: find_jsmn_key returned %d for max_tokens, %d for max_completion_tokens", key_idx, completion_key_idx);
 
-        if (key_idx != -1 && key_idx + 1 < ntok) {
-            jsmntok_t *val_t = &tokens[key_idx + 1];
+        // Prefer max_tokens, fall back to max_completion_tokens
+        int effective_key_idx = (key_idx != -1) ? key_idx : completion_key_idx;
+
+        if (effective_key_idx != -1 && effective_key_idx + 1 < ntok) {
+            jsmntok_t *val_t = &tokens[effective_key_idx + 1];
             char buf[32];
             json_token_tostr((char *)body_data, val_t, buf, sizeof(buf));
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -905,7 +930,7 @@ ngx_int_t omni_proxy_prepare_prefill_subrequest(
         else {
             req->metrics.max_tokens = 1;
             ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                          "prefill: can not find max_tokens，set a default value %ui",
+                          "prefill: can not find max_tokens or max_completion_tokens, set a default value %ui",
                           (ngx_uint_t)req->metrics.max_tokens);
         }
     }

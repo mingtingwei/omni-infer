@@ -392,7 +392,7 @@ $(gen_upstream_block "decode_endpoints" "$decode_endpoints")
         listen $listen_port reuseport;
         server_name localhost;
 
-        location /v1 {
+        location ~ ^/v1(/chat)?/completions$ {
             set_request_id on;
             set_trace_headers_force off;
             omni_proxy decode_endpoints;
@@ -452,6 +452,11 @@ EOF
             subrequest_output_buffer_size 1M;
         }
 
+        location /v1 {
+            proxy_pass http://decode_endpoints;
+            proxy_http_version 1.1;
+            proxy_set_header Connection Keep-Alive;
+            
         location = /omni_proxy_broadcast_sub {
             internal;
             proxy_pass http://\$arg_target;

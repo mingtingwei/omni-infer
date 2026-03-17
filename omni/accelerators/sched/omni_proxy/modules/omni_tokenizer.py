@@ -33,6 +33,117 @@ class PreprocessResult:
     input_ids: List[int]
     multi_modal_data: Optional[Any] = None
 
+
+def normalize_tools_schema_order(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """Reorder tool schema keys to match vLLM/tool broadcast serialization order.
+
+    Expected function dict key order: name -> description -> parameters -> (others...)
+    """
+    if tools is None:
+        return None
+    out: List[Dict[str, Any]] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        t2 = dict(t)
+        fn = t2.get("function")
+        if isinstance(fn, dict):
+            name = fn.get("name")
+            desc = fn.get("description")
+            params = fn.get("parameters")
+
+            fn2: Dict[str, Any] = {}
+            if name is not None:
+                fn2["name"] = name
+            if desc is not None:
+                fn2["description"] = desc
+            if params is not None:
+                fn2["parameters"] = params
+
+            # append any remaining keys in original insertion order
+            for k, v in fn.items():
+                if k in fn2:
+                    continue
+                fn2[k] = v
+
+            t2["function"] = fn2
+        out.append(t2)
+    return out
+
+def _looks_like_tool_template(tokenizer: PreTrainedTokenizer) -> bool:
+    tpl = getattr(tokenizer, "chat_template", "") or ""
+    return ("# Tools" in tpl) and ("<tools>" in tpl) and ("<tool_call>" in tpl)
+
+def _normalize_messages_for_tool_template(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalize messages to match tool chat_template expectations.
+    
+    Combines two steps:
+    1. Convert tool_calls arguments from JSON string to dict.
+    2. Normalize tool role content to list[dict] format.
+    """
+    normalized: List[Dict[str, Any]] = []
+
+    for m in messages:
+        m2 = dict(m)
+        role = m2.get("role")
+        
+        # --- Logic 1: Normalize tool_calls (usually in assistant messages) ---
+        tool_calls = m2.get("tool_calls")
+        if tool_calls and isinstance(tool_calls, list):
+            new_tool_calls = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    new_tool_calls.append(tc)
+                    continue
+
+                tc2 = dict(tc)
+                fn = tc2.get("function")
+                
+                # Handle function.arguments
+                if isinstance(fn, dict):
+                    fn2 = dict(fn)
+                    args = fn2.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            parsed = json.loads(args)
+                            fn2["arguments"] = parsed if isinstance(parsed, dict) else {}
+                        except Exception:
+                            fn2["arguments"] = {}
+                    elif not isinstance(args, dict):
+                        fn2["arguments"] = {}
+                    
+                    tc2["function"] = fn2
+
+                # Handle direct arguments (rare case)
+                if "arguments" in tc2 and not isinstance(tc2.get("arguments"), dict):
+                    args = tc2["arguments"]
+                    if isinstance(args, str):
+                        try:
+                            parsed = json.loads(args)
+                            tc2["arguments"] = parsed if isinstance(parsed, dict) else {}
+                        except Exception:
+                            tc2["arguments"] = {}
+                    else:
+                        tc2["arguments"] = {}
+
+                new_tool_calls.append(tc2)
+            m2["tool_calls"] = new_tool_calls
+
+        # --- Logic 2: Normalize tool role content ---
+        if role == "tool":
+            content = m2.get("content")
+            if isinstance(content, str):
+                m2["content"] = [{"type": "text", "text": content}]
+            elif isinstance(content, dict):
+                m2["content"] = [content]
+            # If already list, keep as is
+
+        normalized.append(m2)
+
+    return normalized
+    
 def load_tokenizer(model_path: str) -> PreTrainedTokenizer:
     """
     Load tokenizer identical to vLLM's implementation
@@ -175,7 +286,7 @@ def extract_multi_modal_data(
             
             # Join text parts and update message
             if text_parts:
-                processed_message["content"] = " ".join(text_parts)
+                processed_message["content"] = "".join(text_parts)
             else:
                 processed_message["content"] = ""
             
@@ -213,30 +324,38 @@ def _apply_chat_template(
         str: Formatted prompt text
     """
     # vLLM's implementation: try tokenizer.apply_chat_template first
-    if hasattr(tokenizer, 'apply_chat_template'):
-        try:
-            # vLLM passes tools parameter if available
-            apply_kwargs = {
-                "messages": messages,
-                "add_generation_prompt": add_generation_prompt,
-                "tokenize": False
-            }
-            
-            if tools is not None:
-                apply_kwargs["tools"] = tools
-            
-            # Some tokenizers support multi_modal_data parameter
-            if multi_modal_data is not None and hasattr(tokenizer, 'handle_multi_modal_data'):
-                apply_kwargs["multi_modal_data"] = multi_modal_data
-            
-            prompt = tokenizer.apply_chat_template(**apply_kwargs)
-            return prompt
-        except (TypeError, AttributeError):
-            # Fallback if tokenizer doesn't support these parameters
-            pass
-        except Exception as e:
-            # vLLM logs this but continues with fallback
-            print(f"Tokenizer apply_chat_template failed: {e}")
+    # fit vllm logic
+    if _looks_like_tool_template(tokenizer):
+        messages = _normalize_messages_for_tool_template(messages)
+    if hasattr(tokenizer, "apply_chat_template"):
+        # Try the most compatible calling conventions
+        last_err: Optional[Exception] = None
+        for call_style in ("positional", "conversation_kw", "messages_kw"):
+            try:
+                kwargs = {
+                    "add_generation_prompt": add_generation_prompt,
+                    "tokenize": False,
+                }
+                if _looks_like_tool_template(tokenizer) and tools is not None:
+                    tools = normalize_tools_schema_order(tools)
+                if tools is not None:
+                    kwargs["tools"] = tools
+
+                if call_style == "positional":
+                    return tokenizer.apply_chat_template(messages, **kwargs)
+                if call_style == "conversation_kw":
+                    return tokenizer.apply_chat_template(conversation=messages, **kwargs)
+                if call_style == "messages_kw":
+                    return tokenizer.apply_chat_template(messages=messages, **kwargs)
+            except Exception as e:
+                last_err = e
+        
+        # If tool, do NOT invent a tools format; fallback will diverge from broadcast.
+        if _looks_like_tool_template(tokenizer):
+            raise RuntimeError(f"tool apply_chat_template failed: {last_err}") from last_err
+
+        # Non-tool: allow old fallback path
+        print(f"Tokenizer apply_chat_template failed: {last_err}")
     
     # vLLM's fallback: manually handle tools and multi-modal data
     processed_messages = messages.copy()
@@ -393,12 +512,29 @@ def _render_chatml_template(messages: List[Dict[str, Any]], add_generation_promp
     
     return prompt
 
+def _message_to_text(message: Dict[str, Any]) -> str:
+    # 1) normal content
+    if "content" in message and message["content"] is not None:
+        return message["content"] if isinstance(message["content"], str) else json.dumps(message["content"], ensure_ascii=False)
+
+    # 2) tool_calls (OpenAI new)
+    if "tool_calls" in message and message["tool_calls"] is not None:
+        return json.dumps({"tool_calls": message["tool_calls"]}, ensure_ascii=False)
+
+    # 3) function_call (old)
+    if "function_call" in message and message["function_call"] is not None:
+        return json.dumps({"function_call": message["function_call"]}, ensure_ascii=False)
+
+    # 4) fallback
+    return ""
+
 def _render_generic_template(messages: List[Dict[str, Any]], add_generation_prompt: bool) -> str:
     """vLLM's exact generic template rendering"""
     prompt = ""
     
     for message in messages:
-        role, content = message["role"], message["content"]
+        role = message.get("role", "user")
+        content = _message_to_text(message)
         prompt += f"{role}: {content}\n"
     
     if add_generation_prompt:
