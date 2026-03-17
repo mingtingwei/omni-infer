@@ -11,6 +11,7 @@
 #include <ngx_atomic.h>
 #include <omni_shared_state.h>
 #include <omni_tokenizer_worker.h>
+#include <omni_broadcast.h>
 
 #define OMNI_PROXY_SCHEDULE_ALGO_DEFAULT 0
 #define OMNI_PROXY_SCHEDULE_ALGO_EARLIEST_BATCH 1
@@ -57,6 +58,7 @@ typedef struct omni_req_context_s
     ngx_str_t bootstrap_host;
     ngx_str_t bootstrap_port;
     ngx_str_t bootstrap_room;
+    omni_broadcast_ctx_t *broadcast_ctx;
 } omni_req_context_t;
 
 typedef struct omni_worker_local_state_s

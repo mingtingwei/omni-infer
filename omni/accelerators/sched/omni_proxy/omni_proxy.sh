@@ -427,6 +427,16 @@ EOF
             default_type text/plain;
         }
 
+        location = /health {
+            omni_proxy_broadcast on;
+            default_type application/json; 
+        }
+
+        location = /metrics {
+            omni_proxy_broadcast on;
+            default_type text/plain;
+        }
+
         location = /omni_proxy/health {
             omni_proxy_health_status on;
             default_type application/json; 
@@ -439,6 +449,12 @@ EOF
         location ~ ^/prefill_sub(?<orig>/.*)\$ {
             internal;
             proxy_pass http://prefill_endpoints\$orig\$is_args\$args;
+            subrequest_output_buffer_size 1M;
+        }
+
+        location = /omni_proxy_broadcast_sub {
+            internal;
+            proxy_pass http://\$arg_target;
             subrequest_output_buffer_size 1M;
         }
     }
