@@ -736,10 +736,8 @@ def sync_code(
         host_vars = all_hosts.get(host, {})
         host_ip = host_vars.get("ansible_host", host)
 
-        if host_ip not in p_d_ips:
-            c_hosts_to_process.add(host)
-        else:
-            print("{INFO} Node C is skipped because it has the same IP address as a P or D node")
+        c_hosts_to_process.add(host)
+
 
     # All hosts that need processing
     all_target_hosts = p_hosts | d_hosts | c_hosts_to_process

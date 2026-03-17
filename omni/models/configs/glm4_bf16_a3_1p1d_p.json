@@ -8,10 +8,10 @@
         "use_tnd_pa": true,
         "unquant_bmm_nz": true,
         "gmm_nz": true,
-        "load_rms_bias": true,
+        "load_rms_bias": false,
         "decode_moe_dispatch_combine": false,
-        "use_ascend_cloud_ops": true,
         "enable_limit_topk": true,
+        "use_ascend_cloud_ops": false,
         "skip_mtp_hidden_states": true,
         "enable_e_score_correction_bias": true
     }

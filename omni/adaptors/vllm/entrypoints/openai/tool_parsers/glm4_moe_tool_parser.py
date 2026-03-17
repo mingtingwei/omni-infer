@@ -41,7 +41,7 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -94,7 +94,7 @@ class Glm4MoeModelToolParser(ToolParser):
             return value
 
         matched_tool_calls = self.func_call_regex.findall(model_output)
-        logger.debug("model_output: %s", model_output)
+        #logger.debug("model_output: %s", model_output)
         try:
             tool_calls = []
             for match in matched_tool_calls:
@@ -108,7 +108,7 @@ class Glm4MoeModelToolParser(ToolParser):
                     arg_val = value.strip()
                     if not _is_string_type(tc_name, arg_key, request.tools):
                         arg_val = _deserialize(arg_val)
-                    logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
+                    #logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
                 tool_calls.append(
                     ToolCall(
@@ -151,7 +151,7 @@ class Glm4MoeModelToolParser(ToolParser):
             if self.current_tool_id > 0:
                 cur_text = ""
             return DeltaMessage(content=cur_text)
-        logger.debug("cur_text = %s", cur_text)
+        #logger.debug("cur_text = %s", cur_text)
         end_idx = cur_text.find(self.tool_call_end_token)
         if end_idx != -1:
             if self.current_tool_id == -1:

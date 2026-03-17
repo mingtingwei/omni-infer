@@ -88,6 +88,10 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         For text <think>abc</think>xyz:
         - 'abc' goes to reasoning
         - 'xyz' goes to content
+        
+        GLM-4.7 support: When thinking is enabled by default, the prompt 
+        includes '<think>' but model output may only contain '</think>'.
+        In this case, content before '</think>' is reasoning.
         """
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (
@@ -95,6 +99,16 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         ):
             return None
 
+        # If thinking is explicitly disabled, all output should be treated
+        # as normal content (no reasoning stream).
+        if (
+            request is not None
+            and getattr(request, "chat_template_kwargs", None) is not None
+            and request.chat_template_kwargs.get("enable_thinking", True) is False
+        ):
+            return DeltaMessage(content=delta_text)
+
+        # Case 1: <think> token seen in previous outputs (GLM-4.6 or explicit mode)
         if self.start_token_id in previous_token_ids:
             if self.end_token_id in delta_token_ids:
                 # <think> in previous, </think> in delta,
@@ -114,6 +128,8 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 # <think> in previous, no </think> in previous or delta,
                 # reasoning content continues
                 return DeltaMessage(reasoning_content=delta_text)
+        
+        # Case 2: <think> token in delta (GLM-4.6 or explicit mode)
         elif self.start_token_id in delta_token_ids:
             if self.end_token_id in delta_token_ids:
                 # <think> in delta, </think> in delta, extract reasoning content
@@ -135,9 +151,31 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 # <think> in delta, no </think> in delta,
                 # reasoning content continues
                 return DeltaMessage(reasoning_content=delta_text)
-        else:
-            # thinking is disabled, just content
+        
+        # Case 3: GLM-4.7 default thinking mode - no <think> in output, only </think>
+        # The <think> was in the prompt, all content before </think> is reasoning
+        elif self.end_token_id in delta_token_ids:
+            # </think> appears in delta but no <think> in previous or delta
+            end_index = delta_text.find(self.end_token)
+            reasoning_content = delta_text[:end_index]
+            content = delta_text[end_index + len(self.end_token) :]
+            return DeltaMessage(
+                reasoning_content=reasoning_content if reasoning_content else None,
+                content=content if content else None,
+            )
+        elif self.end_token_id in previous_token_ids:
+            # </think> already seen in previous, now it's regular content
             return DeltaMessage(content=delta_text)
+        
+        # Case 4: No thinking tokens yet - could be reasoning (GLM-4.7) or disabled thinking
+        # If </think> will appear later, this is reasoning; otherwise it's content
+        # We treat it as reasoning content for GLM-4.7 compatibility
+        else:
+            # Check if we're in a potential GLM-4.7 thinking scenario
+            # by looking ahead - but in streaming we don't have that info
+            # So we assume it's reasoning until we see </think>
+            # This matches the behavior where content before </think> is reasoning
+            return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
@@ -148,30 +186,34 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         For text <think>abc</think>xyz:
         - 'abc' goes to reasoning
         - 'xyz' goes to content
+        
+        GLM-4.7 support: When thinking is enabled by default, the prompt 
+        includes '<think>' but model output may only contain '</think>'.
+        In this case, content before '</think>' is reasoning.
 
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
 
-        # Check if the model output contains the <think> and </think> tokens.
-        if (
-            self.start_token not in model_output
-            or self.end_token not in model_output
-        ):
-            return None, model_output
-        # Check if the <think> is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
-        # Check if the model output contains the </think> tokens.
-        # If the end token is not found, return the model output as is.
+        # Check if the model output contains the </think> token
         if self.end_token not in model_output:
             return None, model_output
-
-        # Extract reasoning content from the model output.
-        reasoning_content, _, content = model_output.partition(self.end_token)
-
-        final_content = content or None
-        return reasoning_content, final_content
+        
+        # Case 1: Both <think> and </think> present (GLM-4.6 or explicit thinking)
+        if self.start_token in model_output:
+            # Check if the <think> is present in the model output, remove it
+            model_output_parts = model_output.partition(self.start_token)
+            model_output = (
+                model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+            )
+            # Extract reasoning content from the model output
+            reasoning_content, _, content = model_output.partition(self.end_token)
+            final_content = content or None
+            return reasoning_content, final_content
+        
+        # Case 2: Only </think> present (GLM-4.7 default thinking mode)
+        # The <think> was in the prompt, model only generates content + </think>
+        else:
+            reasoning_content, _, content = model_output.partition(self.end_token)
+            final_content = content or None
+            return reasoning_content, final_content

@@ -4,15 +4,15 @@
         "eh_proj_tp_size": 16
     },
     "operator_optimization_config": {
-        "prefill_moe_all_to_all": true,
+        "prefill_moe_all_to_all": false,
         "moe_multi_stream_tune": true,
         "use_tnd_pa": true,
         "gmm_nz": true,
         "use_super_kernel": false,
         "unquant_bmm_nz": true,
-        "decode_moe_dispatch_combine": true,
+        "decode_moe_dispatch_combine": false,
         "cast_w2_scale_f32": true,
-        "load_rms_bias": false,
+        "load_rms_bias": true,
         "enable_limit_topk": true,
         "use_ascend_cloud_ops": false,
         "skip_mtp_hidden_states": true,
