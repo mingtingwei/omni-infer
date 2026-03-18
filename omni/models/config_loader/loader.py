@@ -72,7 +72,7 @@ class ModelParallelConfig:
     eh_proj_tp_size: int = 1
     enable_share_expert_tp: bool = False
 
- 
+
 @dataclass
 class ModelOperatorOptConfig:
     enable_kv_rmsnorm_rope_cache: bool = True
@@ -119,7 +119,7 @@ class ModelOperatorOptConfig:
     enable_indexer_quant: bool = False # 使能indexer量化
     max_split_token_ratio_threshold: float = 0.8 # Split hidden_states in prefill if token duplication ratio exceeds threshold, to avoid GMM OOM.
     max_split_token_count_threshold: int = 32768 # Split hidden_states in prefill if token duplication count exceeds threshold, to avoid GMM OOM.
-   
+
     enable_topktoppsample_op: bool = False # 使用topktoppsample算子
 
     enable_scale_parallel: bool = False #用于qwen235b的scale_parallel优化启用开关，默认关闭
@@ -129,10 +129,10 @@ class ModelOperatorOptConfig:
     decode_experts_pruning: bool = False
     new_w4_op: bool = False # w4a8新算子
     enable_c8: bool = False # GQA使能C8
-    
+
     enable_scmoe_multi_stream: bool = False # 龙猫ScMoe架构多流开启
     enable_mla_prefill_multistream: bool = False # mla prefill阶段qkv计算启用多流
-    
+
     load_rms_bias: bool = False # RMSNorm是否启用bias
     enable_e_score_correction_bias: bool = False # moe部分是否启用e_score_correction_bias
     use_ascend_cloud_ops: bool = False # 是否使用ascend_cloud_ops算子
@@ -155,7 +155,7 @@ class ModelOperatorOptConfig:
             self.shared_expert_down_prefetch = 0
             logger.warning(f"[WARNING] When enable_prefetch is false, prefetch_Mb must be set to 0.")
 
-            
+
         if os.getenv("ENABLE_OMNI_CACHE", "0") == "1":
             self.use_omni_cache = True
 
@@ -167,12 +167,12 @@ class ModelOperatorOptConfig:
                 "'enable_pipeline_comm' and 'enable_round_pipeline_comm' cannot both be True. "
                 "Please disable one of these communication modes."
             )
-        
+
         if self.unquant_bmm_nz:
             # if use weight nz, this config must be True
             torch.npu.config.allow_internal_format = True
 
-@dataclass 
+@dataclass
 class ModelExtraConfig:
     parall_config: ModelParallelConfig = field(default_factory = ModelParallelConfig)
     operator_opt_config: ModelOperatorOptConfig = field(default_factory = ModelOperatorOptConfig)
@@ -186,7 +186,7 @@ def filter_dict_by_dataclass(dataclass_type, data_dict):
 
 
 def parse_hf_config(hf_config):
-    
+
     # Fixed parameter key list (parameters to check)
     FIXED_KEYS = [
     "hidden_size",
@@ -198,9 +198,9 @@ def parse_hf_config(hf_config):
     "n_shared_experts",
     "moe_intermediate_size"
     ]
-    
+
     extracted_params = {}
-    
+
     vars_hf_config = vars(hf_config)
     for key in FIXED_KEYS:
         if key in vars_hf_config:
@@ -221,7 +221,7 @@ def parse_hf_config(hf_config):
             if key not in model_params or model_params[key] != value:
                 is_match = False
                 break
-        
+
         if is_match:
             matches.append(model_name)
 
@@ -230,8 +230,8 @@ def parse_hf_config(hf_config):
         model_name = hf_config.model_type
     elif len(matches) > 1:
         if hf_config.model_type == "deepseek_v3":
-            model_name = "deepseek_v3" 
-        elif hf_config.model_type == "deepseek_v32": 
+            model_name = "deepseek_v3"
+        elif hf_config.model_type == "deepseek_v32":
             model_name = "deepseek_v32"
         else:
             raise RuntimeError(f"[ERROR] Multiple matching model names found: {matches}. Unable to determine the correct model name.")
@@ -248,7 +248,7 @@ def parse_hf_config(hf_config):
         if isinstance(input_activations_type, dict):
             num_bits_values = input_activations_type.values()
             input_activations_type = min(num_bits_values)
-        
+
         kv_cache_scheme_type = hf_config.quantization_config["kv_cache_scheme"]
         quant_type = f"w{weights_type}a{input_activations_type}"
         if kv_cache_scheme_type == "Opti-C8":
@@ -277,12 +277,12 @@ def _loader_configs_data(file_path):
 
 def _load_best_practice_config():
     best_practice_configs_path = os.path.join(default_config_path, 'best_practice_configs.json')
-    
+
     if not os.path.exists(best_practice_configs_path):
         raise RuntimeError(f"[ERROR] Best practice configs file not found: {best_practice_configs_path}")
-    
+
     configs_data = _loader_configs_data(best_practice_configs_path)
-    
+
     config_map = {
         (c["model"], c["hardware"], c["precision"], c["pd_disaggregation"],c["prefill_node_num"],c["decode_node_num"]): \
         (c["prefill_config_file"], c["decode_config_file"])
@@ -331,12 +331,12 @@ def _get_best_practice_config(task_config):
     else:
         best_practice_model_config_path = node_elasticly_config_map.get((task_config.model_name,
             task_config.hardware_platform, task_config.quant_type, task_config.enable_pd_elastic_scaling), None)
-    
+
     task_info = f'{task_config.model_name}_{task_config.quant_type}_{task_config.hardware_platform}'
     if best_practice_model_config_path:
         if task_config.is_prefill_node:
             best_practice_model_config_path = best_practice_model_config_path[0]
-        else:  
+        else:
             best_practice_model_config_path = best_practice_model_config_path[1]
 
         best_practice_model_config_path = os.path.join(default_config_path, best_practice_model_config_path)
@@ -352,7 +352,7 @@ def _get_best_practice_config(task_config):
         config_data = None
         logger.info(
             f"The task about {task_info} does not require configuration file, using default configuration.")
-    
+
     return config_data
 
 
@@ -408,7 +408,7 @@ def update_task_config(**kwargs):
         model_info = repr(model_extra_config)
         logger.warning(f"Failed to JSON-serialize model_extra_config: {e}")
     logger.info(f"ModelExtraConfig: {model_info}")
-    
+
 
 
 

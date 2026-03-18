@@ -25,6 +25,11 @@ def register_model():
     ModelRegistry.register_model(
             "DeepseekV32ForCausalLM",
             "omni.models.deepseek.deepseek_v32:DeepseekV32ForCausalLM")
+
+    ModelRegistry.register_model(
+            "GlmMoeDsaForCausalLM",
+            "omni.models.deepseek.deepseek_v32:DeepseekV32ForCausalLM")
+
     ModelRegistry.register_model(
             "PanguUltraMoEForCausalLM",
             "omni.models.pangu.pangu_ultra_moe:PanguUltraMoEForCausalLM")
@@ -32,7 +37,7 @@ def register_model():
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
         "omni.models.deepseek.deepseek_mtp:DeepseekV3MTP")
-    
+
     ModelRegistry.register_model(
         "DeepSeekMTPModelDuo",
         "omni.models.deepseek.deepseek_mtp:DeepseekV3MTPDuo")
@@ -44,7 +49,7 @@ def register_model():
     ModelRegistry.register_model(
         "DeepseekForCausalLM",
         "omni.models.deepseek.deepseek:DeepseekForCausalLM")
-    
+
     ModelRegistry.register_model(
         "DeepseekOCRForCausalLM",
         "omni.models.deepseek.deepseek_ocr:DeepseekOCRForCausalLM")
@@ -56,7 +61,7 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen2ForCausalLM",
         "omni.models.qwen.qwen2:Qwen2ForCausalLM")
-    
+
     ModelRegistry.register_model(
         "EagleQwen2ForCausalLM",
         "omni.models.qwen.qwen2_eagle:EagleQwen2ForCausalLM")
@@ -101,7 +106,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "omni.models.pangu.pangu_pro_moe.pangu_moe:PanguProMoEForCausalLM")
-    
+
     ModelRegistry.register_model(
         "PanguProMoEV2ForCausalLM",
         "omni.models.pangu.pangu_pro_moe_v2.pangu_moe_v2:PanguProMoEV2ForCausalLM")
@@ -117,11 +122,11 @@ def register_model():
     ModelRegistry.register_model(
         "InternLM2ForCausalLM",
         "omni.models.internvl.internlm2:InternLM2ForCausalLM")
-    
+
     ModelRegistry.register_model(
         "InternVLChatModel",
         "omni.models.internvl.internvl:InternVLChatModel")
-    
+
     ModelRegistry.register_model(
         "Gemma3ForCausalLM",
         "omni.models.gemma.gemma3:Gemma3ForCausalLM")
@@ -133,11 +138,11 @@ def register_model():
     ModelRegistry.register_model(
         "BailingMoeV2ForCausalLM",
         "omni.models.bailing.bailing:BailingMoeV2ForCausalLM")
-		
+
     ModelRegistry.register_model(
         "GlmForCausalLM",
         "omni.models.glm.glm:GlmForCausalLM")
-    
+
     ModelRegistry.register_model(
         "OpenPanguVLForConditionalGeneration",
         "omni.models.pangu.modeling_openpangu_vl:OpenPanguVLForConditionalGeneration",
@@ -155,7 +160,7 @@ def register_model():
         "Glm4MoeForCausalLM",
         "omni.models.glm.glm4_moe:Glm4MoeForCausalLM",
     )
-    
+
     ModelRegistry.register_model(
         "Glm4MoeMTPModel",
         "omni.models.glm.glm4_moe_mtp:Glm4MoeMTP",

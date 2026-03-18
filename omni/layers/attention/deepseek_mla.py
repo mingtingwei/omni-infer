@@ -91,9 +91,10 @@ class Indexer(nn.Module):
         super().__init__()
 
         self.dim: int = config.hidden_size
-        self.n_heads: int = 64          # config.index_n_heads
-        self.head_dim: int = 128        # config.index_head_dim
+        self.n_heads: int = config.index_n_heads
+        self.head_dim: int = config.index_head_dim
         self.rope_head_dim: int = config.qk_rope_head_dim
+        self.is_rope_interleave = getattr(config, "indexer_rope_interleave", False)
         self.index_topk: int = 2048     # config.index_topk
         self.q_lora_rank: int = config.q_lora_rank
 
@@ -190,11 +191,11 @@ class Indexer(nn.Module):
             topk_indices = topk_indices[0]
         return topk_indices
 
-    def forward(self, 
-                x: torch.Tensor, 
+    def forward(self,
+                x: torch.Tensor,
                 q_norm: torch.Tensor,
                 attn_metadata: AttentionMetadata,
-                kv_cache: torch.Tensor, 
+                kv_cache: torch.Tensor,
                 is_prefill):
         if is_prefill:
             cos, sin = attn_metadata.prefill.cos, attn_metadata.prefill.sin
@@ -213,7 +214,10 @@ class Indexer(nn.Module):
             q_rope_mini, q_nope_mini = torch.split(q_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64,64+64]
 
             q_rope_mini = q_rope_mini.unsqueeze(2)
-            q_rope_mini = torch_npu.npu_rotary_mul(q_rope_mini, cos_q, sin_q)
+            if self.is_rope_interleave:
+                q_rope_mini = torch_npu.npu_interleave_rope(q_rope_mini, cos_q, sin_q)
+            else:
+                q_rope_mini = torch_npu.npu_rotary_mul(q_rope_mini, cos_q, sin_q)
             q_rope_mini = q_rope_mini.squeeze(2)
 
             if model_extra_config.parall_config.attn_sp_size > 1 and is_prefill:
@@ -233,7 +237,10 @@ class Indexer(nn.Module):
         k_mini_rope, k_mini_nope = torch.split(k_mini, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)  # [b,s,64+64]
 
         k_mini_rope = k_mini_rope.unsqueeze(2)
-        k_mini_rope = torch_npu.npu_rotary_mul(k_mini_rope, cos, sin)
+        if self.is_rope_interleave:
+            k_mini_rope = torch_npu.npu_interleave_rope(k_mini_rope, cos, sin)
+        else:
+            k_mini_rope = torch_npu.npu_rotary_mul(k_mini_rope, cos, sin)
         k_mini_rope = k_mini_rope.squeeze(2)
 
         k_mini = torch.cat([k_mini_rope, k_mini_nope], dim=-1)  # [b*s,128]
@@ -260,13 +267,13 @@ class Indexer(nn.Module):
         if isinstance(kv_cache, Dict):
             kv_cache = kv_cache.get("kv_cache")
         # TODO: update kcache
-        if kv_cache[2] is not None and kv_cache[3] is not None:
+        if kv_cache[2] is not None:
             if model_extra_config.operator_opt_config.enable_indexer_quant:
                 torch_npu.npu_scatter_nd_update_(kv_cache[3].view(-1, 1, key_dequant_scale.shape[-1]),
                                                  attn_metadata.slot_mapping.view(-1, 1),
                                                  key_dequant_scale.view(-1, key_dequant_scale.shape[-1]))
             torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, 1, k_mini.shape[-1]),
-                                             attn_metadata.slot_mapping.view(-1, 1), 
+                                             attn_metadata.slot_mapping.view(-1, 1),
                                              k_mini.view(-1, 1, k_mini.shape[-1]))   # b, s, n, d
 
         with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
@@ -350,7 +357,8 @@ class DeepseekMLA(nn.Module):
         # FA is fully quantized, KVCache is not quantized, and the function is not enabled.
         self.quant_symbol = quant_config is not None
         self.layer_idx = extract_layer_index(self.prefix)
-
+        if hasattr(config, "rope_interleave"):
+            rope_is_neox_style = True
         self.merge_qkv = model_extra_config.operator_opt_config.merge_qkv
         if self.q_lora_rank is not None:
             if self.merge_qkv:
@@ -496,7 +504,7 @@ class DeepseekMLA(nn.Module):
         if self.fa_quant:
             kv_lora_rank_cache_size = kv_lora_rank_cache_size // 2
             self.kv_scale = torch.nn.Parameter(torch.empty(1, dtype=torch.float32), requires_grad=False)
-        
+
         if model_extra_config.operator_opt_config.enable_dsa:
             self.indexer = Indexer(config, quant_config=quant_config, prefix=f"{prefix}.indexer")
             head_size = kv_lora_rank_cache_size + self.qk_rope_head_dim + self.indexer.head_dim + 1
@@ -591,7 +599,7 @@ class DeepseekMLA(nn.Module):
         k_rope: torch.Tensor,
         attn_metadata: Optional[AttentionMetadata],
         is_second_attn: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:        
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if attn_metadata is not None:
             prefill_metadata = attn_metadata.prefill
             actual_seq_kvlen = prefill_metadata.seq_lens
@@ -687,7 +695,7 @@ class DeepseekMLA(nn.Module):
         weight = torch.nn.Parameter(weight.transpose(0, 1).contiguous(), requires_grad = False)
         weight.data = torch_npu.npu_format_cast(weight.data, 29)
         return weight
-    
+
     def _process_hybrid_mla_prolog_weight(self, weight):
         if weight.dtype == torch.int8:
             return weight
@@ -709,7 +717,7 @@ class DeepseekMLA(nn.Module):
         if model_extra_config.operator_opt_config.use_omni_cache and attn_metadata is not None:
             assert kv_cache is None, f"When using OmniCache, model should not have KV cache, but got {type(kv_cache)}."
             kv_cache = attn_metadata.omni_cache.device_cache
-            
+
         # only support batch size 1
         if self.q_lora_rank is not None:
             q_lora = self.q_a_proj(hidden_states)[0]
@@ -1063,7 +1071,7 @@ class DeepseekMLA(nn.Module):
                 output, _ = self.o_proj.forward(attn_output, q.shape[0], 1, self.num_local_heads, self.v_head_dim)
             else:
                 output = self.o_proj.forward(attn_output, comm_group=comm_group)[0]
-                
+
         if model_extra_config.operator_opt_config.use_omni_cache and \
             attn_metadata is not None:
             kv_states = [kv_a.unsqueeze(1), k_pe]
@@ -1183,13 +1191,13 @@ class DeepseekMLA(nn.Module):
                     q_lowrank = self.q_proj(hidden_states)[0]
 
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
-                                        stream_id='11', 
+                                        stream_id='11',
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
                 kv = self.kv_a_proj_with_mqa(hidden_states)[0]
             if model_extra_config.operator_opt_config.moe_multi_stream_tune:
                 tng.scope.npu_wait_tensor(q_lowrank, q_lowrank)
 
-            with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune, 
+            with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
                                         core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
                 if self.q_lora_rank is not None:
                     q_norm, _ = self.q_a_layernorm(q_lowrank, self.norm_res[q_lowrank.shape[0]])
@@ -1208,7 +1216,7 @@ class DeepseekMLA(nn.Module):
                 )
 
             with ConditionalTNGScope(multi_stream=model_extra_config.operator_opt_config.moe_multi_stream_tune,
-                                            stream_id='11', 
+                                            stream_id='11',
                                             core_num=model_extra_config.operator_opt_config.mla_multistream_limit_core):
                 cache_mode = (
                         "PA"
@@ -1261,7 +1269,7 @@ class DeepseekMLA(nn.Module):
                 num_query_heads=self.num_heads, num_key_value_heads=1,
                 input_layout=input_layout, softmax_scale=self.scale,
                 atten_mask=attn_mask, sparse_mode=sparse_mode,
-                dequant_scale_query=dequant_scale_q_nope, 
+                dequant_scale_query=dequant_scale_q_nope,
                 dequant_scale_key=self.kv_scale, dequant_scale_value=self.kv_scale,
                 query_quant_mode=3, inner_precise=0,
                 block_table=attn_metadata.decode.block_table,
