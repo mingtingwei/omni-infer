@@ -456,7 +456,8 @@ EOF
             proxy_pass http://decode_endpoints;
             proxy_http_version 1.1;
             proxy_set_header Connection Keep-Alive;
-            
+        }
+        
         location = /omni_proxy_broadcast_sub {
             internal;
             proxy_pass http://\$arg_target;
