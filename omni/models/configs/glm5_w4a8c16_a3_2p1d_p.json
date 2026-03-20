@@ -1,9 +1,9 @@
 {
     "model_parallel_config": {
-      "dense_mlp_tp_size": 8,
-      "o_proj_tp_size": 8,
+      "dense_mlp_tp_size": 16,
+      "o_proj_tp_size": 16,
       "redundancy_shared_expert_num": 0,
-      "attn_sp_size": 8
+      "attn_sp_size": 16
     },
     "operator_optimization_config": {
       "enable_kv_rmsnorm_rope_cache": true,
@@ -16,6 +16,7 @@
       "experts_pruning": true,
       "use_mlaprolog": false,
       "fa_quant": false,
-      "enable_dsa": true
+      "enable_dsa": true,
+      "enable_e_score_correction_bias": true
     }
   }

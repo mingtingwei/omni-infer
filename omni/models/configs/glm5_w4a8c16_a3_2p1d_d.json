@@ -13,7 +13,7 @@
       "gmm_nz": true,
       "decode_moe_dispatch_combine": true,
       "use_super_kernel": false,
-      "use_mlaprolog": false,
+      "use_mlaprolog": true,
       "fa_quant": false,
       "cast_w2_scale_f32": true,
       "control_accept_rate": -1,
@@ -22,6 +22,7 @@
       "expert_down_prefetch": 0,
       "attn_prefetch": 96,
       "enable_dsa": true,
-      "decode_experts_pruning": true
+      "decode_experts_pruning": true,
+      "enable_e_score_correction_bias": true
     }
   }

@@ -19,6 +19,7 @@
         "enable_round_pipeline_comm": false,
         "enable_pipeline_comm": false,
         "prefill_enable_long_seq": false,
-        "enable_dsa": true
+        "enable_dsa": true,
+        "enable_e_score_correction_bias": true
     }
 }
