@@ -714,9 +714,15 @@ class DeepseekMLA(nn.Module):
         main_stream = current_stream()
         kv_event = torch.npu.Event(blocking=False, enable_timing=False)
 
+        prefix_event = None
         if model_extra_config.operator_opt_config.use_omni_cache and attn_metadata is not None:
             assert kv_cache is None, f"When using OmniCache, model should not have KV cache, but got {type(kv_cache)}."
             kv_cache = attn_metadata.omni_cache.device_cache
+            if attn_metadata.prefill.prefix_meta is not None:
+                prefix_event = attn_metadata.omni_cache.h2d_event
+                
+        if prefix_event is not None:
+            main_stream.wait_event(prefix_event)
 
         # only support batch size 1
         if self.q_lora_rank is not None:
@@ -833,9 +839,10 @@ class DeepseekMLA(nn.Module):
             kv_states = [kv_a, k_pe, k_indexer]
             kv_event.record(main_stream)
             attn_metadata.omni_cache.synchronize_d2h(
-                kv_states,
+                kv_cache,
                 self.layer_idx,
-                kv_event
+                kv_event,
+                attn_metadata.slot_mapping
             )
             attn_metadata.omni_cache.synchronize_h2d(
                 prefix_meta=attn_metadata.prefill.prefix_meta,
@@ -1288,7 +1295,7 @@ class DeepseekMLA(nn.Module):
             topk_indices, _, _ = self.indexer(hidden_states, q_norm, attn_metadata,
                                         kv_cache=kv_cache, is_prefill=False)
 
-            if model_extra_config.operator_opt_config.use_omni_cache and attn_metadata and attn_metadata.omni_cache:
+            if int(os.getenv("ENABLE_HOST_MAPPING", "0")) and model_extra_config.operator_opt_config.use_omni_cache and attn_metadata and attn_metadata.omni_cache:
                 kv_actual_seqlen = torch_npu.npu_gather_selection_kv_cache(
                     selection_k_rope=attn_metadata.omni_cache.selection_k_rope[self.layer_idx],
                     selection_kv_cache=attn_metadata.omni_cache.selection_kv_cache[self.layer_idx],

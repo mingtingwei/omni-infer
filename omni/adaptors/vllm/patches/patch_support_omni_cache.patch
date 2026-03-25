@@ -1,0 +1,70 @@
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index e9648cc31..ae541e8ff 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -529,7 +529,13 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
+     """
+ 
+     if available_memory <= 0:
+-        raise ValueError("No available memory for the cache blocks. "
++        if int(os.getenv("ENABLE_OMNI_CACHE", "0")):
++            logger.warning("GPU memory utilization for KV cache is set to 0 or negative, "
++                         "which means no GPU memory is allocated for the KV cache. "
++                         " Requests will be served with CPU cache. "
++                         " If you want to use GPU cache, please set `gpu_memory_utilization` to a positive value when initializing the engine.")
++        else:
++            raise ValueError("No available memory for the cache blocks. "
+                          "Try increasing `gpu_memory_utilization` when "
+                          "initializing the engine.")
+ 
+@@ -547,14 +553,25 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
+             estimated_msg = " Based on the available memory,"
+             f" the estimated maximum model length is {estimated_max_len}."
+ 
+-        raise ValueError(
+-            f"To serve at least one request with the models's max seq len "
+-            f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
+-            f"cache is needed, which is larger than the available KV cache "
+-            f"memory ({available_memory/GiB_bytes:.2f} GiB)."
+-            f"{estimated_msg} "
+-            f" Try increasing `gpu_memory_utilization` or decreasing "
+-            f"`max_model_len` when initializing the engine.")
++        if int(os.getenv("ENABLE_OMNI_CACHE", "0")):
++            logger.warning(
++                f"To serve at least one request with the models's max seq len "
++                f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
++                f"cache is needed, which is larger than the available KV cache "
++                f"memory ({available_memory/GiB_bytes:.2f} GiB)."
++                f"{estimated_msg} "
++                f" Try increasing `gpu_memory_utilization` or decreasing "
++                f"`max_model_len` when initializing the engine."
++                f" -- But we use Omni-Cache, so we can still serve requests with CPU cache.")
++        else:
++            raise ValueError(
++                f"To serve at least one request with the models's max seq len "
++                f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
++                f"cache is needed, which is larger than the available KV cache "
++                f"memory ({available_memory/GiB_bytes:.2f} GiB)."
++                f"{estimated_msg} "
++                f" Try increasing `gpu_memory_utilization` or decreasing "
++                f"`max_model_len` when initializing the engine.")
+ 
+ 
+ def create_kv_cache_group_specs(
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 3a862f10f..4d30b9956 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -110,7 +110,11 @@ class Scheduler(SchedulerInterface):
+             self.kv_events_config)
+ 
+         num_gpu_blocks = self.cache_config.num_gpu_blocks
+-        assert num_gpu_blocks is not None and num_gpu_blocks > 0
++        if int(os.getenv("ENABLE_OMNI_CACHE", "0")):
++            if num_gpu_blocks is not None and num_gpu_blocks > 0:
++                logger.warning(f"num_gpu_blocks is not None and num_gpu_blocks > 0: {num_gpu_blocks is not None and num_gpu_blocks > 0}")
++        else:
++            assert num_gpu_blocks is not None and num_gpu_blocks > 0
+ 
+         self.block_size = self.cache_config.block_size
+ 

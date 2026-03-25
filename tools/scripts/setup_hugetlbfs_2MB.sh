@@ -4,13 +4,12 @@ set -euo pipefail
 
 #############################
 # 用户可调参数
-PAGES=${1:-}                         # 若留空，将按 1TB 自动计算
-MNT="${MNT:-/dev/hugepages}"         # 挂载点（符合“/dev/hugepages/omni_cache”的目标路径）
+MAP_SIZE_BYTES="${1:-${MAP_SIZE_BYTES:-549755813888}}"  # 第一个参数，默认 512GB (1<<39)
+MNT="${MNT:-/dev/hugepages}"         # 挂载点（符合"/dev/hugepages/omni_cache"的目标路径）
 HUGEPGSZ_KB=2048                     # 2MB
 MAX_RETRY=10
 SLEEP=2
 OMNI_FILE="${OMNI_FILE:-omni_cache}" # 文件名
-MAP_SIZE_BYTES="${MAP_SIZE_BYTES:-1099511627776}"  # 默认 1TB (1<<40)
 
 #############################
 # 颜色辅助
@@ -98,7 +97,7 @@ reserve_pages() {
       actual=$(cat "$nr_path" 2>/dev/null || echo 0)
       progress_bar "$actual" "$wanted" "Reserving 2MB HugePages (attempt $i/$MAX_RETRY)"
       # 若已经达标，立刻退出
-      if [[ "$actual" -eq "$wanted" ]]; then
+      if [[ "$actual" -ge "$wanted" ]]; then
         progress_done
         log_info "HugePages(2MB) reserved: $actual"
         return 0
@@ -185,15 +184,10 @@ main() {
     log_info "Kernel Hugepagesize is ${k_hps_kb} kB; targeting 2MB pool via ${huge_sys_dir}"
   fi
 
-  # 计算需要的页数
+  # 根据 MAP_SIZE_BYTES 自动计算需要的页数
   local needed_pages
-  if [[ -n "${PAGES:-}" ]]; then
-    needed_pages="$PAGES"
-    log_info "Using user-specified pages: $needed_pages (2MB each)"
-  else
-    needed_pages=$(need_pages_from_size "$MAP_SIZE_BYTES")
-    log_info "Auto pages for ${MAP_SIZE_BYTES} bytes (~$((MAP_SIZE_BYTES/1024/1024/1024)) GB): $needed_pages (2MB each)"
-  fi
+  needed_pages=$(need_pages_from_size "$MAP_SIZE_BYTES")
+  log_info "Auto pages for ${MAP_SIZE_BYTES} bytes (~$((MAP_SIZE_BYTES/1024/1024/1024)) GB): $needed_pages (2MB each)"
 
   # 预留大页（带进度）
   reserve_pages "$needed_pages"

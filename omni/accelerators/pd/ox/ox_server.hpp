@@ -78,9 +78,9 @@ private:
                     //                         "\n";
                     //                     }
                     // #endif
-                    for (std::size_t i = 0; i < block_list.size(); ++i) {
-                        std::cout << "Send block: " << block_list[i] << "\n";
-                    }
+                    // for (std::size_t i = 0; i < block_list.size(); ++i) {
+                    //     std::cout << "Send block: " << block_list[i] << "\n";
+                    // }
                     co_await asio::async_write(socket_, bt.get_buffers_layerwise(0, block_list, 0), use_awaitable);
                 }
             }

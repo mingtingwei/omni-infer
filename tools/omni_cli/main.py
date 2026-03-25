@@ -571,10 +571,8 @@ echo "{python_bin} {entry_py} {args_line} >> {log_path}/omni_cli.log 2>&1 &" >> 
 
             if need_start_ray:
                 tf.write(f"{ray_cmd}\n")
-                if is_master:
-                    tf.write(start_server_cmd)
-            else:
-                tf.write(start_server_cmd)
+
+            tf.write(start_server_cmd)
             tf.write("EOF\n")
 
         os.chmod(script_path, 0o755)

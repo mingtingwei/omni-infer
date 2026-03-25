@@ -295,6 +295,33 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
+    
+    # Check if ENABLE_OMNI_CACHE is set to "1" and run hugetlbfs setup
+    if os.environ.get("ENABLE_OMNI_CACHE") == "1":
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        hugetlbfs_script = os.path.join(script_dir, "setup_hugetlbfs_2MB.sh")
+        if os.path.exists(hugetlbfs_script):
+            print(f"ENABLE_OMNI_CACHE is set, running {hugetlbfs_script}")
+            cmd = ["bash", hugetlbfs_script]
+            map_size = os.environ.get("MAP_SIZE_BYTES", "")
+            if map_size:
+                cmd.append(map_size)
+                print(f"Passing MAP_SIZE_BYTES={map_size} to hugetlbfs setup script")
+            subprocess.run(cmd, check=True)
+        else:
+            print(f"WARNING: {hugetlbfs_script} not found, skipping hugetlbfs setup")
+
+    role = os.environ.get("ROLE")
+    if role == "prefill":
+        host_ip = os.environ.get("HOST_IP")
+        local_host_ip = os.environ.get("LOCAL_HOST_IP")        
+        if host_ip != local_host_ip:
+            print(f"Current HOST_IP is {host_ip} and LOCAL_HOST_IP is {local_host_ip}")
+            print("This appears to be a slave node in Ray cluster. Skipping API server startup.")
+            sys.exit(0)  # Clean exit for slave nodes
+        else:
+            print("This is the master prefill node. Starting API server...")
+
     parser = argparse.ArgumentParser(
     description=(
         "Start multiple VLLM API servers with combined "
@@ -345,6 +372,7 @@ if __name__ == "__main__":
     parser.add_argument("--print-screen", default=False, action="store_true")
 
     args = parser.parse_args()
+
     if not args.num_dp:
         args.num_dp = args.num_servers
     if args.num_dp < args.num_servers:

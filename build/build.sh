@@ -74,6 +74,15 @@ bash build.sh
 cd $BUILD_ROOT/omni/accelerators/sched/omni_proxy/build/
 bash build.sh
 
+cd $BUILD_ROOT/omni/accelerators/cache/lib_tensor_register
+bash build.sh
+
+cd $BUILD_ROOT/omni/accelerators/pd/ox/cpp_packages
+bash build.sh
+
+cd $BUILD_ROOT/omni/accelerators/pd/ox
+make
+
 if [ "$USE_LMCACHE" = "1" ]; then
     cd $BUILD_ROOT/omni/adaptors/lmcache/script
     bash build.sh

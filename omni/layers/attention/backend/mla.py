@@ -138,8 +138,8 @@ class AscendMLABackend(AttentionBackend):
                                 pin_memory=True,
                                 device=device)
             # if use omni_cache, only keep k_indexer in decoder side
-            if model_extra_config.operator_opt_config.use_omni_cache and not is_prefill:
-                return (layer_indexer_k_nope, layer_indexer_k_nope_scale)
+            if int(os.getenv("ENABLE_HOST_MAPPING", "0")) and model_extra_config.operator_opt_config.use_omni_cache and not is_prefill:
+                return (layer_indexer_k_nope, )
             if model_extra_config.operator_opt_config.enable_indexer_quant:
                 return (layer_kv_cache_nope, layer_kv_cache_pe, layer_indexer_k_nope, layer_indexer_k_nope_scale)
             return (layer_kv_cache_nope, layer_kv_cache_pe, layer_indexer_k_nope)
@@ -548,38 +548,35 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
             reqs_start = self._num_decodes  # prefill_start
             tokens_start = self._num_decode_tokens
 
-            if not model_extra_config.operator_opt_config.use_omni_cache:
-                # Group request for Chunk-Prefill
-                seq_kvlen_group, seq_qlen_group, block_groups = group_request_list(
-                    seq_lens_list,
-                    query_lens_list,
-                    block_table,
-                    self.runner.max_num_tokens)
+            # Group request for Chunk-Prefill
+            seq_kvlen_group, seq_qlen_group, block_groups = group_request_list(
+                seq_lens_list,
+                query_lens_list,
+                block_table,
+                self.runner.max_num_tokens)
 
-                # Prepare kv index for prefill get kv_latent from kv_cache
-                if self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
-                    kv_index_list = []
-                    if block_table is not None and block_table.numel() > 0:
-                        for seq_lens, block_tables in zip(seq_kvlen_group, block_groups):
-                            kv_index = self.get_kv_index(seq_lens, block_tables)
-                            kv_index_list.append(kv_index)
-                else:
-                    kv_index_list = None
-
-                seq_qlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_qlen_group]
-                seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
-                tmp_input_position = input_positions[tokens_start:]
+            # Prepare kv index for prefill get kv_latent from kv_cache
+            if self.runner.attn_state == AscendAttentionState.ChunkedPrefill:
+                kv_index_list = []
+                if block_table is not None and block_table.numel() > 0:
+                    for seq_lens, block_tables in zip(seq_kvlen_group, block_groups):
+                        kv_index = self.get_kv_index(seq_lens, block_tables)
+                        kv_index_list.append(kv_index)
             else:
-                seq_qlen_group = [list(itertools.accumulate(query_lens_list))]
-                seq_kvlen_group = [list(itertools.accumulate(seq_lens_list))]
                 kv_index_list = None
 
+            seq_qlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_qlen_group]
+            seq_kvlen_group = [list(itertools.accumulate(sub_list)) for sub_list in seq_kvlen_group]
+            tmp_input_position = input_positions[tokens_start:]
+
+            if model_extra_config.operator_opt_config.use_omni_cache:
                 prefix_meta = omni_cache.get_prefill_prefix_copy_meta(
                     block_size=self.block_size,
                     kv_lens=self.runner.input_batch.num_computed_tokens_cpu[:num_reqs],
                     query_lens_list=query_lens_list,
                     block_tables=self.block_table.get_numpy_array()[:num_reqs],
                     attn_state=self.runner.attn_state,
+                    slot_mapping=slot_mapping
                 )
 
                 omni_cache.synchronize_h2d(
@@ -594,11 +591,6 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     PAD_SLOT_ID,
                     slot_mapping,
                 )
-                if volatile_block_table is not None:
-                    block_table = volatile_block_table[:num_reqs]
-                    slot_mapping = volatile_slot_mapping
-
-                tmp_input_position = input_positions[tokens_start:]
 
             first_layer_ind = self.runner.model.model.start_layer
             if not model_extra_config.operator_opt_config.enable_dsa:
@@ -656,7 +648,7 @@ class AscendMLAMetadataBuilder(DummyAttentionMetadataBuilder):
                     raise RuntimeError("self._num_decode_tokens must be divisible by self._num_decodes")
                 num_tokens_per_req = self._num_decode_tokens // self._num_decodes
 
-                if model_extra_config.operator_opt_config.enable_dsa and model_extra_config.operator_opt_config.use_omni_cache:
+                if int(os.getenv("ENABLE_HOST_MAPPING", "0")) and model_extra_config.operator_opt_config.enable_dsa and model_extra_config.operator_opt_config.use_omni_cache:
                     time0 = time.perf_counter()
                     req_ids_update_mapping = self.runner.input_batch.req_id_to_index
                     req_ids_update = [req_id for req_id, _ in sorted(req_ids_update_mapping.items(), key=lambda item: item[1])]

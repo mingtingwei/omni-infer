@@ -1,3 +1,4 @@
+import os
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.engine import core as engine_core
 from vllm.v1.worker import block_table
@@ -61,10 +62,11 @@ def apply_omni_attn_patch(enable_attn=False, enable_cache=False, is_kv_consumer=
         block_table.MultiGroupBlockTable = OmniMultiGroupBlockTable
         gpu_input_batch.MultiGroupBlockTable = OmniMultiGroupBlockTable
 
-    orig_manager.KVCacheBlocks = OmniKVCacheBlocks
-    orig_manager.KVCacheManager = OmniKVCacheManager
-    scheduler.KVCacheBlocks = OmniKVCacheBlocks
-    scheduler.KVCacheManager = OmniKVCacheManager
+    if enable_attn:
+        orig_manager.KVCacheBlocks = OmniKVCacheBlocks
+        orig_manager.KVCacheManager = OmniKVCacheManager
+        scheduler.KVCacheBlocks = OmniKVCacheBlocks
+        scheduler.KVCacheManager = OmniKVCacheManager
 
 
 __all__ = [

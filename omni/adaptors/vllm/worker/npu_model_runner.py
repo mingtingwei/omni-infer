@@ -58,7 +58,6 @@ from omni.adaptors.vllm.platform import NPUPlatform
 from omni.adaptors.vllm.spec_decode.post_drafter import PostDrafter
 from omni.adaptors.vllm.worker.cache_engine import CacheEngine
 from omni.adaptors.vllm.utils import get_attr_by_names
-from omni.accelerators.pd.omni_cache_connector_v1 import decode_h2d_trigger
 
 import json
 profiling_is_set = os.getenv("PROFILING_NAMELIST", None) is not None
@@ -954,7 +953,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.planner.place_experts()
                 _GLOBAL_STEP = _GLOBAL_STEP + 1 if not is_prompt else 0
 
-            decode_h2d_trigger()
             if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly or \
                 (self.is_hybrid_chunked_prefill_graph_mode and attn_state == AscendAttentionState.ChunkedPrefill):
                 start_debug = time.time()
@@ -1428,7 +1426,6 @@ class NPUModelRunner(GPUModelRunner):
         positions = self.mrope_positions[:, :num_tokens] if self.uses_mrope else self.positions[:num_tokens]
         raw_hidden_states = None
 
-        decode_h2d_trigger()
 
         # No kv_caches: profile run
         if not self.kv_caches:
@@ -1784,7 +1781,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in layers.items():
             # if use omni_cache, set head_size being k_indexer size, to get more blocks
-            if (model_extra_config.operator_opt_config.enable_dsa and
+            if int(os.getenv("ENABLE_HOST_MAPPING", "0")) and (model_extra_config.operator_opt_config.enable_dsa and
                     model_extra_config.operator_opt_config.use_omni_cache and
                     self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"):
                 head_size = sum([512, 64, 128])
