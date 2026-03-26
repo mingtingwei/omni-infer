@@ -52,3 +52,5 @@ license-files = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"]
 
 [tool.setuptools.package-data]
 "omni.models.configs" = ["*.json"]
+"omni.accelerators.pd.ox" = ["*"]
+"omni.accelerators.cache.lib_tensor_register" = ["*"]
