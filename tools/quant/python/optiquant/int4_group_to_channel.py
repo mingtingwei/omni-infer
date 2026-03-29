@@ -6,10 +6,10 @@ from tqdm import tqdm
 import torch
 import logging
 
-try:
-    import torch_npu
-except ImportError:
-    pass
+# try:
+#     import torch_npu
+# except ImportError:
+#     pass
 
 from safetensors.torch import load_file, save_file
 from optiquant.optiquant_utils import (
@@ -18,7 +18,11 @@ from optiquant.optiquant_utils import (
     weight_quant,
     pack_4bit,
     unpack_from_int32,
-    INT8_QMAX,
+    NUM_LAYERS,
+    BF16_ELEMENT_SIZE,
+    GROUP_SIZE,
+    NUM_EXPERTS,
+    INT_VALUES_PER_INT32,
 )
 
 # Logger configuration
@@ -36,10 +40,6 @@ if not logger.handlers:
 
 # Constants
 QUANT_PREFIX = "quant_model_weight_w8a8_dynamic"
-NUM_LAYERS = 62
-BF16_ELEMENT_SIZE = 2
-GROUP_SIZE = 32
-NUM_EXPERTS = 384
 
 # Weight names to quantize to INT8
 INT8_WEIGHT_NAMES = []
@@ -59,31 +59,31 @@ def _build_weight_names():
 
     for i in range(NUM_LAYERS):
         # MLP layers - INT8
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.gate_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.up_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.down_proj.weight" % i)
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.gate_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.up_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.down_proj.weight")
 
         # Attention linear layers - INT8
-        INT8_WEIGHT_NAMES.append("model.layers.%s.self_attn.q_a_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.self_attn.kv_a_proj_with_mqa.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.self_attn.q_b_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.self_attn.o_proj.weight" % i)
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.self_attn.q_a_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.self_attn.q_b_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.self_attn.o_proj.weight")
 
         # MoE shared experts - INT8
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.shared_experts.gate_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.shared_experts.up_proj.weight" % i)
-        INT8_WEIGHT_NAMES.append("model.layers.%s.mlp.shared_experts.down_proj.weight" % i)
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.shared_experts.gate_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.shared_experts.up_proj.weight")
+        INT8_WEIGHT_NAMES.append(f"model.layers.{i}.mlp.shared_experts.down_proj.weight")
 
         # MoE routed experts - INT4
         for j in range(NUM_EXPERTS):
             INT4_WEIGHT_NAMES.append(
-                "model.layers.%s.mlp.experts.%s.gate_proj.weight_packed" % (i, j)
+                f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight_packed"
             )
             INT4_WEIGHT_NAMES.append(
-                "model.layers.%s.mlp.experts.%s.up_proj.weight_packed" % (i, j)
+                f"model.layers.{i}.mlp.experts.{j}.up_proj.weight_packed"
             )
             INT4_WEIGHT_NAMES.append(
-                "model.layers.%s.mlp.experts.%s.down_proj.weight_packed" % (i, j)
+                f"model.layers.{i}.mlp.experts.{j}.down_proj.weight_packed"
             )
 
 
@@ -131,7 +131,6 @@ def main(args, bf16_path, output_path, model_name="deepseek-ai/DeepSeek-R1"):
         model_index = json.load(f)
 
     weight_map = model_index["weight_map"]
-    scale_count = len([key for key in weight_map.keys()])
 
     safetensor_files = list(glob(os.path.join(bf16_path, "*.safetensors")))
     safetensor_files.sort()
@@ -142,7 +141,7 @@ def main(args, bf16_path, output_path, model_name="deepseek-ai/DeepSeek-R1"):
     quant_count = 0
     new_weight_map = {}
 
-    for safetensor_file in tqdm(safetensor_files):
+    for safetensor_file in tqdm(safetensor_files, desc=""):
         file_name = os.path.basename(safetensor_file)
         file_name = file_name.replace("model", QUANT_PREFIX)
 
@@ -153,8 +152,11 @@ def main(args, bf16_path, output_path, model_name="deepseek-ai/DeepSeek-R1"):
             if "weight_scale" in weight_name or "weight_shape" in weight_name:
                 continue
             elif weight_name in INT8_WEIGHT_NAMES:
-                assert weight.element_size() == BF16_ELEMENT_SIZE, \
-                    "Expected BF16 weight with element_size %s" % BF16_ELEMENT_SIZE
+                if weight.element_size() != BF16_ELEMENT_SIZE:
+                    raise ValueError(
+                        "Expected BF16 weight with element_size %s, got %s"
+                        % (BF16_ELEMENT_SIZE, weight.element_size())
+                    )
 
                 int8_weight, scale_inv = weight_quant(weight)
                 new_state_dict[weight_name] = int8_weight
@@ -167,15 +169,18 @@ def main(args, bf16_path, output_path, model_name="deepseek-ai/DeepSeek-R1"):
             elif weight_name in INT4_WEIGHT_NAMES:
                 weight_name_base = weight_name[:-7]
 
-                assert weight.element_size() == 4, \
-                    "Expected weight element_size 4, got %s" % weight.element_size()
+                if weight.element_size() != 4:
+                    raise ValueError(
+                        "Expected weight element_size 4, got %s"
+                        % weight.element_size()
+                    )
 
                 quant_count += 1
 
                 unpacked_int4 = unpack_from_int32(
                     value=weight,
                     num_bits=4,
-                    shape=torch.Size([weight.shape[0], weight.shape[1] * 8]),
+                    shape=torch.Size([weight.shape[0], weight.shape[1] * INT_VALUES_PER_INT32]),
                     packed_dim=1
                 )
 
@@ -210,7 +215,6 @@ def main(args, bf16_path, output_path, model_name="deepseek-ai/DeepSeek-R1"):
         del state_dict
         del new_state_dict
 
-    logger.info("%s %s", quant_count, scale_count)
     logger.info("%s weights are quantized", quant_count)
 
     with open(model_index_file, "r") as f:

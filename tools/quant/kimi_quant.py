@@ -7,6 +7,7 @@ import optiquant.weight_int8 as weight_int8
 import optiquant.weight_int4 as weight_int4
 import optiquant.int4_group_to_channel as int4_g2c
 import optiquant.kv_cache as kv_cache
+from optiquant.optiquant_utils import NUM_LAYERS
 
 # Logger configuration
 logger = logging.getLogger(__name__)
@@ -22,8 +23,17 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 # Constants
-NUM_LAYERS = 62
 DEFAULT_MODEL_NAME = "deepseek-ai/DeepSeek-R1"
+"""
+sszs50g0a0b4sym1
+     │ ││ ││ │
+     │ ││ ││ └── 1 = symmetric
+     │ ││ │└───── b4 = 4 bits
+     │ ││ └────── a0 = activation integer (0 means not integer)
+     │ │└──────── g0 = groupsize=0 (Per-Channel!)
+     │ └───────── 0 = offset
+     └─────────── 50 = num_step (迭代次数)
+"""
 DEFAULT_QTYPE = "sszs50g0a0b4sym1"
 GLOBAL_COMPRESSION_RATIO = 1.5943962512751309
 
@@ -188,7 +198,6 @@ def main():
     if args.c8_calib_path is not None:
         logger.info("Starting KV cache quantization")
         kv_cache.main(
-            args,
             args.output_path,
             args.c8_calib_path,
             args.kvs_safetensor_name

@@ -3,6 +3,11 @@ import json
 import torch
 import logging
 from safetensors.torch import load_file, save_file
+from optiquant.optiquant_utils import (
+    NUM_LAYERS,
+    SCALE_CLAMP_MIN,
+    INT8_QMAX,
+)
 
 # Logger configuration
 logger = logging.getLogger(__name__)
@@ -17,10 +22,6 @@ if not logger.handlers:
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-
-# Constants
-SCALE_MAX_VALUE = 127.0
-SCALE_CLAMP_MIN = 1e-5
 
 
 def cal_scale(faquant_path, layer_idx, method="max"):
@@ -41,7 +42,7 @@ def cal_scale(faquant_path, layer_idx, method="max"):
 
     # Iterate through all .pth files matching the layer index
     for fname in os.listdir(faquant_path):
-        if fname.endswith("_%s.pth" % layer_idx):
+        if fname.endswith(f"_{layer_idx}.pth"):
             fpath = os.path.join(faquant_path, fname)
             t = torch.load(fpath, map_location="cpu")
 
@@ -63,22 +64,20 @@ def cal_scale(faquant_path, layer_idx, method="max"):
     merged = torch.cat(tensors, dim=0)
 
     if method == "max":
-        scale = (merged.max() / SCALE_MAX_VALUE).clamp(min=SCALE_CLAMP_MIN).cpu()
+        scale = (merged.max() / INT8_QMAX).clamp(min=SCALE_CLAMP_MIN).cpu()
     else:
-        raise ValueError("Unsupported scaling method: %s" % method)
+        raise ValueError(f"Unsupported scaling method: {method}")
 
     return scale
 
 
-def main(args, model_path, faquant_path, kvs_safetensor_name, layer_num=62):
+def main(model_path, faquant_path, kvs_safetensor_name):
     """Main function to apply KV cache quantization.
 
     Args:
-        args: Command line arguments.
         model_path: Path to model directory.
         faquant_path: Path to calibration data.
         kvs_safetensor_name: Name for KV scale safetensor file.
-        layer_num: Number of layers in the model.
     """
     model_config = os.path.join(model_path, "model.safetensors.index.json")
 
@@ -88,11 +87,11 @@ def main(args, model_path, faquant_path, kvs_safetensor_name, layer_num=62):
     weight_map = model_index["weight_map"]
     faquant_scale = {}
 
-    for layer_idx in range(layer_num):
+    for layer_idx in range(NUM_LAYERS):
         kvs = cal_scale(faquant_path, layer_idx)
         logger.info("The KV scale of layer_idx=%s is %s", layer_idx, kvs)
 
-        scale_key = "model.layers.%s.self_attn.kv_scale" % layer_idx
+        scale_key = f"model.layers.{layer_idx}.self_attn.kv_scale"
         faquant_scale[scale_key] = kvs
         weight_map[scale_key] = kvs_safetensor_name
 

@@ -9,11 +9,77 @@ from copy import deepcopy
 import torch
 
 # Constants
+BF16_ELEMENT_SIZE = 2  # BF16 uses 2 bytes per element
 SCALE_CLAMP_MIN = 1e-5
 LOSS_MODE = 2
 MSE_EPSILON = 1e-10
 MSE_EPSILON_RELATIVE = 1e-4
 INT8_QMAX = 127.0
+COMPARE_THRESHOLD = 1e-5
+INT4_BITS = 4
+INT4_OFFSET = 8  # Offset for unsigned->signed INT4 conversion
+INT_VALUES_PER_INT32 = 8  # 32 bits / 4 bits per value
+
+# Model layer configuration
+NUM_LAYERS = 62
+GROUP_SIZE = 32
+NUM_EXPERTS = 384
+
+# Layers excluded from quantization (remain BF16)
+DISABLED_LAYER_PATTERNS = [
+    "kv_b_proj.weight",
+    "mlp.gate.weight",
+    "mlp.gate.e_score_correction_bias",
+    "input_layernorm.weight",
+    "post_attention_layernorm.weight",
+    "pre_mlp_layernorm.weight",
+    "post_mlp_layernorm.weight",
+    "self_attn.q_a_layernorm.weight",
+    "self_attn.kv_a_layernorm.weight",
+]
+
+# Additional disabled patterns for Pangu mode
+PANGU_DISABLED_PATTERNS = [
+    "model.layers.61.embed_tokens.weight",
+    "model.layers.61.enorm.weight",
+    "model.layers.61.hnorm.weight",
+    "model.layers.61.eh_proj.weight",
+    "model.layers.61.shared_head.norm.weight",
+    "model.layers.61.shared_head.head.weight",
+]
+
+
+def build_disable_names():
+    """Build complete list of disabled layer names.
+
+    Returns:
+        List of layer names to exclude from quantization.
+    """
+    disable_names = []
+
+    for i in range(NUM_LAYERS):
+        for pattern in DISABLED_LAYER_PATTERNS:
+            disable_names.append("model.layers.%s.%s" % (i, pattern))
+
+    disable_names.extend([
+        "lm_head",
+        "model.norm.weight",
+        "model.embed_tokens.weight",
+    ])
+
+    return disable_names
+
+
+def build_disable_names_pangu():
+    """Build disabled names including Pangu-specific layers.
+
+    Returns:
+        List of layer names with Pangu additions.
+    """
+    disable_names = build_disable_names()
+    disable_names.extend(PANGU_DISABLED_PATTERNS)
+    return disable_names
+
 
 # QType regex pattern
 QTYPE_PATTERN = r"sszs([0-9]+)g([0-9]+)a([0-9]+)b([0-9]+)sym([0-9]+)$"
@@ -47,7 +113,7 @@ class QType:
         if desc.lower()[:3] == "ssz":
             res = re.match(QTYPE_PATTERN, desc)
             if res is None:
-                raise ValueError("Invalid QType description: %s" % desc)
+                raise ValueError(f"Invalid QType description: {desc}")
 
             self.num_step = int(res.group(1))
             self.blk_size = int(res.group(2))
@@ -55,7 +121,7 @@ class QType:
             self.numbits = int(res.group(4))
             self.ssz_sym = bool(int(res.group(5)) > 0)
         else:
-            raise ValueError("Unsupported quantization type: %s" % desc)
+            raise ValueError(f"Unsupported quantization type: {desc}")
 
     def dim(self, dim):
         """Create copy with specified quantization dimension.
@@ -71,8 +137,8 @@ class QType:
         return out
 
     def __repr__(self):
-        return "QType: %s   Dim: %s   ExpOffset: %s" % (
-            self.desc, self.q_dim, self.exp_offset
+        return "QType: %s   Dim: %s" % (
+            self.desc, self.q_dim
         )
 
 
@@ -123,7 +189,7 @@ def get_scale_offset(x, qW_min, qW_max, is_sym, is_act_integer):
         xmax = x.max(dim=-1, keepdim=True)[0]
         xmin = x.min(dim=-1, keepdim=True)[0]
 
-        compare = ((xmax - xmin) < 1e-5).to(torch.int32)
+        compare = ((xmax - xmin) < COMPARE_THRESHOLD).to(torch.int32)
         xmax = xmax * (1 - compare) + torch.max(
             torch.abs(xmax), torch.abs(xmin)
         ) * compare
@@ -321,7 +387,7 @@ def quant_ssz(x, Q, qdim, init_scale=None, init_offset=None, init_quant=None,
         bestScaleInt64[:, 0] = bestScale.reshape(-1)
         bestScaleInt64 = bestScaleInt64.view(torch.int64).reshape(bestScale.shape)
 
-        bias = (8 * recovered.to(torch.float32)).sum(dim=-1)
+        bias = (INT4_OFFSET * recovered.to(torch.float32)).sum(dim=-1)
         return bestQuantInt4, bestScaleInt64, bias
 
     return recovered
@@ -335,12 +401,20 @@ def weight_quant(tensor):
 
     Returns:
         Tuple of (quantized_int8_tensor, scale_tensor).
+
+    Raises:
+        ValueError: If tensor is not 2D or scale shape is invalid.
     """
-    assert tensor.dim() == 2, "Input tensor must be 2D"
+    if tensor.dim() != 2:
+        raise ValueError(f"Input tensor must be 2D, got dim={tensor.dim()}")
 
     abs_max = torch.abs(tensor).max(dim=1, keepdim=True)[0]
     scale = abs_max / INT8_QMAX
-    assert scale.shape == (tensor.shape[0], 1)
+    if scale.shape != (tensor.shape[0], 1):
+        raise ValueError(
+            "Scale shape mismatch: expected (%s, 1), got %s"
+            % (tensor.shape[0], scale.shape)
+        )
 
     quantized = torch.round(tensor / scale)
     quantized = torch.clamp(quantized, -INT8_QMAX, INT8_QMAX)

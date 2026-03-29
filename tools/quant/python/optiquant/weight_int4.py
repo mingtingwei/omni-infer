@@ -1,9 +1,9 @@
 import os
 import json
+import logging
 from glob import glob
 from tqdm import tqdm
 import torch
-import logging
 
 try:
     import torch_npu
@@ -15,9 +15,12 @@ from huggingface_hub import snapshot_download
 from optiquant.optiquant_utils import (
     QType,
     quant_ssz,
-    weight_quant,
     pack_4bit,
-    INT8_QMAX,
+    weight_quant,
+    build_disable_names,
+    build_disable_names_pangu,
+    NUM_LAYERS,
+    BF16_ELEMENT_SIZE,
 )
 
 # Logger configuration
@@ -35,63 +38,6 @@ if not logger.handlers:
 
 # Constants
 QUANT_PREFIX = "quant_model_weight_w4a8_dynamic"
-NUM_LAYERS = 62
-BF16_ELEMENT_SIZE = 2
-
-# Layers excluded from quantization
-DISABLED_LAYER_PATTERNS = [
-    "kv_b_proj.weight",
-    "mlp.gate.weight",
-    "mlp.gate.e_score_correction_bias",
-    "input_layernorm.weight",
-    "post_attention_layernorm.weight",
-    "pre_mlp_layernorm.weight",
-    "post_mlp_layernorm.weight",
-    "self_attn.q_a_layernorm.weight",
-    "self_attn.kv_a_layernorm.weight",
-]
-
-# Additional disabled patterns for Pangu mode
-PANGU_DISABLED_PATTERNS = [
-    "model.layers.61.embed_tokens.weight",
-    "model.layers.61.enorm.weight",
-    "model.layers.61.hnorm.weight",
-    "model.layers.61.eh_proj.weight",
-    "model.layers.61.shared_head.norm.weight",
-    "model.layers.61.shared_head.head.weight",
-]
-
-
-def build_disable_names():
-    """Build complete list of disabled layer names.
-
-    Returns:
-        List of layer names to exclude from quantization.
-    """
-    disable_names = []
-
-    for i in range(NUM_LAYERS):
-        for pattern in DISABLED_LAYER_PATTERNS:
-            disable_names.append("model.layers.%s.%s" % (i, pattern))
-
-    disable_names.extend([
-        "lm_head",
-        "model.norm.weight",
-        "model.embed_tokens.weight",
-    ])
-
-    return disable_names
-
-
-def build_disable_names_pangu():
-    """Build disabled names including Pangu-specific layers.
-
-    Returns:
-        List of layer names with Pangu additions.
-    """
-    disable_names = build_disable_names()
-    disable_names.extend(PANGU_DISABLED_PATTERNS)
-    return disable_names
 
 
 def weight_is_w4(weight_name):
@@ -149,7 +95,6 @@ def main(args, bf16_path, output_path, pangu_mode, model_name="deepseek-ai/DeepS
         model_index = json.load(f)
 
     weight_map = model_index["weight_map"]
-    scale_count = len([key for key in weight_map.keys() if key.endswith("_scale_inv")])
 
     safetensor_files = list(glob(os.path.join(bf16_path, "*.safetensors")))
     safetensor_files.sort()
@@ -160,7 +105,7 @@ def main(args, bf16_path, output_path, pangu_mode, model_name="deepseek-ai/DeepS
     quant_count = 0
     new_weight_map = {}
 
-    for safetensor_file in tqdm(safetensor_files):
+    for safetensor_file in tqdm(safetensor_files, des="INT4 quantization"):
         file_name = os.path.basename(safetensor_file)
         file_name = file_name.replace("model", QUANT_PREFIX)
 
@@ -173,11 +118,14 @@ def main(args, bf16_path, output_path, pangu_mode, model_name="deepseek-ai/DeepS
                 new_weight_map[weight_name] = file_name
                 continue
 
-            scale_inv_name = "%s_scale_inv" % weight_name
+            scale_inv_name = f"{weight_name}_scale_inv"
 
             if scale_inv_name in weight_map or pangu_mode:
-                assert weight.element_size() == BF16_ELEMENT_SIZE, \
-                    "Expected BF16 weight with element_size %s" % BF16_ELEMENT_SIZE
+                if weight.element_size() != BF16_ELEMENT_SIZE:
+                    raise ValueError(
+                        "Expected BF16 weight with element_size %s, got %s"
+                        % (BF16_ELEMENT_SIZE, weight.element_size())
+                    )
 
                 quant_count += 1
 
@@ -215,7 +163,6 @@ def main(args, bf16_path, output_path, pangu_mode, model_name="deepseek-ai/DeepS
         del state_dict
         del new_state_dict
 
-    logger.info("%s %s", quant_count, scale_count)
     logger.info("%s weights are quantized", quant_count)
 
     with open(model_index_file, "r") as f:
